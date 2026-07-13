@@ -8,6 +8,8 @@ from django.db import models
 from bitfield import BitField
 from glitchtip.base_models import CreatedModel
 
+from organizations_ext import scopes
+
 
 def generate_token():
     return binascii.hexlify(os.urandom(32)).decode()
@@ -24,24 +26,7 @@ class APIToken(CreatedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     label = models.CharField(max_length=255, blank=True)
     scopes = BitField(
-        flags=(
-            "project:read",
-            "project:write",
-            "project:admin",
-            "project:releases",
-            "team:read",
-            "team:write",
-            "team:admin",
-            "event:read",
-            "event:write",
-            "event:admin",
-            "org:read",
-            "org:write",
-            "org:admin",
-            "member:read",
-            "member:write",
-            "member:admin",
-        )
+        flags=(scopes.SCOPES)
     )
 
     def __str__(self):

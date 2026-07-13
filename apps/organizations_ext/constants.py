@@ -2,33 +2,14 @@ from typing import Literal, TypedDict
 
 from django.db import models
 
-Scopes = Literal[
-    "org:read",
-    "org:write",
-    "org:admin",
-    "org:integrations",
-    "member:read",
-    "member:write",
-    "member:admin",
-    "team:read",
-    "team:write",
-    "team:admin",
-    "project:read",
-    "project:write",
-    "project:admin",
-    "project:releases",
-    "event:read",
-    "event:write",
-    "event:admin",
-]
-
+from scopes import SCOPES
 
 class Role(TypedDict, total=False):
     id: str
     name: str
     desc: str
-    scopes: set[Scopes]
-    is_global: bool
+    scopes: set[SCOPES] # TODO RESOLVE THIS
+    is_global: bool 
 
 
 # Defines which scopes belong to which role
