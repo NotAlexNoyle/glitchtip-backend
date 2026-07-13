@@ -13,7 +13,7 @@ from apps.teams.models import Team
 from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
-from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.authentication import AuthHttpRequest, user_scope_cache_key
 from glitchtip.api.permissions import has_permission
 
 from .constants import OrganizationUserRole
@@ -340,6 +340,7 @@ async def update_organization_member(
     ):
         raise ValidationError("Organization must have at least one owner")
     await member.asave()
+    await cache.adelete(user_scope_cache_key(member_id, organization_slug))
     return member
 
 
@@ -378,6 +379,7 @@ async def set_organization_owner(
     # achange_owner saves a freshly loaded owner row; sync the cached
     # relation so resolve_is_owner reflects the change in the response.
     organization.owner.organization_user = new_owner
+    await cache.adelete(user_scope_cache_key(member_id, organization_slug))
     return new_owner
 
 
@@ -426,4 +428,6 @@ async def accept_invite(
         .prefetch_related("user__socialaccount_set")
         .aget()
     )
+
+    await cache.adelete(user_scope_cache_key(member_id, organization_slug))
     return {"accept_invite": payload.accept_invite, "org_user": org_user}

@@ -9,7 +9,7 @@ class Role(TypedDict, total=False):
     id: str
     name: str
     desc: str
-    scopes: set[Scopes] # TODO RESOLVE THIS
+    scopes: set[Scopes]
     is_global: bool 
 
 
