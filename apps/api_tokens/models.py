@@ -5,10 +5,9 @@ from typing import List
 from django.conf import settings
 from django.db import models
 
+from apps.organizations_ext.scopes import SCOPES
 from bitfield import BitField
 from glitchtip.base_models import CreatedModel
-
-from organizations_ext import scopes
 
 
 def generate_token():
@@ -26,7 +25,7 @@ class APIToken(CreatedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     label = models.CharField(max_length=255, blank=True)
     scopes = BitField(
-        flags=(scopes.SCOPES)
+        flags=(SCOPES)
     )
 
     def __str__(self):
