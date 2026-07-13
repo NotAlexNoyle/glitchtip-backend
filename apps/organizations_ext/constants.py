@@ -1,14 +1,15 @@
-from typing import Literal, TypedDict
+from typing import TypedDict
 
 from django.db import models
 
-from scopes import SCOPES
+from .scopes import Scopes
+
 
 class Role(TypedDict, total=False):
     id: str
     name: str
     desc: str
-    scopes: set[SCOPES] # TODO RESOLVE THIS
+    scopes: set[Scopes] # TODO RESOLVE THIS
     is_global: bool 
 
 
