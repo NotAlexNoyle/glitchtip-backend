@@ -5,19 +5,18 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.http import HttpRequest
 from ninja.security import HttpBearer
 from ninja.security import SessionAuth as BaseSessionAuth
-from django.core.cache import cache
 
 from apps.api_tokens.models import APIToken
-
-from apps.organizations_ext.scopes import Scopes
-from apps.organizations_ext.constants import ROLES
 from apps.organizations_ext.models import OrganizationUser
+from apps.organizations_ext.scopes import Scopes
 
 USER_SCOPE_CACHE_KEY = "user_scope:v1:"
 USER_SCOPE_CACHE_TTL = 300
+
 
 def user_scope_cache_key(user_id: int, org_slug: str) -> str:
     return f"{USER_SCOPE_CACHE_KEY}{user_id}:{org_slug}"
@@ -30,11 +29,10 @@ class Auth:
     data: Any = None
     scope: set[Scopes] = field(default_factory=set)
 
-
     async def resolve_scope(self, organization_slug: str | None = None) -> set[Scopes]:
-        """ 
+        """
         Pulls the source of permissions - scope - up into its own field
-        in Auth class. Depending on the type of Auth this generates the 
+        in Auth class. Depending on the type of Auth this generates the
         related scope.
         """
         if self.auth_type == "token":
@@ -53,7 +51,6 @@ class Auth:
         else:
             self.scope = set()
         return self.scope
-    
 
 
 class AuthHttpRequest(HttpRequest):

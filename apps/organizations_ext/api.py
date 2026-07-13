@@ -300,6 +300,8 @@ async def delete_organization_member(
     ):
         raise HttpError(403, "Forbidden")
     await org_user.adelete()
+    if org_user.user_id:
+        await cache.adelete(user_scope_cache_key(org_user.user_id, organization_slug))
 
     return Status(204, None)
 
@@ -340,7 +342,8 @@ async def update_organization_member(
     ):
         raise ValidationError("Organization must have at least one owner")
     await member.asave()
-    await cache.adelete(user_scope_cache_key(member_id, organization_slug))
+    if member.user_id:
+        await cache.adelete(user_scope_cache_key(member.user_id, organization_slug))
     return member
 
 
@@ -379,7 +382,6 @@ async def set_organization_owner(
     # achange_owner saves a freshly loaded owner row; sync the cached
     # relation so resolve_is_owner reflects the change in the response.
     organization.owner.organization_user = new_owner
-    await cache.adelete(user_scope_cache_key(member_id, organization_slug))
     return new_owner
 
 
@@ -429,5 +431,8 @@ async def accept_invite(
         .aget()
     )
 
-    await cache.adelete(user_scope_cache_key(member_id, organization_slug))
+    if org_user.user_id:
+        await cache.adelete(
+            user_scope_cache_key(org_user.user_id, org_user.organization.slug)
+        )
     return {"accept_invite": payload.accept_invite, "org_user": org_user}
