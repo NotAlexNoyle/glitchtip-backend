@@ -5,6 +5,7 @@ import uuid
 from typing import Union
 
 from asgiref.sync import async_to_sync
+from django.db.utils import IntegrityError
 from django.test import TransactionTestCase
 from django.utils import timezone
 from django_async_backend.db import async_connections
@@ -18,6 +19,17 @@ from ..schema import (
     IssueEventSchema,
     IssueTaskMessage,
 )
+
+
+def fake_integrity_error(sqlstate: str) -> IntegrityError:
+    """An IntegrityError chained the way Django raises it: ``__cause__``
+    is the driver exception carrying the psycopg-shaped ``sqlstate``
+    (both database drivers expose it). For faking copy_rows failures."""
+    cause = Exception(f"[{sqlstate}] integrity constraint violation")
+    cause.sqlstate = sqlstate
+    error = IntegrityError("integrity constraint violation")
+    error.__cause__ = cause
+    return error
 
 
 def list_to_envelope(data: list[dict]) -> str:

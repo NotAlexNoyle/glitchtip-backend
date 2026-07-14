@@ -71,6 +71,25 @@ class ProductExpandedPrice(Product):
 ProductExpandedPriceListResponse = StripeListResponse[ProductExpandedPrice]
 
 
+class Meter(BaseModel):
+    id: str
+    object: Literal["billing.meter"]
+    display_name: str
+    event_name: str
+    status: str
+
+
+MeterListResponse = StripeListResponse[Meter]
+
+
+class MeterEvent(BaseModel):
+    object: Literal["billing.meter_event"]
+    event_name: str
+    identifier: str
+    timestamp: int
+    payload: dict[str, str]
+
+
 class SubscriptionItem(BaseModel):
     id: str
     object: Literal["subscription_item"]
@@ -79,7 +98,7 @@ class SubscriptionItem(BaseModel):
     current_period_start: int
     metadata: dict[str, str]
     price: Price
-    quantity: int
+    quantity: int | None = None
     subscription: str
     tax_rates: list
 

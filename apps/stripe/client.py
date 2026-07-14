@@ -1,5 +1,7 @@
 import asyncio
+import json
 import random
+from decimal import Decimal
 from typing import Any, AsyncGenerator, Type, TypeAlias, TypeVar
 
 import aiohttp
@@ -8,9 +10,12 @@ from pydantic import BaseModel
 
 from apps.organizations_ext.models import Organization
 
-from .exceptions import StripeResourceNotFound
+from .exceptions import StripeError, StripeResourceNotFound
 from .schema import (
     Customer,
+    Meter,
+    MeterEvent,
+    MeterListResponse,
     PortalSession,
     Price,
     PriceListResponse,
@@ -21,6 +26,7 @@ from .schema import (
     Subscription,
     SubscriptionExpandCustomer,
     SubscriptionExpandCustomerResponse,
+    SubscriptionItem,
 )
 
 STRIPE_URL = "https://api.stripe.com/v1"
@@ -33,6 +39,12 @@ HEADERS = {
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 BASE_RETRY_DELAY = 0.5
+# Stripe calls run inline in worker tasks (the throttle sweep reports overage
+# per org sequentially, webhook handling fetches related objects), so bound them
+# tighter than the global 30s default: a slow Stripe response must not stall a
+# sweep. Per-request, so it overrides AIOHTTP_CONFIG's session default. This is
+# per attempt; _stripe_request retries up to MAX_RETRIES on 429/5xx.
+STRIPE_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 AIOTupleParams: TypeAlias = list[tuple[str, str]]
 AIODictParams: TypeAlias = dict[str, int | str | list[int | str]]
@@ -61,17 +73,14 @@ async def _stripe_request(method: str, url: str, **kwargs: Any) -> str:
     for attempt in range(MAX_RETRIES + 1):
         async with aiohttp.ClientSession(**settings.AIOHTTP_CONFIG) as session:
             async with session.request(
-                method, url, headers=HEADERS, **kwargs
+                method, url, headers=HEADERS, timeout=STRIPE_TIMEOUT, **kwargs
             ) as response:
                 if response.status == 200:
                     return await response.text()
                 if response.status == 404:
                     raise StripeResourceNotFound()
 
-                error_data = await response.json()
-                error_message = error_data.get("error", {}).get(
-                    "message", "Unknown error"
-                )
+                error = (await response.json()).get("error", {})
 
                 should_retry_header = response.headers.get("Stripe-Should-Retry")
                 if should_retry_header is not None:
@@ -80,14 +89,17 @@ async def _stripe_request(method: str, url: str, **kwargs: Any) -> str:
                     should_retry = response.status in RETRY_STATUSES
 
                 if not should_retry or attempt >= MAX_RETRIES:
-                    raise Exception(
-                        f"Stripe API Error: {response.status} - {error_message}"
+                    raise StripeError(
+                        error.get("message", "Unknown error"),
+                        status=response.status,
+                        type=error.get("type", ""),
+                        code=error.get("code", ""),
                     )
 
         delay = BASE_RETRY_DELAY * (2**attempt) + random.uniform(0, BASE_RETRY_DELAY)
         await asyncio.sleep(delay)
 
-    raise Exception("Stripe API Error: exhausted retries")
+    raise StripeError("exhausted retries", status=503)
 
 
 async def stripe_get(
@@ -258,3 +270,138 @@ async def fetch_subscription(id: str) -> Subscription:
 async def cancel_subscription(id: str) -> Subscription:
     response = await stripe_delete("subscriptions/" + id)
     return Subscription.model_validate_json(response)
+
+
+# --- Metered (overage) billing ---------------------------------------------
+# Modern usage-based billing: a Billing Meter aggregates reported usage events
+# per customer, and a tiered metered Price attached to it as a second
+# subscription item turns that usage into invoice line items.
+
+
+async def find_meter(event_name: str) -> Meter | None:
+    """Return the active Billing Meter for ``event_name``, if one exists."""
+    response = await stripe_get("billing/meters", {"status": "active", "limit": 100})
+    for meter in MeterListResponse.model_validate_json(response).data:
+        if meter.event_name == event_name:
+            return meter
+    return None
+
+
+async def create_meter(display_name: str, event_name: str) -> Meter:
+    """Create a sum-aggregation Billing Meter keyed by customer id.
+
+    Usage events carry ``payload[stripe_customer_id]`` and ``payload[value]``;
+    Stripe sums ``value`` per customer per billing period.
+    """
+    response = await stripe_post(
+        "billing/meters",
+        {
+            "display_name": display_name,
+            "event_name": event_name,
+            "default_aggregation[formula]": "sum",
+            "customer_mapping[type]": "by_id",
+            "customer_mapping[event_payload_key]": "stripe_customer_id",
+            "value_settings[event_payload_key]": "value",
+        },
+    )
+    return Meter.model_validate_json(response)
+
+
+async def create_product(
+    name: str, metadata: dict[str, str] | None = None, description: str = ""
+) -> str:
+    """Create a Stripe product, returning its id."""
+    data: dict = {"name": name}
+    if description:
+        data["description"] = description
+    for key, value in (metadata or {}).items():
+        data[f"metadata[{key}]"] = value
+    response = await stripe_post("products", data)
+    return json.loads(response)["id"]
+
+
+async def create_metered_price(
+    product_id: str,
+    meter_id: str,
+    tiers: list[tuple[int | None, str]],
+    nickname: str = "",
+    interval: str = "month",
+    currency: str = "usd",
+) -> Price:
+    """Create a graduated, metered Price backed by ``meter_id``.
+
+    ``tiers`` is the canonical ``(up_to_units, per_unit_usd_decimal)`` schedule
+    from settings; the final tier uses ``up_to=None`` for "and beyond". Stripe's
+    ``unit_amount_decimal`` is in the currency's minor unit (cents), so per-event
+    USD is multiplied by 100.
+    """
+    data: dict = {
+        "product": product_id,
+        "currency": currency,
+        "billing_scheme": "tiered",
+        "tiers_mode": "graduated",
+        "recurring[interval]": interval,
+        "recurring[usage_type]": "metered",
+        "recurring[meter]": meter_id,
+    }
+    if nickname:
+        data["nickname"] = nickname
+    for i, (up_to, rate) in enumerate(tiers):
+        data[f"tiers[{i}][up_to]"] = "inf" if up_to is None else str(up_to)
+        data[f"tiers[{i}][unit_amount_decimal]"] = str(Decimal(rate) * 100)
+    response = await stripe_post("prices", data)
+    return Price.model_validate_json(response)
+
+
+async def migrate_subscription_to_flexible(subscription_id: str) -> None:
+    """Migrate a classic-billing-mode subscription to flexible billing mode.
+
+    Metered prices require flexible billing mode. Migration is one-way and needs
+    a payment method on the customer. Re-running on an already-flexible
+    subscription is a harmless no-op, so any error here is real (e.g. no card on
+    file) and propagates to the caller.
+    """
+    await stripe_post(
+        f"subscriptions/{subscription_id}/migrate",
+        {"billing_mode[type]": "flexible"},
+    )
+
+
+async def add_subscription_item(
+    subscription_id: str, price_id: str
+) -> SubscriptionItem:
+    """Attach ``price_id`` to a subscription as an additional item."""
+    response = await stripe_post(
+        "subscription_items",
+        {"subscription": subscription_id, "price": price_id},
+    )
+    return SubscriptionItem.model_validate_json(response)
+
+
+async def delete_subscription_item(item_id: str) -> None:
+    """Remove a subscription item (e.g. when overage billing is disabled)."""
+    await stripe_delete(f"subscription_items/{item_id}")
+
+
+async def create_meter_event(
+    event_name: str,
+    customer_id: str,
+    value: int,
+    identifier: str,
+    timestamp: int | None = None,
+) -> MeterEvent:
+    """Report usage to a Billing Meter.
+
+    ``identifier`` deduplicates events server-side within Stripe's window, so a
+    retried report of the same delta is not double-counted.
+    """
+    data: dict = {
+        "event_name": event_name,
+        "payload[stripe_customer_id]": customer_id,
+        "payload[value]": str(value),
+        "identifier": identifier,
+    }
+    if timestamp is not None:
+        data["timestamp"] = timestamp
+    response = await stripe_post("billing/meter_events", data)
+    return MeterEvent.model_validate_json(response)

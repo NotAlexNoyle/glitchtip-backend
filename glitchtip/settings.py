@@ -14,6 +14,7 @@ import sys
 import warnings
 from datetime import timedelta
 
+import aiohttp
 import environ
 from corsheaders.defaults import default_headers
 from django.conf import global_settings
@@ -132,6 +133,10 @@ GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE = env.int(
     5 * 1024 * 1024,  # 5 MB
 )
 
+# Mean seconds between in-process gc.collect() + malloc_trim() passes that
+# return freed heap pages to the OS (see glitchtip/memory_trim.py). 0 disables.
+GLITCHTIP_MALLOC_TRIM_INTERVAL = env.int("GLITCHTIP_MALLOC_TRIM_INTERVAL", 3600)
+
 # Raw request body cap before view handling. For ingest endpoints gt_rust
 # enforces GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE on the decompressed bytes, but
 # the *compressed* body Django reads is smaller than that, so this only needs
@@ -210,6 +215,34 @@ GLITCHTIP_THROTTLE_CHECK_INTERVAL = env.int("GLITCHTIP_THROTTLE_CHECK_INTERVAL",
 SEARCH_MAX_LEXEMES = 3800  # Postgres search vectors will truncate after
 
 GLITCHTIP_FREE_TIER_EVENTS = env.int("GLITCHTIP_FREE_TIER_EVENTS", 1000)
+
+# Metered (overage) billing. Opt-in, off by default per organization. When an
+# org enables it, billable events above its plan quota are reported to a Stripe
+# Billing Meter and charged at the graduated rates below, up to a per-org dollar
+# cap. This schedule is the single source of truth: the provisioning command
+# builds the Stripe tiered price from it, and the throttle logic uses it to
+# convert between overage units and cost. Each tier is (up_to_overage_events,
+# per_event_usd_decimal); the final tier uses up_to=None for "and beyond".
+# Name of the Stripe Billing Meter that overage events are reported to. This is
+# the join key between the meter (created by the provisioning command) and the
+# meter events the throttle logic reports — Stripe matches events to a meter by
+# event_name and silently drops events with no matching meter. It is a constant,
+# not env-configurable, on purpose: every instance reporting to the same Stripe
+# account must agree on it, so one shared meter receives all overage. (Stripe
+# routes each event to the right customer by stripe_customer_id, not by which
+# instance sent it.) Re-provisioning a fresh meter is the only reason this would
+# ever change, and Stripe meter event_names are immutable once created.
+GLITCHTIP_OVERAGE_METER_EVENT_NAME = "glitchtip_overage_events"
+# Upper bound on a per-org overage spend cap, in cents. Guards against a
+# fat-fingered or malicious cap; also keeps the value within PositiveIntegerField
+# range. Default $10,000/cycle — a cap this high is effectively a "contact us"
+# case, so raise it per env for the rare very large customer.
+GLITCHTIP_OVERAGE_MAX_CAP_CENTS = env.int("GLITCHTIP_OVERAGE_MAX_CAP_CENTS", 1_000_000)
+GLITCHTIP_OVERAGE_TIERS: list[tuple[int | None, str]] = [
+    (400_000, "0.00015"),  # first 400k overage events: $0.15 / 1k
+    (2_000_000, "0.00010"),  # next, up to 2M total overage: $0.10 / 1k
+    (None, "0.00008"),  # beyond 2M overage: $0.08 / 1k
+]
 
 # Enable/disable logs feature. When False, log events are rejected at ingest.
 GLITCHTIP_ENABLE_LOGS = env.bool("GLITCHTIP_ENABLE_LOGS", True)
@@ -529,6 +562,12 @@ DEBUG_TOOLBAR_PANELS = [
 # Should GlitchTip trust and use proxy settings from environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
 PROXY_ENV = env.bool("PROXY_ENV", False)
 AIOHTTP_CONFIG = {
+    # Session-level default for every outbound aiohttp request that doesn't set
+    # its own. aiohttp's built-in default is 5 minutes — long enough for a hung
+    # upstream to tie up a worker — so cap it at a sane 30s. Call sites needing
+    # a different bound pass a per-request timeout, which overrides this: uptime
+    # checks use the per-monitor value and Stripe uses STRIPE_TIMEOUT.
+    "timeout": aiohttp.ClientTimeout(total=30),
     "headers": {"User-Agent": "GlitchTip/" + GLITCHTIP_VERSION},
     "trust_env": PROXY_ENV,
     "max_field_size": 16380,  # 2x default
@@ -820,6 +859,10 @@ if env.str("DATABASE_HOST", None):
 # Opt-in: set DATABASE_ENGINE=gt_rust.django_backend to run the ORM on the Rust
 # Postgres driver instead — one shared tokio pool serving sync + async, on the
 # same runtime as the valkey driver. Behavior is unchanged unless switched.
+# The Rust driver needs COPY ... FROM STDIN support for the ingest write path
+# (older builds fail loudly at the missing cursor.copy()) and ideally the
+# psycopg-shaped sqlstate diagnostics that ship alongside it — without them
+# the COPY conflict fallback falls back to message-prefix matching.
 DATABASE_ENGINE = env.str(
     "DATABASE_ENGINE", "django_async_backend.db.backends.postgresql"
 )
@@ -847,6 +890,14 @@ for db_config in DATABASES.values():
             "max_size": env.int("DATABASE_POOL_MAX_SIZE", 20),
             "timeout": env.int("DATABASE_POOL_TIMEOUT", 30),
         }
+        # Optional pooled-connection recycling horizon. A connection retains
+        # buffer memory sized to the largest message it ever carried;
+        # recycling bounds how long that lasts. Unset keeps the driver's
+        # default lifetime; drivers jitter the deadline to avoid reconnect
+        # stampedes.
+        _pool_max_lifetime = env.int("DATABASE_POOL_MAX_LIFETIME", 0)
+        if _pool_max_lifetime > 0:
+            options["pool"]["max_lifetime"] = _pool_max_lifetime
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

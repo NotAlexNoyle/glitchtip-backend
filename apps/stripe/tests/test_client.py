@@ -5,7 +5,7 @@ from aioresponses import aioresponses
 from django.test import TestCase
 
 from apps.stripe.client import STRIPE_URL, stripe_get, stripe_post
-from apps.stripe.exceptions import StripeResourceNotFound
+from apps.stripe.exceptions import StripeError, StripeResourceNotFound
 
 
 class StripeClientRetryTests(TestCase):
@@ -49,9 +49,9 @@ class StripeClientRetryTests(TestCase):
                 payload={"error": {"message": "do not retry"}},
                 headers={"Stripe-Should-Retry": "false"},
             )
-            with self.assertRaises(Exception) as ctx:
+            with self.assertRaises(StripeError) as ctx:
                 await stripe_get("customers/cus_test")
-        self.assertIn("429", str(ctx.exception))
+        self.assertEqual(ctx.exception.status, 429)
 
     async def test_stripe_get_raises_after_exhausting_retries(self):
         url = f"{STRIPE_URL}/customers/cus_test"
@@ -63,9 +63,9 @@ class StripeClientRetryTests(TestCase):
                     payload={"error": {"message": "still locked"}},
                     headers={"Stripe-Should-Retry": "true"},
                 )
-            with self.assertRaises(Exception) as ctx:
+            with self.assertRaises(StripeError) as ctx:
                 await stripe_get("customers/cus_test")
-        self.assertIn("429", str(ctx.exception))
+        self.assertEqual(ctx.exception.status, 429)
 
     async def test_stripe_get_raises_resource_not_found_without_retry(self):
         url = f"{STRIPE_URL}/customers/cus_test"

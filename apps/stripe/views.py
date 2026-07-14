@@ -28,16 +28,21 @@ from .models import (
     StripeSubscription,
 )
 from .schema import Customer, Price, Product, StripeEvent, Subscription
-from .utils import compute_cycle, unix_to_datetime
+from .utils import (
+    compute_cycle,
+    is_metered_price,
+    select_subscription_items,
+    unix_to_datetime,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def update_product(product: Product):
     metadata = product.metadata
-    if "events" not in metadata:
-        return
-    if metadata.get("product_type", "").lower() != "hosted":
+    product_type = metadata.get("product_type", "").lower()
+    is_overage = product_type == "overage"
+    if not is_overage and ("events" not in metadata or product_type != "hosted"):
         return
 
     await StripeProduct.objects.aupdate_or_create(
@@ -45,8 +50,9 @@ async def update_product(product: Product):
         defaults={
             "name": product.name,
             "description": product.description,
-            "events": metadata["events"],
+            "events": int(metadata.get("events", 0)),
             "is_public": metadata.get("is_public") == "true",
+            "is_overage": is_overage,
             "marketing_features": [
                 f["name"] for f in product.marketing_features if f.get("name")
             ],
@@ -55,27 +61,28 @@ async def update_product(product: Product):
 
 
 async def update_price(price: Price):
+    metered = is_metered_price(price)
+    # Metered prices have no flat unit_amount (cost lives in tiers); only flat
+    # prices require one. Either way the product must already be known locally.
     if (
-        not price.unit_amount
-        or not await StripeProduct.objects.filter(stripe_id=price.product).aexists()
-    ):
+        not price.unit_amount and not metered
+    ) or not await StripeProduct.objects.filter(stripe_id=price.product).aexists():
         return
 
     metadata = price.metadata or {}
-    no_throttle = metadata.get("no_throttle", "").lower() == "true"
-    is_public = metadata.get("is_public", "").lower() == "true"
+    recurring = price.recurring or {}
 
     await StripePrice.objects.aupdate_or_create(
         stripe_id=price.id,
         defaults={
             "product_id": price.product,
             "nickname": price.nickname or "",
-            "price": price.unit_amount / 100,
-            "no_throttle": no_throttle,
-            "is_public": is_public,
-            "interval": (
-                price.recurring.get("interval", "month") if price.recurring else "month"
-            ),
+            "price": price.unit_amount / 100 if price.unit_amount else 0,
+            "no_throttle": metadata.get("no_throttle", "").lower() == "true",
+            "is_public": metadata.get("is_public", "").lower() == "true",
+            "is_metered": metered,
+            "meter_id": recurring.get("meter") or "",
+            "interval": recurring.get("interval", "month"),
         },
     )
 
@@ -185,14 +192,16 @@ async def update_subscription(subscription: Subscription, request: HttpRequest):
     if not organization:
         return
 
-    if (price_id := subscription.items.data[0].price.id) is None:
+    # The base licensed item drives quota/cycle; a second metered item (if any)
+    # is the overage price. Don't assume items.data[0] is the base plan.
+    base_item, metered_item = select_subscription_items(subscription.items)
+    if base_item is None or base_item.price.id is None:
         return
+    price_id = base_item.price.id
 
-    current_period_start = unix_to_datetime(
-        subscription.items.data[0].current_period_start
-    )
-    current_period_end = unix_to_datetime(subscription.items.data[0].current_period_end)
-    price = subscription.items.data[0].price
+    current_period_start = unix_to_datetime(base_item.current_period_start)
+    current_period_end = unix_to_datetime(base_item.current_period_end)
+    price = base_item.price
     is_annual = bool(price.recurring and price.recurring.get("interval") == "year")
     cycle_start, cycle_end = compute_cycle(
         current_period_start, current_period_end, is_annual
@@ -211,6 +220,7 @@ async def update_subscription(subscription: Subscription, request: HttpRequest):
             "collection_method": subscription.collection_method,
             "subscription_cycle_start": cycle_start,
             "subscription_cycle_end": cycle_end,
+            "metered_item_id": metered_item.id if metered_item else "",
         },
     )
     if stripe_subscription.status in ACTIVE_SUBSCRIPTION_STATUSES:

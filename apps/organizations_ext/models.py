@@ -247,6 +247,16 @@ class Organization(SharedBaseModel, OrganizationBase):
         default=True,
         help_text="Default for whether projects should script IP Addresses",
     )
+    metered_billing_enabled = models.BooleanField(
+        default=False,
+        help_text="Opt-in: charge for billable events above plan quota via "
+        "Stripe metered billing, up to overage_spend_cap_cents.",
+    )
+    overage_spend_cap_cents = models.PositiveIntegerField(
+        default=0,
+        help_text="Max overage spend per billing cycle, in cents. Metered "
+        "billing stops reporting (and throttling resumes) once reached.",
+    )
     stripe_customer_id = models.CharField(max_length=28, blank=True)
     stripe_primary_subscription = models.ForeignKey(
         "stripe.StripeSubscription",

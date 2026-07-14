@@ -3,6 +3,7 @@
 Uses django-async-backend's native async cursor via ``async_connections``.
 """
 
+from collections.abc import Iterable
 from typing import Any
 
 from django_async_backend.db import async_connections
@@ -127,3 +128,89 @@ async def fetchall_unnest(
         return [], []
     columns = [list(c) for c in zip(*value_params)]
     return await fetchall(sql, columns, db_alias=db_alias)
+
+
+async def copy_rows(
+    table: str,
+    columns: list[str],
+    rows: Iterable[tuple],
+    db_alias: str = "default",
+) -> int:
+    """COPY ``rows`` into ``table`` (text format, streamed row-by-row).
+
+    Unlike a composed INSERT statement — which stages the entire batch in
+    the connection's libpq output buffer and permanently grows it to the
+    largest batch ever sent — COPY streams in small chunks, so connection
+    memory stays bounded regardless of batch size. It also skips composing
+    the batch into one SQL string in Python.
+
+    COPY cannot express ON CONFLICT: a conflicting row aborts the whole
+    batch (raised as ``django.db.IntegrityError``). Callers that need
+    conflict tolerance must catch it, confirm the conflict with
+    :func:`is_unique_violation`, and fall back to their INSERT path.
+    Must run in autocommit (the async-backend default) — inside a
+    transaction a failed COPY leaves it aborted, so a fallback INSERT
+    would fail too.
+
+    Runs on either database driver: both cursors expose the psycopg-shaped
+    ``copy()`` context manager with ``write_row()``. gt_rust additionally
+    exposes ``write_rows()``, which encodes the batch in Rust (C-API field
+    access, one Python↔Rust crossing per ~64 KiB chunk) — measurably less
+    CPU per batch than the per-row loop, so prefer it when present.
+    """
+    quoted = [table, *columns]
+    cols = ", ".join('"' + c.replace('"', '""') + '"' for c in quoted[1:])
+    stmt = 'COPY "' + table.replace('"', '""') + f'" ({cols}) FROM STDIN'
+    count = 0
+    async with await async_connections[db_alias].cursor() as cursor:
+        # Go straight to the driver cursor: the wrapper's attribute proxy
+        # doesn't wrap exceptions (handled here so callers see Django's
+        # IntegrityError), and the psycopg debug wrapper's ``copy``
+        # override is an async generator built for COPY TO iteration — it
+        # can't serve as the COPY FROM context manager.
+        with cursor.db.wrap_database_errors:
+            async with cursor.cursor.copy(stmt) as copy:
+                write_rows = getattr(copy, "write_rows", None)
+                if write_rows is not None:
+                    if not isinstance(rows, (list, tuple)):
+                        rows = list(rows)
+                    await write_rows(rows)
+                    count = len(rows)
+                else:
+                    for row in rows:
+                        await copy.write_row(row)
+                        count += 1
+    return count
+
+
+UNIQUE_VIOLATION = "23505"
+
+# Distinguishes "driver has no sqlstate attribute" (fall back to the
+# message prefix) from "attribute present but None" (a client-side
+# error — known non-conflict, fail closed).
+_SQLSTATE_MISSING = object()
+
+
+def is_unique_violation(exc: Exception) -> bool:
+    """True when a Django ``IntegrityError`` wraps a unique violation.
+
+    ``IntegrityError`` covers all of SQLSTATE class 23 — unique violation,
+    but also e.g. a missing partition (23514) or a foreign-key violation —
+    and only the unique violation is worth retrying through a
+    conflict-tolerant INSERT; the rest would fail identically. Both
+    database drivers expose the psycopg-shaped ``sqlstate`` attribute on
+    the underlying DB-API exception (Django chains it as ``__cause__``),
+    so this check is driver-agnostic.
+    """
+    cause = exc.__cause__
+    if cause is None:
+        return False
+    sqlstate = getattr(cause, "sqlstate", _SQLSTATE_MISSING)
+    if sqlstate is not _SQLSTATE_MISSING:
+        return sqlstate == UNIQUE_VIOLATION
+    # gt_rust builds that predate the structured ``sqlstate`` attribute
+    # still prefix every server error message with its SQLSTATE code, so
+    # an anchored prefix check keeps the fallback working there instead
+    # of silently failing whole batches on a genuine duplicate. (psycopg
+    # always has the attribute, so it never reaches this line.)
+    return str(cause).startswith(f"[{UNIQUE_VIOLATION}]")
