@@ -4,10 +4,13 @@ from ninja.errors import HttpError
 
 from .authentication import AuthHttpRequest
 
+def get_org_slug(kwargs: dict) -> str | None:
+    return kwargs.get("organization_slug")
+
 
 def has_permission(permissions: list[str]):
     """
-    Check scoped permissions. At this time only token authentication is checked.
+    Check scoped permissions.
 
     Example: @has_permission(["event:write", "event:admin"])
 
@@ -17,10 +20,10 @@ def has_permission(permissions: list[str]):
     def decorator(f):
         @wraps(f)
         async def decorated_function(request: AuthHttpRequest, *args, **kwargs):
-            if request.auth.auth_type == "token":
-                scopes = request.auth.data.get_scopes()
-                if not any(s in permissions for s in scopes):
-                    raise HttpError(403, "Permission denied")
+            scopes = await request.auth.resolve_scope(get_org_slug(kwargs)) 
+            logger.info("SCOPES: " + str(scopes))
+            if not any(s in permissions for s in scopes):
+                raise HttpError(403, "Permission denied")
             return await f(request, *args, **kwargs)
 
         return decorated_function
