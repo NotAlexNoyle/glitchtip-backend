@@ -11,19 +11,29 @@ from glitchtip.partition_manager import UUID7Helper
 from glitchtip.test_utils.test_case import APIPermissionTestCase, GlitchTipTestCaseMixin
 
 
-def get_list_issue_event_url(issue_id: int) -> str:
-    return reverse("api:list_issue_event", args=[issue_id])
-
-
-def get_issue_event_url(issue_id: int, event_id: str) -> str:
+def get_list_issue_event_url(organization_slug: str, issue_id: int) -> str:
     return reverse(
-        "api:get_issue_event",
-        kwargs={"issue_id": issue_id, "event_id": event_id},
+        "api:list_issue_event",
+        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
     )
 
 
-def get_latest_issue_event_url(issue_id: int) -> str:
-    return reverse("api:get_latest_issue_event", kwargs={"issue_id": issue_id})
+def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) -> str:
+    return reverse(
+        "api:get_issue_event",
+        kwargs={
+            "organization_slug": organization_slug,
+            "issue_id": issue_id,
+            "event_id": event_id,
+        },
+    )
+
+
+def get_latest_issue_event_url(organization_slug: str, issue_id: int) -> str:
+    return reverse(
+        "api:get_latest_issue_event",
+        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+    )
 
 
 def get_event_json_url(organization_slug: str, issue_id: int, event_id: str) -> str:
@@ -66,9 +76,10 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             issue_id=first_event.issue_id,
             id=UUID7Helper.from_datetime(now + timedelta(seconds=1)),
         )
-        url = get_list_issue_event_url(first_event.issue_id)
+        url = get_list_issue_event_url(self.organization.slug, first_event.issue_id)
 
-        with self.assertNumQueries(2):
+        # +1 org-membership lookup from the org-scoped path resolving scope
+        with self.assertNumQueries(3):
             res = self.client.get(url)
 
         self.assertEqual(res.headers.get("X-Hits"), "52")
@@ -100,9 +111,10 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             issue__project=self.project,
             issue_id=first_event.issue_id,
         )
-        url = get_list_issue_event_url(first_event.issue_id)
+        url = get_list_issue_event_url(self.organization.slug, first_event.issue_id)
 
-        with self.assertNumQueries(1):
+        # +1 org-membership lookup from the org-scoped path resolving scope
+        with self.assertNumQueries(2):
             res = self.client.get(url)
 
         self.assertEqual(res.headers.get("X-Hits"), "2")
@@ -131,15 +143,15 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             organization=org,
             id=UUID7Helper.from_datetime(now + timedelta(seconds=2)),
         )
-        url = get_issue_event_url(issue.id, "a" * 32)
+        url = get_issue_event_url(org.slug, issue.id, "a" * 32)
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 404)
 
-        url = get_issue_event_url(issue.id, latest_event.id)
+        url = get_issue_event_url(org.slug, issue.id, latest_event.id)
         res = await self.async_client.get(url)
         self.assertContains(res, latest_event.id.hex)
 
-        url = get_latest_issue_event_url(issue.id)
+        url = get_latest_issue_event_url(org.slug, issue.id)
         res = await self.async_client.get(url)
         event_details = res.json()
         self.assertEqual(event_details["id"], latest_event.id.hex)
@@ -155,7 +167,7 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             event_id=sentry_event_id,
             organization=self.organization,
         )
-        url = get_issue_event_url(issue.id, sentry_event_id)
+        url = get_issue_event_url(self.organization.slug, issue.id, sentry_event_id)
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["eventID"], sentry_event_id.hex)
@@ -188,14 +200,14 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             id=UUID7Helper.from_datetime(now + timedelta(seconds=3)),
         )
         await baker.amake("issue_events.IssueEvent", issue=issue)
-        url = get_issue_event_url(issue.id, event2.id)
+        url = get_issue_event_url(self.organization.slug, issue.id, event2.id)
         res = await self.async_client.get(url)
         event_details = res.json()
         self.assertEqual(event_details["nextEventID"], event3.id.hex)
         self.assertEqual(event_details["previousEventID"], event1.id.hex)
 
     async def test_authentication(self):
-        url = get_list_issue_event_url(1)
+        url = get_list_issue_event_url(self.organization.slug, 1)
         await self.async_client.alogout()
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 401)
@@ -215,7 +227,9 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
             organization=self.organization,
         )
 
-        self.list_url = get_list_issue_event_url(self.event.issue_id)
+        self.list_url = get_list_issue_event_url(
+            self.organization.slug, self.event.issue_id
+        )
         self.project_list_url = reverse(
             "api:list_project_issue_event",
             kwargs={
@@ -223,7 +237,9 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
                 "project_slug": self.project.slug,
             },
         )
-        self.detail_url = get_issue_event_url(self.event.issue_id, self.event.id)
+        self.detail_url = get_issue_event_url(
+            self.organization.slug, self.event.issue_id, self.event.id
+        )
         self.project_detail_url = reverse(
             "api:get_project_issue_event",
             kwargs={
@@ -232,7 +248,9 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
                 "event_id": self.event.id.hex,
             },
         )
-        self.latest_detail_url = get_latest_issue_event_url(self.event.issue_id)
+        self.latest_detail_url = get_latest_issue_event_url(
+            self.organization.slug, self.event.issue_id
+        )
         self.event_json_url = get_event_json_url(
             self.organization.slug, self.event.issue_id, self.event.id
         )
@@ -272,7 +290,10 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
 
         self.list_url = reverse(
             "api:list_comments",
-            kwargs={"issue_id": self.issue.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+            },
         )
 
     def test_list(self):
@@ -286,7 +307,10 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         data = {"data": {"text": "Test"}}
         url = reverse(
             "api:add_comment",
-            kwargs={"issue_id": self.issue.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+            },
         )
         self.assertPostReqStatusCode(url, data, 403)
 
@@ -297,7 +321,11 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         self.auth_token.add_permissions(["event:read", "event:write"])
         url = reverse(
             "api:delete_comment",
-            kwargs={"issue_id": self.issue.id, "comment_id": self.comment.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+                "comment_id": self.comment.id,
+            },
         )
         self.assertDeleteReqStatusCode(url, 403)
 
@@ -309,7 +337,11 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         data = {"data": {"text": "Test"}}
         url = reverse(
             "api:update_comment",
-            kwargs={"issue_id": self.issue.id, "comment_id": self.comment.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+                "comment_id": self.comment.id,
+            },
         )
         self.assertPutReqStatusCode(url, data, 403)
 

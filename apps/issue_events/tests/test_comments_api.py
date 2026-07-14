@@ -10,7 +10,13 @@ class CommentsApiTestCase(GlitchTipTestCase):
         self.create_user_and_project()
         self.async_client.force_login(self.user)
         self.issue = baker.make("issue_events.Issue", project=self.project)
-        self.url = reverse("api:list_comments", kwargs={"issue_id": self.issue.id})
+        self.url = reverse(
+            "api:list_comments",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+            },
+        )
 
     async def test_comment_creation(self):
         data = {"data": {"text": "Test"}}
@@ -25,7 +31,10 @@ class CommentsApiTestCase(GlitchTipTestCase):
 
         url = reverse(
             "api:list_comments",
-            kwargs={"issue_id": not_my_issue.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": not_my_issue.id,
+            },
         )
         res = await self.async_client.post(url, data, content_type="application/json")
         self.assertEqual(res.status_code, 400)
@@ -45,7 +54,13 @@ class CommentsApiTestCase(GlitchTipTestCase):
         res = await self.async_client.get(self.url)
         self.assertContains(res, comments[2].text)
 
-        url = reverse("api:list_comments", kwargs={"issue_id": not_my_issue.id})
+        url = reverse(
+            "api:list_comments",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": not_my_issue.id,
+            },
+        )
         res = await self.async_client.get(url)
         self.assertEqual(len(res.json()), 0)
 
@@ -71,7 +86,11 @@ class CommentsApiTestCase(GlitchTipTestCase):
         )
         url = reverse(
             "api:update_comment",
-            kwargs={"issue_id": self.issue.id, "comment_id": comment.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+                "comment_id": comment.id,
+            },
         )
         data = {"data": {"text": "Test"}}
 
@@ -87,7 +106,11 @@ class CommentsApiTestCase(GlitchTipTestCase):
         )
         url = reverse(
             "api:delete_comment",
-            kwargs={"issue_id": self.issue.id, "comment_id": comment.id},
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+                "comment_id": comment.id,
+            },
         )
         await self.async_client.delete(url)
         res = await self.async_client.get(self.url)

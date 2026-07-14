@@ -328,6 +328,16 @@ class Organization(SharedBaseModel, OrganizationBase):
             self._org_owner_model.objects.create(
                 organization=self, organization_user=org_user
             )
+        # Membership just changed; drop any stale scope cache so a resolve that
+        # ran before the user joined (and cached an empty scope set) can't keep
+        # them locked out for the cache TTL. Mirrors the invalidation the member
+        # role-update/remove endpoints already do. Imported locally because
+        # glitchtip.api.authentication imports this module.
+        from django.core.cache import cache
+
+        from glitchtip.api.authentication import user_scope_cache_key
+
+        cache.delete(user_scope_cache_key(user.id, self.slug))
         return org_user
 
     async def aadd_user(self, user, role=OrganizationUserRole.MEMBER):
@@ -340,6 +350,12 @@ class Organization(SharedBaseModel, OrganizationBase):
             await self._org_owner_model.objects.acreate(
                 organization=self, organization_user=org_user
             )
+        # See add_user: invalidate any stale scope cache on join.
+        from django.core.cache import cache
+
+        from glitchtip.api.authentication import user_scope_cache_key
+
+        await cache.adelete(user_scope_cache_key(user.id, self.slug))
         return org_user
 
     @property

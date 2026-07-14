@@ -20,8 +20,7 @@ def has_permission(permissions: list[str]):
     def decorator(f):
         @wraps(f)
         async def decorated_function(request: AuthHttpRequest, *args, **kwargs):
-            scopes = await request.auth.resolve_scope(get_org_slug(kwargs)) 
-            logger.info("SCOPES: " + str(scopes))
+            scopes = await request.auth.resolve_scope(get_org_slug(kwargs))
             if not any(s in permissions for s in scopes):
                 raise HttpError(403, "Permission denied")
             return await f(request, *args, **kwargs)

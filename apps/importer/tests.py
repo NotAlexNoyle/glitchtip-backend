@@ -68,34 +68,37 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         self.organization.slug = self.org_name
         self.organization.save()
         self.set_mocks(m)
-        url = reverse("api:importer")
+        url = reverse("api:importer", kwargs={"organization_slug": self.org_name})
         data = {
             "url": self.url,
             "authToken": self.auth_token,
-            "organizationSlug": self.org_name,
         }
         res = self.client.post(url, data, content_type="application/json")
         self.assertEqual(res.status_code, 200)
         self.assertTrue(Team.objects.filter(slug="team").exists())
 
     @aioresponses()
-    async def test_invalid_org(self, m):
+    async def test_insufficient_scope(self, m):
+        """Import is org:admin (owner) scoped; anything less resolves to 403."""
         await sync_to_async(self.create_logged_in_user)()
         await self.async_client.aforce_login(self.user)
-        url = reverse("api:importer")
-        data = {
-            "url": self.url,
-            "authToken": self.auth_token,
-            "organizationSlug": "foo",
-        }
-        res = await self.async_client.post(url, data)
-        self.assertEqual(res.status_code, 400)
+        data = {"url": self.url, "authToken": self.auth_token}
+
+        # Org the caller has no membership in at all -> empty scope -> 403.
+        url = reverse("api:importer", kwargs={"organization_slug": "foo"})
+        res = await self.async_client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 403)
+
         other_user = await baker.amake("users.User")
         other_org = await baker.amake("Organization", name="foo")
+        # First user of an org is forced to OWNER; other_user owns other_org.
         await other_org.aadd_user(other_user)
-        res = await self.async_client.post(url, data)
-        self.assertEqual(res.status_code, 400)
+        url = reverse("api:importer", kwargs={"organization_slug": other_org.slug})
+        # Still not a member of other_org -> 403.
+        res = await self.async_client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 403)
+
+        # Joined as a plain member (default role) -> lacks org:admin -> 403.
         await other_org.aadd_user(self.user)
-        m.get(self.url + "api/0/", payload={"user": {"username": "foo"}})
-        res = await self.async_client.post(url, data)
-        self.assertEqual(res.status_code, 400)
+        res = await self.async_client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 403)

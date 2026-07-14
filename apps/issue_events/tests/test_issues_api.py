@@ -24,13 +24,16 @@ from ..models import Issue, IssueIndex
 logger = logging.getLogger(__name__)
 
 
-def get_issue_url(issue_id: int) -> str:
-    return reverse("api:get_issue", kwargs={"issue_id": issue_id})
+def get_issue_url(organization_slug: str, issue_id: int) -> str:
+    return reverse(
+        "api:get_issue",
+        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+    )
 
 
 def get_organization_issue_url(organization_slug: str, issue_id: int) -> str:
     return reverse(
-        "api:update_organization_issue",
+        "api:update_issue",
         kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
     )
 
@@ -60,7 +63,7 @@ class IssueAPITestCase(GlitchTestCase):
         await baker.amake("issue_events.Comment", issue=issue, _quantity=3)
         url = reverse(
             "api:get_issue",
-            kwargs={"issue_id": issue.id},
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
         )
 
         res = await self.async_client.get(url)
@@ -90,7 +93,10 @@ class IssueAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse("api:get_issue", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:get_issue",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         data = res.json()
         self.assertIsNotNone(data.get("firstRelease"))
@@ -102,7 +108,10 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake(
             "issue_events.Issue", project=self.project, short_id=1
         )
-        url = reverse("api:get_issue", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:get_issue",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         data = res.json()
         self.assertIsNone(data.get("firstRelease"))
@@ -721,7 +730,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"status": "resolved"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk),
+            get_issue_url(self.organization.slug, issue.pk),
             data,
             content_type="application/json",
         )
@@ -740,7 +749,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"status": "resolved", "statusDetails": {"inRelease": "1.0.0"}}
         res = await self.async_client.put(
-            get_issue_url(issue.pk),
+            get_issue_url(self.organization.slug, issue.pk),
             data,
             content_type="application/json",
         )
@@ -766,7 +775,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"status": "resolved", "statusDetails": {"inNextRelease": True}}
         res = await self.async_client.put(
-            get_issue_url(issue.pk),
+            get_issue_url(self.organization.slug, issue.pk),
             data,
             content_type="application/json",
         )
@@ -789,7 +798,10 @@ class IssueAPITestCase(GlitchTestCase):
             status=EventStatus.RESOLVED,
             resolved_in_release=release,
         )
-        url = reverse("api:get_issue", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:get_issue",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         data = res.json()
         self.assertEqual(data["statusDetails"], {"inRelease": "1.0.0"})
@@ -807,7 +819,10 @@ class IssueAPITestCase(GlitchTestCase):
             short_id=1,
             last_release=release,
         )
-        url = reverse("api:get_issue", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:get_issue",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         data = res.json()
         self.assertIsNotNone(data.get("lastRelease"))
@@ -828,7 +843,7 @@ class IssueAPITestCase(GlitchTestCase):
         )
         data = {"status": "unresolved"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk),
+            get_issue_url(self.organization.slug, issue.pk),
             data,
             content_type="application/json",
         )
@@ -841,10 +856,14 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         not_my_issue = await baker.amake("issue_events.Issue")
 
-        res = await self.async_client.delete(get_issue_url(issue.id))
+        res = await self.async_client.delete(
+            get_issue_url(self.organization.slug, issue.id)
+        )
         self.assertEqual(res.status_code, 204)
 
-        res = await self.async_client.delete(get_issue_url(not_my_issue.id))
+        res = await self.async_client.delete(
+            get_issue_url(self.organization.slug, not_my_issue.id)
+        )
         self.assertEqual(res.status_code, 404)
 
     async def test_organizations_issue_update(self):
@@ -950,7 +969,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": f"user:{self.user.id}"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 200)
         await issue.arefresh_from_db()
@@ -965,7 +984,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": self.user.email}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 200)
         await issue.arefresh_from_db()
@@ -975,7 +994,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": f"team:{self.team.slug}"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 200)
         await issue.arefresh_from_db()
@@ -993,7 +1012,7 @@ class IssueAPITestCase(GlitchTestCase):
         )
         data = {"assignedTo": None}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 200)
         await issue.arefresh_from_db()
@@ -1009,7 +1028,7 @@ class IssueAPITestCase(GlitchTestCase):
         )
         data = {"assignedTo": f"user:{self.user.id}"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 200)
         await issue.arefresh_from_db()
@@ -1034,7 +1053,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": f"user:{other_user.id}"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 404)
         await issue.arefresh_from_db()
@@ -1045,7 +1064,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": f"team:{other_team.slug}"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 404)
 
@@ -1053,7 +1072,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": "nobody@nowhere.invalid"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 404)
 
@@ -1068,7 +1087,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": pending.email}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 404)
 
@@ -1076,7 +1095,7 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         data = {"assignedTo": "user:notanumber"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 400)
 
@@ -1087,7 +1106,7 @@ class IssueAPITestCase(GlitchTestCase):
         )
         data = {"assignedTo": f"user:{self.user.id}"}
         res = await self.async_client.put(
-            get_issue_url(issue.pk), data, content_type="application/json"
+            get_issue_url(self.organization.slug, issue.pk), data, content_type="application/json"
         )
         self.assertEqual(res.status_code, 200)
         await arefresh_issue(issue)
@@ -1284,7 +1303,10 @@ class IssueCommitsAPITestCase(GlitchTestCase):
         issue = await baker.amake(
             "issue_events.Issue", project=self.project, short_id=1
         )
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:list_issue_commits",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
@@ -1299,7 +1321,10 @@ class IssueCommitsAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:list_issue_commits",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
@@ -1330,7 +1355,10 @@ class IssueCommitsAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:list_issue_commits",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -1341,7 +1369,10 @@ class IssueCommitsAPITestCase(GlitchTestCase):
         self.assertEqual(data[1]["id"], "def456")
 
     async def test_list_issue_commits_not_found(self):
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": 99999})
+        url = reverse(
+            "api:list_issue_commits",
+            kwargs={"organization_slug": self.organization.slug, "issue_id": 99999},
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 404)
 
@@ -1372,7 +1403,13 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
         self.async_client.force_login(self.user)
 
     def get_url(self, issue_id: int) -> str:
-        return reverse("api:list_issue_tags", kwargs={"issue_id": issue_id})
+        return reverse(
+            "api:list_issue_tags",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": issue_id,
+            },
+        )
 
     async def test_issue_tags(self):
         issue = await baker.amake("issue_events.Issue", project=self.project)
@@ -1514,7 +1551,7 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
         )
 
         url = self.get_url(issue.id)
-        with self.assertNumQueries(2):  # Includes many auth related queries
+        with self.assertNumQueries(3):  # +1 org-membership lookup from org-scoped path; many auth related queries
             start = timer()
             self.client.get(url)
             end = timer()
