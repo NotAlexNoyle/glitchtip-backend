@@ -73,8 +73,8 @@ class ScopeBitStabilityTests(SimpleTestCase):
     def test_known_token_masks_decode_unchanged(self):
         """Realistic whole-token masks still decode to their original scope set."""
         for maskLiteral, expected in self.LEGACY_MASK_FIXTURES.items():
-            with self.subTest(mask=mask):
-                self.assertEqual(self.decode(mask), expected)
+            with self.subTest(mask=maskLiteral):
+                self.assertEqual(self.decode(maskLiteral), expected)
 
     def test_legacy_masks_never_gain_the_appended_scope(self):
         """
