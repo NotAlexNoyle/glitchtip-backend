@@ -51,7 +51,6 @@ GET /api/0/teams/{organization_slug}/{team_slug}/members/ (Not documented in sen
 
 @router.get("organizations/", response=list[OrganizationSchema], by_alias=True)
 @paginate
-@has_permission(["org:read", "org:write", "org:admin"])
 async def list_organizations(
     request: AuthHttpRequest,
     response: HttpResponse,
@@ -79,7 +78,6 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
 
 
 @router.post("organizations/", response={201: OrganizationDetailSchema}, by_alias=True)
-@has_permission(["org:write", "org:admin"])
 async def create_organization(request: AuthHttpRequest, payload: OrganizationInSchema):
     """
     Create new organization
