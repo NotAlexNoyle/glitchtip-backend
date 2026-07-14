@@ -1,6 +1,7 @@
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
+from django.core.cache import cache
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
@@ -38,6 +39,7 @@ class ProjectsAPITestCase(TestCase):
         )
 
     def setUp(self):
+        cache.clear()
         self.client.force_login(self.user)
         self.async_client.force_login(self.user)
 
@@ -198,6 +200,7 @@ class ProjectsAPITestCase(TestCase):
 
 class TeamProjectsAPITestCase(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = baker.make("users.user")
         self.organization = baker.make("organizations_ext.Organization")
         self.organization.add_user(self.user, OrganizationUserRole.ADMIN)

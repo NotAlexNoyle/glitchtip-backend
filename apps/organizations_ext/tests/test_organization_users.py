@@ -26,6 +26,7 @@ class OrganizationUsersTestCase(TestCase):
         )
 
     def setUp(self):
+        cache.clear()
         self.client.force_login(self.user)
         self.async_client.force_login(self.user)
 

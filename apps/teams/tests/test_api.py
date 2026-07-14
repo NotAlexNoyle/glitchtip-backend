@@ -1,5 +1,6 @@
 from django.test import TestCase
 from django.urls import reverse
+from django.core.cache import cache
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
@@ -9,6 +10,7 @@ from ..models import Team
 
 class TeamAPITestCase(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = baker.make("users.user")
         self.organization = baker.make("organizations_ext.Organization")
         self.org_user = self.organization.add_user(self.user)
