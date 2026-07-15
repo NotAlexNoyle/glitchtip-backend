@@ -227,9 +227,10 @@ async def create_stripe_session(
     else:
         customer = await create_customer(organization)
         customer_id = customer.id
-    # Ensure price exists
+    # Ensure the price exists and is a base plan; the metered overage price is
+    # attached via configure_overage, never sold through checkout.
     price_id = payload.price
-    await aget_object_or_404(StripePrice, stripe_id=price_id)
+    await aget_object_or_404(StripePrice, stripe_id=price_id, is_metered=False)
     return await create_session(price_id, customer_id, organization_slug)
 
 
@@ -264,8 +265,13 @@ async def stripe_create_subscription(request: AuthHttpRequest, payload: Subscrip
         organization_users__role=OrganizationUserRole.OWNER,
         organization_users__user=request.auth.user_id,
     )
+    # is_metered excludes the overage price, which also stores price=0 (its
+    # cost lives in tiers) but is never a valid base plan.
     price = await aget_object_or_404(
-        StripePrice.objects.select_related("product"), stripe_id=payload.price, price=0
+        StripePrice.objects.select_related("product"),
+        stripe_id=payload.price,
+        price=0,
+        is_metered=False,
     )
     if organization.stripe_customer_id:
         customer_id = organization.stripe_customer_id
@@ -548,9 +554,11 @@ async def configure_overage(
 ):
     """Enable/disable metered overage billing and set the spend cap (owner-only).
 
-    Enabling attaches the metered overage price as a second subscription item;
-    disabling removes it. Either way a throttle re-check is enqueued so the new
-    headroom (or block) takes effect promptly.
+    Enabling attaches the metered overage price as a second subscription item.
+    Disabling only clears the flag: the item stays attached (dormant, billing
+    zero) so a re-enable within the same cycle can't re-bill reported usage.
+    Either way a throttle re-check is enqueued so the new headroom (or block)
+    takes effect promptly.
     """
     org = await aget_object_or_404(
         Organization.objects.select_related(

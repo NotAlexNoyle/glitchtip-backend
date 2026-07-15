@@ -126,9 +126,7 @@ class OverageAPITestCase(TestCase):
 
     def test_enable_card_error_returns_402(self):
         # A declined card surfaces Stripe's message to the owner, not a 500.
-        declined = StripeError(
-            "Your card was declined.", status=402, type="card_error"
-        )
+        declined = StripeError("Your card was declined.", status=402, type="card_error")
         with (
             patch("apps.stripe.api.fetch_subscription", new_callable=AsyncMock),
             patch(

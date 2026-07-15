@@ -25,11 +25,17 @@ class CustomSocialAccountAdapter(AsyncDefaultSocialAccountAdapter):
     def open_http_session(self):
         # Match the outbound-HTTP behavior the sync stack got from `requests`
         # (which trusts proxy env vars by default) and stamp our User-Agent.
+        # AIOHTTP_CONFIG carries a generic 30s session timeout; social-auth
+        # calls override it with allauth's own REQUESTS_TIMEOUT, the same bound
+        # the sync `requests` path used. Spread the shared config first so this
+        # timeout wins the key rather than colliding with it.
         return aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(
-                total=socialaccount_app_settings.REQUESTS_TIMEOUT
-            ),
-            **settings.AIOHTTP_CONFIG,
+            **{
+                **settings.AIOHTTP_CONFIG,
+                "timeout": aiohttp.ClientTimeout(
+                    total=socialaccount_app_settings.REQUESTS_TIMEOUT
+                ),
+            },
         )
 
 

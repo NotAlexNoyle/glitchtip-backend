@@ -3,6 +3,7 @@ import logging
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.cache import cache
+from django.db.models import Q
 from django.tasks import task
 
 from apps.issue_events.maintenance import (
@@ -16,6 +17,7 @@ from apps.projects.models import (
     LogProjectHourlyStatistic,
     TransactionEventProjectHourlyStatistic,
 )
+from apps.stripe.exceptions import StripeError
 from apps.uptime.models import MonitorCheck, UptimeCheckHourlyStatistic
 
 from .email import InvitationEmail, ThrottleNoticeEmail
@@ -89,7 +91,15 @@ async def _report_overage(
     Meter events sum per cycle, so we only send the increase since the last
     report; the counter resets on cycle rollover. A per-subscription cache lock
     serializes concurrent throttle checks so they can't report overlapping
-    deltas under different idempotency keys and over-charge.
+    deltas and over-charge.
+
+    Ordering makes every failure window err toward undercharging: the counter
+    is advanced *before* the send (so the DB always bounds what Stripe may have
+    recorded — a crash can strand an unbilled delta, never re-bill one) and
+    rolled back only on a definite send failure. The meter-event identifier is
+    keyed on the base counter the delta was computed from, so a re-send racing
+    a stale writer carries the same identifier and Stripe's uniqueness window
+    absorbs it.
     """
     from apps.stripe.client import create_meter_event
     from apps.stripe.models import StripeSubscription
@@ -113,7 +123,8 @@ async def _report_overage(
                 await _persist_overage(sub, cycle_start, billable_units)
             return
 
-        identifier = f"{sub.stripe_id}:{cycle_start.isoformat()}:{billable_units}"
+        await _persist_overage(sub, cycle_start, billable_units)
+        identifier = f"{sub.stripe_id}:{cycle_start.isoformat()}:{reported}"
         try:
             await create_meter_event(
                 settings.GLITCHTIP_OVERAGE_METER_EVENT_NAME,
@@ -121,24 +132,66 @@ async def _report_overage(
                 delta,
                 identifier,
             )
+        except StripeError as e:
+            logger.exception(
+                "Overage meter event failed for org %s (status=%s code=%s)",
+                org.id,
+                e.status,
+                e.code,
+            )
+            # A 400 (e.g. duplicate identifier: a previous send from this base
+            # was recorded) can never succeed on retry — keep the advanced
+            # counter, which at worst undercharges. Other statuses are
+            # transient: roll back so the next check retries the same delta
+            # under the same identifier.
+            if e.status != 400:
+                await _rollback_overage(sub, cycle_start, billable_units, reported)
         except Exception:
             logger.exception("Failed to report overage meter event for org %s", org.id)
-            return
-
-        await _persist_overage(sub, cycle_start, billable_units)
+            await _rollback_overage(sub, cycle_start, billable_units, reported)
     finally:
         await cache.adelete(lock_key)
 
 
 async def _persist_overage(sub, cycle_start, units_reported: int) -> None:
-    """Atomically persist the overage counter + cycle anchor for ``sub``."""
+    """Advance the overage counter + cycle anchor for ``sub``, never regressing.
+
+    A stale writer (expired lock) regressing the counter would recompute later
+    deltas from too low a base and re-bill units Stripe already recorded, so
+    within a cycle the counter only moves forward; a decrease is legitimate
+    only when the cycle anchor changes (rollover reset).
+    """
     from apps.stripe.models import StripeSubscription
 
-    await StripeSubscription.objects.filter(stripe_id=sub.stripe_id).aupdate(
-        overage_units_reported=units_reported, overage_period_start=cycle_start
-    )
-    sub.overage_units_reported = units_reported
-    sub.overage_period_start = cycle_start
+    updated = await StripeSubscription.objects.filter(
+        Q(stripe_id=sub.stripe_id)
+        & (
+            Q(overage_period_start__isnull=True)
+            | ~Q(overage_period_start=cycle_start)
+            | Q(overage_units_reported__lt=units_reported)
+        )
+    ).aupdate(overage_units_reported=units_reported, overage_period_start=cycle_start)
+    if updated:
+        sub.overage_units_reported = units_reported
+        sub.overage_period_start = cycle_start
+
+
+async def _rollback_overage(sub, cycle_start, sent_target: int, base: int) -> None:
+    """Best-effort revert of a write-ahead counter after a failed send.
+
+    Conditional on the counter still holding our value, so a concurrent writer
+    that advanced further isn't stomped. If the revert itself is lost, the
+    stranded delta goes unbilled rather than double-billed.
+    """
+    from apps.stripe.models import StripeSubscription
+
+    updated = await StripeSubscription.objects.filter(
+        stripe_id=sub.stripe_id,
+        overage_period_start=cycle_start,
+        overage_units_reported=sent_target,
+    ).aupdate(overage_units_reported=base)
+    if updated:
+        sub.overage_units_reported = base
 
 
 async def _check_and_update_throttle(org: Organization):

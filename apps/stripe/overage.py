@@ -73,3 +73,45 @@ def units_for_budget(cap_cents: int) -> int:
         budget -= Decimal(capacity) * rate
         prev = up_to
     return units
+
+
+def tier_problems(raw_price: dict) -> list[str]:
+    """Differences between a Stripe price and the settings tier schedule.
+
+    ``raw_price`` is a raw Stripe API price dict with ``tiers`` expanded. Used
+    by ``provision_overage_billing --verify``: the cost/cap math above trusts
+    the settings schedule, so a hand-provisioned live price that drifts from it
+    can bill an org past its advertised spend cap.
+    """
+    problems = []
+    if raw_price.get("tiers_mode") != "graduated":
+        problems.append(
+            f"tiers_mode is {raw_price.get('tiers_mode')!r}, expected 'graduated'."
+        )
+    if raw_price.get("currency") != "usd":
+        problems.append(f"currency is {raw_price.get('currency')!r}, expected 'usd'.")
+    tiers = raw_price.get("tiers") or []
+    # Stripe's unit_amount_decimal is in cents; the schedule is per-event USD.
+    expected = [(up_to, rate * 100) for up_to, rate in _tiers()]
+    actual = [
+        (tier.get("up_to"), Decimal(tier.get("unit_amount_decimal") or "0"))
+        for tier in tiers
+    ]
+    if len(actual) != len(expected):
+        problems.append(
+            f"{len(actual)} tiers in Stripe vs {len(expected)} in settings."
+        )
+    for i, ((up_to, cents), (live_up_to, live_cents)) in enumerate(
+        zip(expected, actual)
+    ):
+        if up_to != live_up_to or cents != live_cents:
+            problems.append(
+                f"tier {i}: Stripe has (up_to={live_up_to}, {live_cents} cents/unit),"
+                f" settings has (up_to={up_to}, {cents} cents/unit)."
+            )
+    for i, tier in enumerate(tiers):
+        # Cost/cap math above is per-unit only; a flat amount would invoice
+        # beyond what units_for_budget accounts for.
+        if tier.get("flat_amount") or tier.get("flat_amount_decimal"):
+            problems.append(f"tier {i} has a flat_amount; only per-unit is supported.")
+    return problems

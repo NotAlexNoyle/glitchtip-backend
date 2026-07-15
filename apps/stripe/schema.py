@@ -90,6 +90,46 @@ class MeterEvent(BaseModel):
     payload: dict[str, str]
 
 
+class ThinEventRelatedObject(BaseModel):
+    id: str
+    type: str
+    url: str = ""
+
+
+class MeterErrorSample(BaseModel):
+    error_message: str = ""
+
+
+class MeterErrorType(BaseModel):
+    code: str = ""
+    error_count: int = 0
+    sample_errors: list[MeterErrorSample] = []
+
+
+class MeterErrorReason(BaseModel):
+    error_count: int = 0
+    error_types: list[MeterErrorType] = []
+
+
+class MeterErrorData(BaseModel):
+    developer_message_summary: str = ""
+    reason: MeterErrorReason | None = None
+
+
+class ThinEvent(BaseModel):
+    """A v2 event delivered to an event destination.
+
+    With the "thin" payload style ``data`` is omitted and must be fetched via
+    the v2 events API; the "snapshot" style inlines it.
+    """
+
+    id: str
+    object: Literal["v2.core.event"]
+    type: str
+    data: MeterErrorData | None = None
+    related_object: ThinEventRelatedObject | None = None
+
+
 class SubscriptionItem(BaseModel):
     id: str
     object: Literal["subscription_item"]

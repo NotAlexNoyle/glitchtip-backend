@@ -4,7 +4,13 @@ from unittest.mock import patch
 from aioresponses import aioresponses
 from django.test import TestCase
 
-from apps.stripe.client import STRIPE_URL, stripe_get, stripe_post
+from apps.stripe.client import (
+    STRIPE_URL,
+    STRIPE_V2_URL,
+    fetch_v2_event,
+    stripe_get,
+    stripe_post,
+)
 from apps.stripe.exceptions import StripeError, StripeResourceNotFound
 
 
@@ -86,3 +92,25 @@ class StripeClientRetryTests(TestCase):
             mocked.post(url, status=200, body=json.dumps({"id": "cus_new"}))
             body = await stripe_post("customers", {"name": "x"})
         self.assertEqual(json.loads(body)["id"], "cus_new")
+
+
+class StripeV2EventFetchTests(TestCase):
+    async def test_fetch_does_not_retry(self):
+        # Runs inline in a webhook response; Stripe's redelivery is the retry
+        # mechanism, so a transient failure must raise after one attempt.
+        url = f"{STRIPE_V2_URL}/core/events/evt_1"
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=500,
+                payload={"error": {"message": "flake"}},
+                headers={"Stripe-Should-Retry": "true"},
+            )
+            with self.assertRaises(StripeError) as ctx:
+                await fetch_v2_event("evt_1")
+        self.assertEqual(ctx.exception.status, 500)
+
+    async def test_fetch_rejects_malformed_event_id(self):
+        # The id lands in the URL path; a crafted one must not reach Stripe.
+        with self.assertRaises(ValueError):
+            await fetch_v2_event("evt_1/../../v1/customers")

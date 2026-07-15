@@ -725,6 +725,14 @@ STRIPE_WEBHOOK_SECRET = env.str("STRIPE_WEBHOOK_SECRET", None)
 STRIPE_WEBHOOK_SECRET_SUBSCRIPTION = env.str(
     "STRIPE_WEBHOOK_SECRET_SUBSCRIPTION", STRIPE_WEBHOOK_SECRET
 )
+# Signing secret of the v2 event destination that delivers billing-meter
+# error reports (v1.billing.meter.error_report_triggered) to
+# /stripe/webhook/meter/. Event destinations have their own secrets, so unlike
+# STRIPE_WEBHOOK_SECRET_SUBSCRIPTION there is deliberately no fallback to the
+# classic secret — that value can never verify these deliveries, and falling
+# back would turn "unset" into quiet signature failures instead of a loud
+# not-configured error.
+STRIPE_WEBHOOK_SECRET_METER = env.str("STRIPE_WEBHOOK_SECRET_METER", None)
 STRIPE_REGION = env.str("STRIPE_REGION", "")  # Sets stripe customer metadata
 STRIPE_REGION_DOMAINS = env.dict(
     "STRIPE_REGION_DOMAINS", default={}
@@ -866,6 +874,42 @@ if env.str("DATABASE_HOST", None):
 DATABASE_ENGINE = env.str(
     "DATABASE_ENGINE", "django_async_backend.db.backends.postgresql"
 )
+# Valkey/Redis connection. VALKEY_URL is the source of truth — supports any scheme
+# that django-vcache understands: redis://, rediss://, valkey://, valkeys://, sentinel://
+# Component env vars (VALKEY_HOST, etc.) are a convenience for simple single-node setups.
+VALKEY_HOST = env.str("VALKEY_HOST", env.str("REDIS_HOST", None))
+if VALKEY_HOST:
+    VALKEY_PORT = env.str("VALKEY_PORT", env.str("REDIS_PORT", "6379"))
+    VALKEY_DATABASE = env.str("VALKEY_DATABASE", env.str("REDIS_DATABASE", "0"))
+    VALKEY_PASSWORD = env.str("VALKEY_PASSWORD", env.str("REDIS_PASSWORD", None))
+    if VALKEY_PASSWORD:
+        VALKEY_URL = (
+            f"redis://:{VALKEY_PASSWORD}@{VALKEY_HOST}:{VALKEY_PORT}/{VALKEY_DATABASE}"
+        )
+    else:
+        VALKEY_URL = f"redis://{VALKEY_HOST}:{VALKEY_PORT}/{VALKEY_DATABASE}"
+else:
+    VALKEY_URL = env.str("VALKEY_URL", env.str("REDIS_URL", "redis://redis:6379/0"))
+
+# Serve POST /api/<project_id>/envelope/ entirely in Rust (gt_rust.ingest):
+# DSN auth, decompression/framing, PII scrubbing, dedupe and vtasks enqueue
+# run on the shared tokio runtime, and the event payload never materializes
+# on the Python heap. The ingest path issues its auth query on the very pool
+# the ORM uses, so enabling it forces the Rust database engine (the cache
+# already runs gt_rust's valkey driver unconditionally).
+GLITCHTIP_RUST_INGEST = env.bool("GLITCHTIP_RUST_INGEST", False)
+if GLITCHTIP_RUST_INGEST and not VALKEY_URL:
+    # The Rust enqueue path currently speaks only the Valkey task broker.
+    # The crate's postgres-broker arm exists but is not yet exercised (see
+    # the rust-ingest plan); until it is, valkey-less deploys keep the
+    # Python ingest path rather than hard-failing at startup.
+    logging.getLogger(__name__).warning(
+        "GLITCHTIP_RUST_INGEST requires VALKEY_URL until the postgres task "
+        "broker port lands; serving ingest via the Python path."
+    )
+    GLITCHTIP_RUST_INGEST = False
+if GLITCHTIP_RUST_INGEST:
+    DATABASE_ENGINE = "gt_rust.django_backend"
 # Add other settings that apply to both methods.
 for db_config in DATABASES.values():
     # async-backend's postgresql backend extends Django's stock postgresql
@@ -901,22 +945,6 @@ for db_config in DATABASES.values():
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# Valkey/Redis connection. VALKEY_URL is the source of truth — supports any scheme
-# that django-vcache understands: redis://, rediss://, valkey://, valkeys://, sentinel://
-# Component env vars (VALKEY_HOST, etc.) are a convenience for simple single-node setups.
-VALKEY_HOST = env.str("VALKEY_HOST", env.str("REDIS_HOST", None))
-if VALKEY_HOST:
-    VALKEY_PORT = env.str("VALKEY_PORT", env.str("REDIS_PORT", "6379"))
-    VALKEY_DATABASE = env.str("VALKEY_DATABASE", env.str("REDIS_DATABASE", "0"))
-    VALKEY_PASSWORD = env.str("VALKEY_PASSWORD", env.str("REDIS_PASSWORD", None))
-    if VALKEY_PASSWORD:
-        VALKEY_URL = (
-            f"redis://:{VALKEY_PASSWORD}@{VALKEY_HOST}:{VALKEY_PORT}/{VALKEY_DATABASE}"
-        )
-    else:
-        VALKEY_URL = f"redis://{VALKEY_HOST}:{VALKEY_PORT}/{VALKEY_DATABASE}"
-else:
-    VALKEY_URL = env.str("VALKEY_URL", env.str("REDIS_URL", "redis://redis:6379/0"))
 db = DATABASES["default"]
 # Use Specified broker url, valkey url, or fallback to postgresql
 IS_LOAD_TEST = env("IS_LOAD_TEST")
@@ -990,7 +1018,8 @@ USE_ASYNC_SERVER = env.bool("USE_ASYNC_SERVER", True)
 # VALKEY_SSL_CA_CERTS, VALKEY_SSL_CERTFILE, VALKEY_SSL_KEYFILE env vars.
 # Set VALKEY_SSL_CERT_REQS=none to skip certificate verification.
 if VALKEY_URL:
-    _valkey_options = {}
+    # Route the cache (django-vtasks) through single gt-rust tokio pool
+    _valkey_options = {"DRIVER_CLASS": "gt_rust.valkey.RustValkeyDriver"}
     if _ssl_ca := env.str("VALKEY_SSL_CA_CERTS", None):
         _valkey_options["ssl_ca_certs"] = _ssl_ca
     if _ssl_cert := env.str("VALKEY_SSL_CERTFILE", None):

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import re
 from decimal import Decimal
 from typing import Any, AsyncGenerator, Type, TypeAlias, TypeVar
 
@@ -27,9 +28,11 @@ from .schema import (
     SubscriptionExpandCustomer,
     SubscriptionExpandCustomerResponse,
     SubscriptionItem,
+    ThinEvent,
 )
 
 STRIPE_URL = "https://api.stripe.com/v1"
+STRIPE_V2_URL = "https://api.stripe.com/v2"
 HEADERS = {
     "Authorization": f"Bearer {settings.STRIPE_SECRET_KEY}",
     "Content-Type": "application/x-www-form-urlencoded",
@@ -63,14 +66,16 @@ def param_helper(data: AIODictParams) -> AIOTupleParams:
     return params
 
 
-async def _stripe_request(method: str, url: str, **kwargs: Any) -> str:
+async def _stripe_request(
+    method: str, url: str, max_retries: int = MAX_RETRIES, **kwargs: Any
+) -> str:
     """Issue a Stripe API request, retrying transient failures with backoff.
 
     Honors Stripe's ``Stripe-Should-Retry`` response header when present; otherwise
     retries on 429 and 5xx. Each attempt opens its own ``ClientSession`` to avoid
     reusing a connection that may have been poisoned by the prior failure.
     """
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         async with aiohttp.ClientSession(**settings.AIOHTTP_CONFIG) as session:
             async with session.request(
                 method, url, headers=HEADERS, timeout=STRIPE_TIMEOUT, **kwargs
@@ -88,7 +93,7 @@ async def _stripe_request(method: str, url: str, **kwargs: Any) -> str:
                 else:
                     should_retry = response.status in RETRY_STATUSES
 
-                if not should_retry or attempt >= MAX_RETRIES:
+                if not should_retry or attempt >= max_retries:
                     raise StripeError(
                         error.get("message", "Unknown error"),
                         status=response.status,
@@ -378,9 +383,25 @@ async def add_subscription_item(
     return SubscriptionItem.model_validate_json(response)
 
 
-async def delete_subscription_item(item_id: str) -> None:
-    """Remove a subscription item (e.g. when overage billing is disabled)."""
-    await stripe_delete(f"subscription_items/{item_id}")
+async def stripe_get_v2(endpoint: str, max_retries: int = MAX_RETRIES) -> str:
+    """Makes GET requests to the Stripe v2 API (events, event destinations)."""
+    return await _stripe_request(
+        "GET", f"{STRIPE_V2_URL}/{endpoint}", max_retries=max_retries
+    )
+
+
+async def fetch_v2_event(event_id: str) -> ThinEvent:
+    """Fetch a v2 event by id; thin webhook payloads omit the event details.
+
+    Runs inline in a webhook response, so a single attempt only: Stripe's
+    delivery timeout is shorter than one local retry cycle, and its own
+    redelivery is the retry mechanism. The id lands in the URL path, so its
+    shape is validated as defense in depth.
+    """
+    if not re.fullmatch(r"evt_\w+", event_id):
+        raise ValueError("Invalid v2 event id")
+    response = await stripe_get_v2(f"core/events/{event_id}", max_retries=0)
+    return ThinEvent.model_validate_json(response)
 
 
 async def create_meter_event(

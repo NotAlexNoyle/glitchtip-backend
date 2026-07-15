@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from apps.organizations_ext.models import Organization
 from apps.organizations_ext.tasks import check_organization_throttle
 
-from .client import mark_welcome_sent, stripe_get
+from .client import fetch_v2_event, mark_welcome_sent, stripe_get
 from .constants import ACTIVE_SUBSCRIPTION_STATUSES
 from .email import SupportLicenseWelcomeEmail
 from .models import (
@@ -27,7 +27,14 @@ from .models import (
     StripeProduct,
     StripeSubscription,
 )
-from .schema import Customer, Price, Product, StripeEvent, Subscription
+from .schema import (
+    Customer,
+    Price,
+    Product,
+    StripeEvent,
+    Subscription,
+    ThinEvent,
+)
 from .utils import (
     compute_cycle,
     is_metered_price,
@@ -242,6 +249,61 @@ async def update_subscription(subscription: Subscription, request: HttpRequest):
         await organization.asave(update_fields=["stripe_primary_subscription"])
 
 
+async def handle_meter_error_event(payload: bytes) -> HttpResponse:
+    """Surface asynchronous meter-event ingestion failures reported by Stripe.
+
+    Meter events mostly validate asynchronously: submission returns 200 and
+    failures (unknown customer, archived meter, bad timestamps) surface later
+    as v1.billing.meter.error_report_triggered on a v2 event destination. By
+    then the local overage counter has already advanced, so a report here means
+    real usage going unbilled — log it loudly for the operator to reconcile in
+    Stripe; the counter is deliberately not rewound (the report is a sampled
+    aggregate, not a complete list of failed events).
+    """
+    try:
+        event = ThinEvent.model_validate_json(payload)
+    except ValidationError as e:
+        logger.warning("Invalid Stripe meter webhook payload.", exc_info=e)
+        return HttpResponse(status=200)
+
+    if not event.type.startswith("v1.billing.meter."):
+        logger.info(f"Unhandled Stripe meter event type: {event.type}")
+        return HttpResponse(status=200)
+
+    dedup_key = "stripe" + event.id
+    if not await cache.aadd(dedup_key, None, 600):
+        return HttpResponse(status=200)
+
+    try:
+        data = event.data
+        if data is None:
+            # Thin payload style delivers only ids; fetch the error summary.
+            data = (await fetch_v2_event(event.id)).data
+    except Exception:
+        # Release the dedup key so Stripe's retry can reprocess this event
+        await cache.adelete(dedup_key)
+        raise
+
+    meter_id = event.related_object.id if event.related_object else "unknown"
+    summary = data.developer_message_summary if data else ""
+    reason = data.reason if data else None
+    codes = samples = ""
+    if reason:
+        codes = ", ".join(f"{t.code} x{t.error_count}" for t in reason.error_types)
+        samples = "; ".join(
+            s.error_message for t in reason.error_types for s in t.sample_errors[:2]
+        )
+    logger.error(
+        "Stripe rejected meter events for meter %s (%s): %s [%s] %s",
+        meter_id,
+        event.type,
+        summary,
+        codes,
+        samples,
+    )
+    return HttpResponse(status=200)
+
+
 @csrf_exempt
 @require_POST
 async def stripe_webhook_view(request: HttpRequest, event_type: str | None = None):
@@ -269,6 +331,9 @@ async def stripe_webhook_view(request: HttpRequest, event_type: str | None = Non
             f"Unexpected error verifying signature: {e}"
         )  # Catch unexpected exceptions
         return HttpResponseServerError("Internal Server Error")
+
+    if event_type == "meter":
+        return await handle_meter_error_event(payload)
 
     try:
         event = StripeEvent.model_validate_json(payload)
@@ -320,13 +385,13 @@ def verify_stripe_signature(payload, sig_header, event_type: str):
         ValueError: if the signature header is malformed.
     """
 
-    webhook_secret = (
-        settings.STRIPE_WEBHOOK_SECRET_SUBSCRIPTION
-        if event_type == "subscription"
-        else settings.STRIPE_WEBHOOK_SECRET
-    )
+    secret_setting = {
+        "subscription": "STRIPE_WEBHOOK_SECRET_SUBSCRIPTION",
+        "meter": "STRIPE_WEBHOOK_SECRET_METER",
+    }.get(event_type, "STRIPE_WEBHOOK_SECRET")
+    webhook_secret = getattr(settings, secret_setting)
     if not webhook_secret:
-        logger.error("STRIPE_WEBHOOK_SECRET not configured in settings.")
+        logger.error(f"{secret_setting} not configured in settings.")
         #  Return False/raise exception based on desired behavior (security vs. failing fast).
         #  Returning False is generally safer.
         return False

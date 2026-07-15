@@ -1187,6 +1187,8 @@ json.dump({
     "cache_options": settings.CACHES["default"].get("OPTIONS", {}),
     "task_backend": settings.TASKS["default"]["BACKEND"],
     "session_engine": settings.SESSION_ENGINE,
+    "rust_ingest": settings.GLITCHTIP_RUST_INGEST,
+    "database_engine": settings.DATABASE_ENGINE,
 }, __import__("sys").stdout)
 """
 
@@ -1332,15 +1334,38 @@ class CacheConfigTestCase(TestCase):
         )
         self.assertEqual(info["cache_options"]["ssl_cert_reqs"], "none")
 
-    def test_no_tls_options_means_no_options_key(self):
-        """Without TLS env vars, OPTIONS is not set (empty dict from probe)."""
+    def test_no_tls_options_means_default_driver_only(self):
+        """Without TLS env vars, OPTIONS carries only the gt_rust driver
+        routing — always present: the cache and task broker run on gt_rust's
+        single shared tokio runtime, and that wiring is not configurable."""
         info = self._probe({"VALKEY_URL": "redis://valkey:6379/0"})
-        self.assertEqual(info["cache_options"], {})
+        self.assertEqual(
+            info["cache_options"],
+            {"DRIVER_CLASS": "gt_rust.valkey.RustValkeyDriver"},
+        )
 
     def test_empty_valkey_url_falls_back_to_db(self):
         """VALKEY_URL="" → database cache + DB task backend."""
         info = self._probe({"VALKEY_URL": ""})
         self.assertEqual(info["cache_backend"], self.DB_CACHE_BACKEND)
+        self.assertEqual(info["task_backend"], self.VTASKS_DB)
+
+    def test_rust_ingest_flag_forces_rust_engine(self):
+        """GLITCHTIP_RUST_INGEST with valkey configured flips the DB engine."""
+        info = self._probe(
+            {"VALKEY_URL": "redis://valkey:6379/0", "GLITCHTIP_RUST_INGEST": "true"}
+        )
+        self.assertTrue(info["rust_ingest"])
+        self.assertEqual(info["database_engine"], "gt_rust.django_backend")
+
+    def test_rust_ingest_without_valkey_deactivates_gracefully(self):
+        """Flag on + no valkey: the Rust enqueue path only speaks the Valkey
+        task broker today, so the flag deactivates (Python ingest path, DB
+        engine unchanged) instead of hard-failing startup. Temporary until
+        the postgres task-broker port lands."""
+        info = self._probe({"VALKEY_URL": "", "GLITCHTIP_RUST_INGEST": "true"})
+        self.assertFalse(info["rust_ingest"])
+        self.assertNotEqual(info["database_engine"], "gt_rust.django_backend")
         self.assertEqual(info["task_backend"], self.VTASKS_DB)
 
     def test_no_valkey_env_defaults_to_vcache(self):
