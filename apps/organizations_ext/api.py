@@ -117,8 +117,6 @@ async def update_organization(
             organization_slug=organization_slug,
         ),
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     for attr, value in payload.dict(exclude_unset=True).items():
         setattr(organization, attr, value)
     await organization.asave()
@@ -129,7 +127,7 @@ async def update_organization(
     "organizations/{slug:organization_slug}/",
     response={204: None},
 )
-@has_permission(["org:admin"])
+@has_permission(["org:manager", "org:admin"])
 async def delete_organization(request: AuthHttpRequest, organization_slug: str):
     organization = await aget_object_or_404(
         get_organizations_queryset(
@@ -138,8 +136,6 @@ async def delete_organization(request: AuthHttpRequest, organization_slug: str):
             organization_slug=organization_slug,
         )
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     await organization.adelete()
     return Status(204, None)
 
@@ -219,8 +215,6 @@ async def create_organization_member(
         .filter(organization_users__user=user)
         .prefetch_related("organization_users"),
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     email = payload.email
     if (
         not await ais_user_registration_open()
