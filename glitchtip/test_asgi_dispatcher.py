@@ -42,6 +42,32 @@ class LifespanApp:
         self.scope = scope
 
 
+class CrashingLifespanApp:
+    """Mock whose lifespan task raises instead of completing the protocol.
+
+    Models a real failure: the embedded vtasks worker raises on startup against
+    an unsupported task backend, so its lifespan task dies without ever sending
+    startup.complete or shutdown.complete.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            await receive()
+            raise RuntimeError("lifespan task died")
+
+
+class SilentLifespanApp:
+    """Mock that reports startup, then returns without completing shutdown."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            msg = await receive()
+            if msg["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            await receive()
+            return
+
+
 class DjangoLikeApp:
     """Mock that raises ValueError on non-http scope (like Django's ASGIHandler)."""
 
@@ -99,6 +125,62 @@ class MCPDjangoDispatcherTestCase(SimpleTestCase):
         self.assertTrue(django_app.stopped)
         self.assertTrue(mcp_app.started)
         self.assertTrue(mcp_app.stopped)
+        self.assertEqual(sent[0]["type"], "lifespan.startup.complete")
+        self.assertEqual(sent[1]["type"], "lifespan.shutdown.complete")
+
+    async def test_lifespan_shutdown_completes_when_subapp_crashes(self):
+        """A crashed sub-app must not wedge lifespan shutdown.
+
+        The handler waits on events only each sub-app sets, so a sub-app whose
+        lifespan task raises can never set them. Servers do not exit a worker
+        until lifespan shutdown completes, and granian starts the replacement
+        worker before the old one goes away -- so a wedge here parks two workers
+        at once and the cgroup OOM killer becomes what stops the old one.
+        """
+        django_app = CrashingLifespanApp()
+        mcp_app = LifespanApp()
+        dispatcher = MCPDjangoDispatcher(
+            django_app, mcp_app, mcp_prefix="/mcp", django_lifespan=True
+        )
+
+        scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
+        messages = asyncio.Queue()
+        await messages.put({"type": "lifespan.startup"})
+        await messages.put({"type": "lifespan.shutdown"})
+
+        sent = []
+
+        async def send(msg):
+            sent.append(msg)
+
+        # wait_for so a regression fails here instead of hanging the suite.
+        with self.assertLogs("glitchtip.asgi", level="ERROR"):
+            await asyncio.wait_for(dispatcher(scope, messages.get, send), timeout=10)
+
+        # The crash is reported as a startup failure rather than a hang.
+        self.assertEqual(sent[0]["type"], "lifespan.startup.failed")
+
+    async def test_lifespan_shutdown_completes_when_subapp_exits_early(self):
+        """A sub-app that returns without completing shutdown must not wedge it."""
+        django_app = SilentLifespanApp()
+        mcp_app = LifespanApp()
+        dispatcher = MCPDjangoDispatcher(
+            django_app, mcp_app, mcp_prefix="/mcp", django_lifespan=True
+        )
+
+        scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
+        messages = asyncio.Queue()
+        await messages.put({"type": "lifespan.startup"})
+        await messages.put({"type": "lifespan.shutdown"})
+
+        sent = []
+
+        async def send(msg):
+            sent.append(msg)
+
+        await asyncio.wait_for(dispatcher(scope, messages.get, send), timeout=10)
+
+        # Startup was reported, so shutdown must still complete rather than hang.
         self.assertEqual(sent[0]["type"], "lifespan.startup.complete")
         self.assertEqual(sent[1]["type"], "lifespan.shutdown.complete")
 

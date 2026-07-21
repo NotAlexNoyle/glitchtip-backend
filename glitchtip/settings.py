@@ -36,7 +36,6 @@ env = environ.FileAwareEnv(
     AZURE_ACCOUNT_KEY=(str, None),
     AZURE_CONTAINER=(str, None),
     AZURE_URL_EXPIRATION_SECS=(int, None),
-    IS_LOAD_TEST=(bool, False),
     GS_BUCKET_NAME=(str, None),
     GS_PROJECT_ID=(str, None),
     DEBUG=(bool, False),
@@ -681,10 +680,11 @@ if ENABLE_OBSERVABILITY_API:
     MIDDLEWARE.insert(0, "django_prometheus.middleware.PrometheusBeforeMiddleware")
     MIDDLEWARE.append("django_prometheus.middleware.PrometheusAfterMiddleware")
 
-# DB I/O is routed through django-async-backend (the only DB engine; see
-# the ENGINE assignment in the DATABASES loop below). Inserted at the head
-# of the chain so async cursors are returned to the pool before any other
-# middleware finalises the response.
+# Async DB cursors live in django-async-backend's ``async_connections``
+# store (served by the gt_rust engine; see the ENGINE assignment in the
+# DATABASES loop below). Inserted at the head of the chain so async cursors
+# are returned to the pool before any other middleware finalises the
+# response.
 MIDDLEWARE.insert(0, "django_async_backend.middleware.close_async_connections")
 
 ROOT_URLCONF = "glitchtip.urls"
@@ -863,17 +863,13 @@ if env.str("DATABASE_HOST", None):
             "PORT": env.str("DATABASE_PORT", "5432"),
         }
     )
-# Database engine. Defaults to the async-backend (psycopg) used in production.
-# Opt-in: set DATABASE_ENGINE=gt_rust.django_backend to run the ORM on the Rust
-# Postgres driver instead — one shared tokio pool serving sync + async, on the
-# same runtime as the valkey driver. Behavior is unchanged unless switched.
-# The Rust driver needs COPY ... FROM STDIN support for the ingest write path
-# (older builds fail loudly at the missing cursor.copy()) and ideally the
-# psycopg-shaped sqlstate diagnostics that ship alongside it — without them
-# the COPY conflict fallback falls back to message-prefix matching.
-DATABASE_ENGINE = env.str(
-    "DATABASE_ENGINE", "django_async_backend.db.backends.postgresql"
-)
+# Database engine. gt_rust.django_backend is the only supported engine: the
+# ORM (sync + async) runs on the Rust Postgres driver — one shared tokio pool
+# on the same runtime as the valkey driver. psycopg remains installed as a
+# library (SQL composition via psycopg.sql, Jsonb/Json parameter wrappers,
+# and the import Django's stock postgresql backend — which this engine
+# extends — performs at load), but no database I/O flows through it.
+DATABASE_ENGINE = "gt_rust.django_backend"
 # Valkey/Redis connection. VALKEY_URL is the source of truth — supports any scheme
 # that django-vcache understands: redis://, rediss://, valkey://, valkeys://, sentinel://
 # Component env vars (VALKEY_HOST, etc.) are a convenience for simple single-node setups.
@@ -895,8 +891,8 @@ else:
 # DSN auth, decompression/framing, PII scrubbing, dedupe and vtasks enqueue
 # run on the shared tokio runtime, and the event payload never materializes
 # on the Python heap. The ingest path issues its auth query on the very pool
-# the ORM uses, so enabling it forces the Rust database engine (the cache
-# already runs gt_rust's valkey driver unconditionally).
+# the ORM uses (gt_rust is the only database engine, and the cache already
+# runs gt_rust's valkey driver unconditionally).
 GLITCHTIP_RUST_INGEST = env.bool("GLITCHTIP_RUST_INGEST", False)
 if GLITCHTIP_RUST_INGEST and not VALKEY_URL:
     # The Rust enqueue path currently speaks only the Valkey task broker.
@@ -908,14 +904,12 @@ if GLITCHTIP_RUST_INGEST and not VALKEY_URL:
         "broker port lands; serving ingest via the Python path."
     )
     GLITCHTIP_RUST_INGEST = False
-if GLITCHTIP_RUST_INGEST:
-    DATABASE_ENGINE = "gt_rust.django_backend"
 # Add other settings that apply to both methods.
 for db_config in DATABASES.values():
-    # async-backend's postgresql backend extends Django's stock postgresql
-    # and adds an AsyncDatabaseWrapper that ``async_connections`` discovers
-    # via load_backend. Sync paths (ORM, migrations, admin) still go through
-    # psycopg unchanged. gt_rust.django_backend is the drop-in Rust equivalent.
+    # gt_rust.django_backend extends Django's stock postgresql backend and
+    # adds the AsyncDatabaseWrapper that django-async-backend's
+    # ``async_connections`` discovers via load_backend, so sync paths (ORM,
+    # migrations, admin) and async cursors all run on the Rust driver.
     db_config["ENGINE"] = DATABASE_ENGINE
     db_config.setdefault("CONN_MAX_AGE", env.int("DATABASE_CONN_MAX_AGE", 0))
     db_config.setdefault(
@@ -944,10 +938,6 @@ for db_config in DATABASES.values():
             options["pool"]["max_lifetime"] = _pool_max_lifetime
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
-db = DATABASES["default"]
-# Use Specified broker url, valkey url, or fallback to postgresql
-IS_LOAD_TEST = env("IS_LOAD_TEST")
 
 # Time in seconds to debounce some frequently run tasks
 TASK_DEBOUNCE_DELAY = env.int("TASK_DEBOUNCE_DELAY", 30)
@@ -988,13 +978,16 @@ TASKS = {
     }
 }
 
-VTASKS_QUEUES = ["default", "ingest"]
-
-# Batch queues configuration - must be defined before tasks are imported
-VTASKS_BATCH_QUEUES = {
+# Queues this worker consumes, with per-queue options (django-vtasks 3.0
+# consolidated form; batching must be declared here — VTASKS_BATCH_QUEUES
+# is removed).
+VTASKS_QUEUES = {
+    "default": {},
     "ingest": {
-        "count": 100,
-        "timeout": 2.0,
+        "batch": {
+            "count": 100,
+            "timeout": 2.0,
+        },
     },
 }
 

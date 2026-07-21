@@ -144,11 +144,42 @@ class MCPDjangoDispatcher:
             elif msg["type"] == "lifespan.shutdown.complete":
                 mcp_done.set()
 
+        async def run_subapp(app, queue, subapp_send, ok, done, name):
+            """Run one sub-app's lifespan, never outliving its own events.
+
+            The waits below are on events only this sub-app sets. A sub-app that
+            dies -- raising, or returning without completing the protocol --
+            would otherwise leave the handler waiting on a message that can
+            never arrive, and a server does not exit a worker until lifespan
+            shutdown completes. Settling both events on the way out degrades a
+            broken sub-app to a logged failure rather than a wedged worker.
+            """
+            nonlocal failed
+            try:
+                await app(scope, queue.get, subapp_send)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("ASGI lifespan sub-app %r crashed", name)
+            finally:
+                if not ok.is_set():
+                    # Gone before reporting startup: that is a startup failure.
+                    failed = True
+                    ok.set()
+                done.set()
+
         async def run_django():
-            await self.django_app(scope, django_queue.get, django_send)
+            await run_subapp(
+                self.django_app,
+                django_queue,
+                django_send,
+                django_ok,
+                django_done,
+                "django",
+            )
 
         async def run_mcp():
-            await self.mcp_app(scope, mcp_queue.get, mcp_send)
+            await run_subapp(self.mcp_app, mcp_queue, mcp_send, mcp_ok, mcp_done, "mcp")
 
         tasks = [
             asyncio.create_task(run_django()),

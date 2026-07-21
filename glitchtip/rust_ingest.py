@@ -119,8 +119,8 @@ def test_valkey_url() -> str:
 def _valkey_driver():
     """The Valkey driver the ingest path issues its commands on.
 
-    Production: the very driver behind Django's vcache cache (the flag forces
-    ``DRIVER_CLASS`` to gt_rust's class, so cache and ingest share one
+    Production: the very driver behind Django's vcache cache (``DRIVER_CLASS``
+    is gt_rust's class unconditionally, so cache and ingest share one
     connection). Under the test runner the cache is LocMem, so connect a
     dedicated driver to the test database instead.
     """

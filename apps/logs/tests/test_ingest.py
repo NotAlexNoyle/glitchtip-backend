@@ -252,19 +252,17 @@ class LogIngestProcessingTestCase(TransactionTestCase):
         self.assertTrue(is_unique_violation(ctx.exception))
         self.assertEqual(ctx.exception.__cause__.sqlstate, "23505")
 
-    def test_is_unique_violation_message_prefix_fallback(self):
-        """Driver exceptions without a sqlstate attribute (gt_rust builds
-        predating structured diagnostics) are matched by their anchored
-        [SQLSTATE] message prefix — and only for 23505."""
-        dup = IntegrityError("duplicate key")
-        dup.__cause__ = Exception("[23505] duplicate key value")
-        self.assertTrue(is_unique_violation(dup))
+    def test_is_unique_violation_requires_structured_sqlstate(self):
+        """Only a structured ``sqlstate`` of 23505 matches. Exceptions
+        without the attribute or with ``sqlstate=None`` (client-side
+        errors) fail closed — untrusted text mimicking the old [SQLSTATE]
+        message-prefix fallback must not be trusted."""
+        no_attr = IntegrityError("duplicate key")
+        no_attr.__cause__ = Exception("[23505] duplicate key value")
+        self.assertFalse(is_unique_violation(no_attr))
         partition = IntegrityError("no partition")
         partition.__cause__ = Exception("[23514] no partition of relation")
         self.assertFalse(is_unique_violation(partition))
-        # An attribute of None (psycopg client-side errors) means "known
-        # non-conflict", not "fall back to the message" — it must fail
-        # closed even when untrusted text in the message mimics the prefix.
         client_side = IntegrityError("client-side")
         cause = Exception("[23505] attacker-controlled text")
         cause.sqlstate = None

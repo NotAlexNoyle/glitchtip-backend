@@ -760,16 +760,9 @@ class DatabaseSettingsTestCase(TestCase):
         self.assertEqual(db_settings.get("DISABLE_SERVER_SIDE_CURSORS"), True)
         # In TESTING mode, pool is explicitly set to False
         self.assertEqual(db_settings.get("OPTIONS", {}).get("pool"), False)
-        # Guard against a typo or accidental SQLite fallback. The default is
-        # the async-backend (psycopg); gt_rust.django_backend is the opt-in
-        # Rust driver selected via DATABASE_ENGINE. Both are valid.
-        self.assertIn(
-            db_settings.get("ENGINE"),
-            {
-                "django_async_backend.db.backends.postgresql",
-                "gt_rust.django_backend",
-            },
-        )
+        # Guard against a typo or accidental SQLite fallback. The Rust
+        # driver is the only supported database engine.
+        self.assertEqual(db_settings.get("ENGINE"), "gt_rust.django_backend")
 
 
 class IsSelfReferencingDsnTestCase(TestCase):
@@ -1350,8 +1343,9 @@ class CacheConfigTestCase(TestCase):
         self.assertEqual(info["cache_backend"], self.DB_CACHE_BACKEND)
         self.assertEqual(info["task_backend"], self.VTASKS_DB)
 
-    def test_rust_ingest_flag_forces_rust_engine(self):
-        """GLITCHTIP_RUST_INGEST with valkey configured flips the DB engine."""
+    def test_rust_ingest_flag_enables_with_valkey(self):
+        """GLITCHTIP_RUST_INGEST with valkey configured stays enabled; the
+        Rust DB engine is unconditional."""
         info = self._probe(
             {"VALKEY_URL": "redis://valkey:6379/0", "GLITCHTIP_RUST_INGEST": "true"}
         )
@@ -1360,12 +1354,12 @@ class CacheConfigTestCase(TestCase):
 
     def test_rust_ingest_without_valkey_deactivates_gracefully(self):
         """Flag on + no valkey: the Rust enqueue path only speaks the Valkey
-        task broker today, so the flag deactivates (Python ingest path, DB
-        engine unchanged) instead of hard-failing startup. Temporary until
-        the postgres task-broker port lands."""
+        task broker today, so the flag deactivates (Python ingest path)
+        instead of hard-failing startup. Temporary until the postgres
+        task-broker port lands. The DB engine stays gt_rust regardless."""
         info = self._probe({"VALKEY_URL": "", "GLITCHTIP_RUST_INGEST": "true"})
         self.assertFalse(info["rust_ingest"])
-        self.assertNotEqual(info["database_engine"], "gt_rust.django_backend")
+        self.assertEqual(info["database_engine"], "gt_rust.django_backend")
         self.assertEqual(info["task_backend"], self.VTASKS_DB)
 
     def test_no_valkey_env_defaults_to_vcache(self):

@@ -6,13 +6,12 @@ worker tasks consume what Rust enqueued. That covers the full contract: DSN
 auth against the shared Postgres pool, Valkey block/dedupe caches, the vtasks
 wire format, and worker-side re-validation of the payloads.
 
-Skipped unless ``GLITCHTIP_RUST_INGEST`` is enabled: the Rust path requires
-the ``gt_rust.django_backend`` engine and the gt_rust Valkey cache driver
-(both forced by the flag), so these run in a dedicated flag-on test lane
-while the default suite keeps covering the Python view.
+Skipped unless ``GLITCHTIP_RUST_INGEST`` is enabled: the flag wires the Rust
+ASGI dispatch in (the ``gt_rust.django_backend`` engine and gt_rust Valkey
+cache driver it relies on run unconditionally), so these run in a dedicated
+flag-on test lane while the default suite keeps covering the Python view.
 """
 
-import asyncio
 import importlib
 import json
 import unittest
@@ -26,17 +25,18 @@ from apps.issue_events.models import IssueEvent, UserReport
 from apps.logs.models import LogEvent
 from apps.performance.models import TransactionGroup
 
-from .utils import EventIngestTestCase, list_to_envelope
-
-# A globally-routable client address (TEST-NETs are non-global and would be
-# discarded by the ipware port, exactly like the Python path).
-CLIENT_IP = "93.184.216.34"
+from .utils import (
+    CLIENT_IP,
+    AsgiIngestTestMixin,
+    EventIngestTestCase,
+    list_to_envelope,
+)
 
 
 @unittest.skipUnless(
     settings.GLITCHTIP_RUST_INGEST, "requires GLITCHTIP_RUST_INGEST=true"
 )
-class RustIngestTestCase(EventIngestTestCase):
+class RustIngestTestCase(AsgiIngestTestMixin, EventIngestTestCase):
     def setUp(self):
         super().setUp()
         cache.clear()
@@ -65,64 +65,6 @@ class RustIngestTestCase(EventIngestTestCase):
             # Ingest tasks are batched consumers: each call takes a list of
             # task-message dicts.
             await vtask.func([message])
-
-    def _dispatcher(self):
-        from django.core.asgi import get_asgi_application
-
-        from glitchtip.ingest_asgi import IngestDispatcher
-
-        return IngestDispatcher(get_asgi_application())
-
-    async def _post(
-        self,
-        body: bytes,
-        extra_headers: list | None = None,
-        path: str | None = None,
-        method: str = "POST",
-        query: str | None = None,
-    ):
-        scope = {
-            "type": "http",
-            "method": method,
-            "path": path or f"/api/{self.project.id}/envelope/",
-            "query_string": (
-                query
-                if query is not None
-                else f"sentry_key={self.projectkey.public_key}"
-            ).encode(),
-            "headers": [(b"content-type", b"application/x-sentry-envelope")]
-            + (extra_headers or []),
-            "client": (CLIENT_IP, 4242),
-        }
-        messages = []
-        body_sent = False
-
-        async def receive():
-            nonlocal body_sent
-            if not body_sent:
-                body_sent = True
-                return {"type": "http.request", "body": body, "more_body": False}
-            # Idle like a healthy keep-alive connection; a disconnect
-            # listener parked here is cancelled when the response ends.
-            await asyncio.Event().wait()
-
-        async def send(message):
-            messages.append(message)
-
-        await self._dispatcher()(scope, receive, send)
-        status = next(
-            m["status"] for m in messages if m["type"] == "http.response.start"
-        )
-        headers = {
-            name.decode(): value.decode()
-            for m in messages
-            if m["type"] == "http.response.start"
-            for name, value in m.get("headers", [])
-        }
-        response_body = b"".join(
-            m.get("body", b"") for m in messages if m["type"] == "http.response.body"
-        )
-        return status, headers, response_body
 
     def _envelope(self, replace_id=True) -> tuple[list, str]:
         data = self.get_json_data(
