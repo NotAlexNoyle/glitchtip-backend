@@ -7,6 +7,7 @@ from django.urls import reverse
 from django.utils import timezone
 from model_bakery import baker
 
+from apps.organizations_ext.constants import OrganizationUserRole
 from glitchtip.partition_manager import UUID7Helper
 from glitchtip.test_utils.test_case import APIPermissionTestCase, GlitchTipTestCaseMixin
 
@@ -347,3 +348,118 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
 
         self.auth_token.add_permission("event:write")
         self.assertPutReqStatusCode(url, data, 200)
+
+
+class OrganizationScopedIssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
+    """Org-scoped twins of the bare ``/issues/{id}/events/`` routes.
+
+    ``other_organization`` is one the user *is* a member of, so an event
+    reachable through it proves the slug is being ignored rather than merely
+    proving that membership filtering works.
+    """
+
+    def setUp(self):
+        super().create_logged_in_user()
+        self.async_client.force_login(self.user)
+        self.issue = baker.make("issue_events.Issue", project=self.project)
+        self.event = baker.make(
+            "issue_events.IssueEvent",
+            issue=self.issue,
+            organization=self.organization,
+        )
+        self.other_organization = baker.make("organizations_ext.Organization")
+        self.other_organization.add_user(self.user, OrganizationUserRole.ADMIN)
+
+    def list_url(self, organization_slug: str, issue_id: int) -> str:
+        return reverse(
+            "api:list_organization_issue_event",
+            kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+        )
+
+    def latest_url(self, organization_slug: str, issue_id: int) -> str:
+        return reverse(
+            "api:get_organization_latest_issue_event",
+            kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+        )
+
+    def detail_url(self, organization_slug: str, issue_id: int, event_id: str) -> str:
+        return reverse(
+            "api:get_organization_issue_event",
+            kwargs={
+                "organization_slug": organization_slug,
+                "issue_id": issue_id,
+                "event_id": event_id,
+            },
+        )
+
+    async def test_list(self):
+        res = await self.async_client.get(
+            self.list_url(self.organization.slug, self.issue.id)
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertContains(res, self.event.id.hex)
+
+    async def test_list_wrong_organization(self):
+        res = await self.async_client.get(
+            self.list_url(self.other_organization.slug, self.issue.id)
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.json()), 0)
+
+    async def test_latest(self):
+        res = await self.async_client.get(
+            self.latest_url(self.organization.slug, self.issue.id)
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["id"], self.event.id.hex)
+
+    async def test_latest_wrong_organization(self):
+        res = await self.async_client.get(
+            self.latest_url(self.other_organization.slug, self.issue.id)
+        )
+        self.assertEqual(res.status_code, 404)
+
+    async def test_retrieve(self):
+        res = await self.async_client.get(
+            self.detail_url(self.organization.slug, self.issue.id, self.event.id.hex)
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["id"], self.event.id.hex)
+
+    async def test_retrieve_wrong_organization(self):
+        res = await self.async_client.get(
+            self.detail_url(
+                self.other_organization.slug, self.issue.id, self.event.id.hex
+            )
+        )
+        self.assertEqual(res.status_code, 404)
+
+    async def test_retrieve_by_sentry_event_id(self):
+        """The UUIDv4 branch resolves the org separately; it must scope too."""
+        sentry_event_id = uuid.uuid4()
+        await baker.amake(
+            "issue_events.IssueEvent",
+            issue=self.issue,
+            event_id=sentry_event_id,
+            organization=self.organization,
+        )
+        res = await self.async_client.get(
+            self.detail_url(self.organization.slug, self.issue.id, sentry_event_id.hex)
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["eventID"], sentry_event_id.hex)
+
+    async def test_retrieve_by_sentry_event_id_wrong_organization(self):
+        sentry_event_id = uuid.uuid4()
+        await baker.amake(
+            "issue_events.IssueEvent",
+            issue=self.issue,
+            event_id=sentry_event_id,
+            organization=self.organization,
+        )
+        res = await self.async_client.get(
+            self.detail_url(
+                self.other_organization.slug, self.issue.id, sentry_event_id.hex
+            )
+        )
+        self.assertEqual(res.status_code, 404)

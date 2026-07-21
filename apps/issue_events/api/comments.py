@@ -20,6 +20,9 @@ def get_queryset(request: AuthHttpRequest, issue_id: int, organization_slug: str
         issue__project__organization__slug=organization_slug,
         issue__id=issue_id,
     )
+    if organization_slug:
+        qs = qs.filter(issue__project__organization__slug=organization_slug)
+    return qs
 
 
 @router.get(
