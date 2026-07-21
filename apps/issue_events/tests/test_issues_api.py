@@ -27,14 +27,14 @@ logger = logging.getLogger(__name__)
 
 def get_issue_url(organization_slug: str, issue_id: int) -> str:
     return reverse(
-        "api:get_issue",
+        "api:organization_get_issue",
         kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
     )
 
 
 def get_organization_issue_url(organization_slug: str, issue_id: int) -> str:
     return reverse(
-        "api:update_issue",
+        "api:update_organization_issue",
         kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
     )
 
@@ -63,7 +63,7 @@ class IssueAPITestCase(GlitchTestCase):
         )
         await baker.amake("issue_events.Comment", issue=issue, _quantity=3)
         url = reverse(
-            "api:get_issue",
+            "api:organization_get_issue",
             kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
         )
 
@@ -95,7 +95,7 @@ class IssueAPITestCase(GlitchTestCase):
             first_release=release,
         )
         url = reverse(
-            "api:get_issue",
+            "api:organization_get_issue",
             kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
         )
         res = await self.async_client.get(url)
@@ -110,7 +110,7 @@ class IssueAPITestCase(GlitchTestCase):
             "issue_events.Issue", project=self.project, short_id=1
         )
         url = reverse(
-            "api:get_issue",
+            "api:organization_get_issue",
             kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
         )
         res = await self.async_client.get(url)
@@ -800,7 +800,7 @@ class IssueAPITestCase(GlitchTestCase):
             resolved_in_release=release,
         )
         url = reverse(
-            "api:get_issue",
+            "api:organization_get_issue",
             kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
         )
         res = await self.async_client.get(url)
@@ -821,7 +821,7 @@ class IssueAPITestCase(GlitchTestCase):
             last_release=release,
         )
         url = reverse(
-            "api:get_issue",
+            "api:organization_get_issue",
             kwargs={"organization_slug": self.organization.slug, "issue_id": issue.id},
         )
         res = await self.async_client.get(url)
