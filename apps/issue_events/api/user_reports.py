@@ -4,7 +4,7 @@ from django.http import HttpResponse
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, has_issue_permission
 
 from ..models import UserReport
 from ..schema import UserReportSchema
@@ -12,22 +12,20 @@ from . import router
 
 
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/user-reports/",
+    "/issues/{int:issue_id}/user-reports/",
     response=List[UserReportSchema],
     by_alias=True,
 )
 @paginate
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_issue_permission(["event:read", "event:write", "event:admin"])
 async def list_user_reports(
     request: AuthHttpRequest,
     response: HttpResponse,
-    organization_slug: str,
     issue_id: int,
 ):
     user_id = request.auth.user_id
     return UserReport.objects.filter(
         project__organization__users=user_id,
-        project__organization__slug=organization_slug,
         issue__id=issue_id,
     )
 
@@ -40,9 +38,14 @@ async def list_user_reports(
 @paginate
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_organization_user_reports(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str, issue_id: int
+    request: AuthHttpRequest,
+    response: HttpResponse,
+    organization_slug: str,
+    issue_id: int,
 ):
     user_id = request.auth.user_id
     return UserReport.objects.filter(
-        project__organization__users=user_id, project__organization__slug=organization_slug, issue__id=issue_id
+        project__organization__users=user_id,
+        project__organization__slug=organization_slug,
+        issue__id=issue_id,
     )

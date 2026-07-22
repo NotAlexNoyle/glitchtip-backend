@@ -13,17 +13,18 @@ from glitchtip.test_utils.test_case import APIPermissionTestCase, GlitchTipTestC
 
 
 def get_list_issue_event_url(organization_slug: str, issue_id: int) -> str:
+    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
         "api:list_issue_event",
-        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+        kwargs={"issue_id": issue_id},
     )
 
 
 def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) -> str:
+    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
         "api:get_issue_event",
         kwargs={
-            "organization_slug": organization_slug,
             "issue_id": issue_id,
             "event_id": event_id,
         },
@@ -31,9 +32,10 @@ def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) ->
 
 
 def get_latest_issue_event_url(organization_slug: str, issue_id: int) -> str:
+    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
         "api:get_latest_issue_event",
-        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+        kwargs={"issue_id": issue_id},
     )
 
 
@@ -291,10 +293,7 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
 
         self.list_url = reverse(
             "api:list_comments",
-            kwargs={
-                "organization_slug": self.organization.slug,
-                "issue_id": self.issue.id,
-            },
+            kwargs={"issue_id": self.issue.id},
         )
 
     def test_list(self):
@@ -308,10 +307,7 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         data = {"data": {"text": "Test"}}
         url = reverse(
             "api:add_comment",
-            kwargs={
-                "organization_slug": self.organization.slug,
-                "issue_id": self.issue.id,
-            },
+            kwargs={"issue_id": self.issue.id},
         )
         self.assertPostReqStatusCode(url, data, 403)
 
@@ -323,7 +319,6 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         url = reverse(
             "api:delete_comment",
             kwargs={
-                "organization_slug": self.organization.slug,
                 "issue_id": self.issue.id,
                 "comment_id": self.comment.id,
             },
@@ -339,7 +334,6 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         url = reverse(
             "api:update_comment",
             kwargs={
-                "organization_slug": self.organization.slug,
                 "issue_id": self.issue.id,
                 "comment_id": self.comment.id,
             },

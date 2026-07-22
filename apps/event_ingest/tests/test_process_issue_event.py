@@ -690,10 +690,7 @@ class IssueEventIngestTestCase(EventIngestTestCase):
         issue = Issue.objects.get()
         url = reverse(
             "api:get_latest_issue_event",
-            kwargs={
-                "organization_slug": self.organization.slug,
-                "issue_id": issue.id,
-            },
+            kwargs={"issue_id": issue.id},
         )
         res = self.client.get(url)
         self.assertEqual(res.status_code, 200)
@@ -1179,7 +1176,7 @@ class SentryCompatTestCase(EventIngestTestCase):
         )
 
         url = reverse(
-            "api:get_issue",
+            "api:get_organization_issue",
             kwargs={
                 "organization_slug": self.organization.slug,
                 "issue_id": event.issue.pk,

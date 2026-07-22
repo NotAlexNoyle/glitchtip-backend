@@ -8,7 +8,7 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, has_issue_permission
 from glitchtip.partition_manager import UUID7Helper
 
 from ..models import Issue, IssueEvent, UserReport
@@ -134,27 +134,31 @@ def _get_cold_events_for_issue(
 
 
 @router.get(
+    "/issues/{int:issue_id}/events/",
+    response=list[IssueEventSchema],
+)
+@paginate
+@has_issue_permission(["event:read", "event:write", "event:admin"])
+async def list_issue_event(
+    request: AuthHttpRequest,
+    response: HttpResponse,
+    issue_id: int,
+):
+    # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering
+    return get_queryset(request, issue_id=issue_id).order_by("-id")
+
+
+@router.get(
     "organizations/{slug:organization_slug}/issues/{int:issue_id}/events/",
     response=list[IssueEventSchema],
 )
 @paginate
 @has_permission(["event:read", "event:write", "event:admin"])
-async def list_issue_event(
+async def list_organization_issue_event(
     request: AuthHttpRequest,
     response: HttpResponse,
-    organization_slug: str,
     issue_id: int,
-):
-    # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering
-    return get_queryset(
-        request, issue_id=issue_id, organization_slug=organization_slug
-    ).order_by("-id")
-
-@router.get("organizations/{slug:organization_slug}/issues/{int:issue_id}/events/", response=list[IssueEventSchema])
-@paginate
-@has_permission(["event:read", "event:write", "event:admin"])
-async def list_organization_issue_event(
-    request: AuthHttpRequest, response: HttpResponse, issue_id: int, organization_slug: str
+    organization_slug: str,
 ):
     # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering
     org_id = await (
@@ -167,24 +171,21 @@ async def list_organization_issue_event(
     return (
         get_queryset(request, issue_id=issue_id, organization_slug=organization_slug)
         .filter(organization_id=org_id)
-        .order_by("-id")     
+        .order_by("-id")
     )
 
 
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/events/latest/",
+    "/issues/{int:issue_id}/events/latest/",
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
-async def get_latest_issue_event(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int
-):
+@has_issue_permission(["event:read", "event:write", "event:admin"])
+async def get_latest_issue_event(request: AuthHttpRequest, issue_id: int):
     # Resolve issue first to get organization_id for hash partition pruning
     issue = (
         await Issue.objects.filter(
             id=issue_id,
-            project__organization__slug=organization_slug,
             project__organization__users=request.auth.user_id,
         )
         .select_related("project__organization", "index")
@@ -222,18 +223,17 @@ async def get_organization_latest_issue_event(
 
 
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/events/{event_id}/",
+    "/issues/{int:issue_id}/events/{event_id}/",
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_issue_permission(["event:read", "event:write", "event:admin"])
 async def get_issue_event(
     request: AuthHttpRequest,
-    organization_slug: str,
     issue_id: int,
     event_id: uuid.UUID,
 ):
-    qs = get_queryset(request, issue_id=issue_id, organization_slug=organization_slug)
+    qs = get_queryset(request, issue_id=issue_id)
     # Use id (UUIDv7) for prev/next navigation - enables partition pruning
     qs = qs.annotate(
         previous=Subquery(
@@ -292,7 +292,9 @@ async def get_issue_event(
     by_alias=True,
 )
 @has_permission(["event:read", "event:write", "event:admin"])
-async def get_organization_issue_event(request: AuthHttpRequest, organization_slug: str, issue_id: int, event_id: uuid.UUID ):
+async def get_organization_issue_event(
+    request: AuthHttpRequest, organization_slug: str, issue_id: int, event_id: uuid.UUID
+):
     qs = get_queryset(request, issue_id, organization_slug=organization_slug)
     # Use id (UUIDv7) for prev/next navigation - enables partition pruning
     qs = qs.annotate(
@@ -309,9 +311,9 @@ async def get_organization_issue_event(request: AuthHttpRequest, organization_sl
         # Include organization_id to prune hash sub-partitions.
         org_id = await (
             Issue.objects.filter(
-                id=issue_id, 
+                id=issue_id,
                 project__organization__users=request.auth.user_id,
-                project__organization__slug=organization_slug
+                project__organization__slug=organization_slug,
             )
             .values_list("project__organization_id", flat=True)
             .afirst()
@@ -329,7 +331,7 @@ async def get_organization_issue_event(request: AuthHttpRequest, organization_sl
         await Issue.objects.filter(
             id=issue_id,
             project__organization__users=request.auth.user_id,
-            project__organization__slug=organization_slug
+            project__organization__slug=organization_slug,
         )
         .select_related("project__organization", "index")
         .afirst()

@@ -10,7 +10,6 @@ def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) ->
     return reverse(
         "api:get_issue_event",
         kwargs={
-            "organization_slug": organization_slug,
             "issue_id": issue_id,
             "event_id": event_id,
         },
@@ -18,9 +17,10 @@ def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) ->
 
 
 def list_user_reports_url(organization_slug: str, issue_id: int) -> str:
+    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
         "api:list_user_reports",
-        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
+        kwargs={"issue_id": issue_id},
     )
 
 

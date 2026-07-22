@@ -9,16 +9,21 @@ from ..models import Comment
 
 # Create your tests here.
 class CommentsApiTestCase(GlitchTipTestCase):
+    """Coverage for the bare ``/issues/{id}/comments/`` routes.
+
+    On a bare route the owning organization is resolved from the issue
+    itself, so an issue in an organization the user does not belong to is
+    invisible: the request is rejected with 403 rather than silently
+    returning an empty result (as the org-scoped twin does).
+    """
+
     def setUp(self):
         self.create_user_and_project()
         self.async_client.force_login(self.user)
         self.issue = baker.make("issue_events.Issue", project=self.project)
         self.url = reverse(
             "api:list_comments",
-            kwargs={
-                "organization_slug": self.organization.slug,
-                "issue_id": self.issue.id,
-            },
+            kwargs={"issue_id": self.issue.id},
         )
 
     async def test_comment_creation(self):
@@ -34,13 +39,10 @@ class CommentsApiTestCase(GlitchTipTestCase):
 
         url = reverse(
             "api:list_comments",
-            kwargs={
-                "organization_slug": self.organization.slug,
-                "issue_id": not_my_issue.id,
-            },
+            kwargs={"issue_id": not_my_issue.id},
         )
         res = await self.async_client.post(url, data, content_type="application/json")
-        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.status_code, 403)
 
     async def test_comments_list(self):
         comments = await baker.amake(
@@ -59,13 +61,10 @@ class CommentsApiTestCase(GlitchTipTestCase):
 
         url = reverse(
             "api:list_comments",
-            kwargs={
-                "organization_slug": self.organization.slug,
-                "issue_id": not_my_issue.id,
-            },
+            kwargs={"issue_id": not_my_issue.id},
         )
         res = await self.async_client.get(url)
-        self.assertEqual(len(res.json()), 0)
+        self.assertEqual(res.status_code, 403)
 
     async def test_comments_list_deleted_user(self):
         user2 = await baker.amake("users.User")
@@ -90,7 +89,6 @@ class CommentsApiTestCase(GlitchTipTestCase):
         url = reverse(
             "api:update_comment",
             kwargs={
-                "organization_slug": self.organization.slug,
                 "issue_id": self.issue.id,
                 "comment_id": comment.id,
             },
@@ -110,7 +108,6 @@ class CommentsApiTestCase(GlitchTipTestCase):
         url = reverse(
             "api:delete_comment",
             kwargs={
-                "organization_slug": self.organization.slug,
                 "issue_id": self.issue.id,
                 "comment_id": comment.id,
             },
@@ -137,19 +134,19 @@ class OrganizationScopedCommentsApiTestCase(GlitchTipTestCase):
 
     def list_url(self, organization_slug: str, issue_id: int) -> str:
         return reverse(
-            "api:list_comments",
+            "api:list_organization_comments",
             kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
         )
 
     def add_url(self, organization_slug: str, issue_id: int) -> str:
         return reverse(
-            "api:add_comment",
+            "api:add_organization_comment",
             kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
         )
 
     def update_url(self, organization_slug: str, issue_id: int, comment_id: int) -> str:
         return reverse(
-            "api:update_comment",
+            "api:update_organization_comment",
             kwargs={
                 "organization_slug": organization_slug,
                 "issue_id": issue_id,
@@ -159,7 +156,7 @@ class OrganizationScopedCommentsApiTestCase(GlitchTipTestCase):
 
     def delete_url(self, organization_slug: str, issue_id: int, comment_id: int) -> str:
         return reverse(
-            "api:delete_comment",
+            "api:delete_organization_comment",
             kwargs={
                 "organization_slug": organization_slug,
                 "issue_id": issue_id,
