@@ -12,14 +12,13 @@ class OrganizationAPIPermissionTests(APIPermissionTestCase):
         self.list_url = reverse("api:list_organizations")
         self.detail_url = reverse("api:get_organization", args=[self.organization.slug])
 
-    # test_list and test_retrieve should always work, no matter the user's scope. 
+    # test_list and test_retrieve should always work, no matter the user's scope.
     def test_list(self):
         self.assertGetReqStatusCode(self.list_url, 200)
 
     def test_create(self):
         data = {"name": "new org"}
         self.assertPostReqStatusCode(self.list_url, data, 201)
-
 
     def test_retrieve(self):
         self.assertGetReqStatusCode(self.detail_url, 403)
@@ -97,10 +96,19 @@ class OrganizationMemberAPIPermissionTests(APIPermissionTestCase):
         self.assertPostReqStatusCode(self.list_url, data, 201)
 
     def test_destroy(self):
+        # Target another member (not self): removing someone else requires
+        # member:admin; self-removal is always allowed and would bypass the gate.
+        another_org_user = self.organization.add_user(
+            baker.make("users.user"), OrganizationUserRole.MEMBER
+        )
+        detail_url = reverse(
+            "api:get_organization_member",
+            args=[self.organization.slug, another_org_user.pk],
+        )
         self.auth_token.add_permissions(["member:read", "member:write"])
-        self.assertDeleteReqStatusCode(self.detail_url, 403)
+        self.assertDeleteReqStatusCode(detail_url, 403)
         self.auth_token.add_permission("member:admin")
-        self.assertDeleteReqStatusCode(self.detail_url, 204)
+        self.assertDeleteReqStatusCode(detail_url, 204)
 
     def test_user_destroy(self):
         another_user = baker.make("users.user")

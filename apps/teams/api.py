@@ -242,7 +242,7 @@ async def modify_member_for_team(
     response={201: TeamProjectSchema},
     by_alias=True,
 )
-@has_permission(["team:write", "team:admin"])
+@has_permission(["team:read", "team:write", "team:admin"])
 async def add_member_to_team(
     request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):
@@ -259,7 +259,7 @@ async def add_member_to_team(
     response=TeamProjectSchema,
     by_alias=True,
 )
-@has_permission(["team:write", "team:admin"])
+@has_permission(["team:read", "team:write", "team:admin"])
 async def delete_member_from_team(
     request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):

@@ -270,7 +270,7 @@ async def create_organization_member(
     "organizations/{slug:organization_slug}/members/{int:member_id}/",
     response={204: None},
 )
-@has_permission(["member:admin"])
+@has_permission(["member:read", "member:write", "member:admin"])
 async def delete_organization_member(
     request: AuthHttpRequest, organization_slug: str, member_id: int
 ):
@@ -283,14 +283,17 @@ async def delete_organization_member(
     ).aexists():
         raise HttpError(400, "User is organization owner. Transfer ownership first.")
     org_user = await aget_object_or_404(
-        get_organization_users_queryset(user_id, organization_slug, role_required=True),
+        get_organization_users_queryset(user_id, organization_slug),
         id=member_id,
     )
-    # Check org role of user initiating request, but allow org users to remove themselves
-    if org_user.actor_role < OrganizationUserRole.MANAGER and not (
-        org_user.user and org_user.user.id == user_id
+    # Members may always remove themselves; removing anyone else requires the
+    # member:admin scope. The read-tier decorator above only gates that the
+    # caller has *some* member access to the org.
+    is_self = bool(org_user.user and org_user.user_id == user_id)
+    if not is_self and "member:admin" not in await request.auth.resolve_scope(
+        organization_slug
     ):
-        raise HttpError(403, "Forbidden")
+        raise HttpError(403, "Permission denied")
     await org_user.adelete()
     if org_user.user_id:
         await cache.adelete(user_scope_cache_key(org_user.user_id, organization_slug))

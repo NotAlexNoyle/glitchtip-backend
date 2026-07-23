@@ -137,10 +137,11 @@ class UsersTestCase(GlitchTestCase):
         self.assertContains(res, user2.email)
         self.assertNotContains(res, other_user.email)
 
-        # Can't view members of groups you don't belong to
+        # Can't view members of organizations you don't belong to: a non-member
+        # is denied outright (403) under the rescoped permission model.
         url = reverse("api:list_organization_members", args=[other_organization.slug])
         res = await self.async_client.get(url)
-        self.assertNotContains(res, other_user.email)
+        self.assertEqual(res.status_code, 403)
 
     async def test_emails_list(self):
         email_address = await baker.amake("account.EmailAddress", user=self.user)
