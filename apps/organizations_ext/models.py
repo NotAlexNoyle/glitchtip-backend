@@ -489,26 +489,24 @@ class OrganizationSocialApp(models.Model):
 @receiver(post_save, sender=OrganizationUser)
 @receiver(post_delete, sender=OrganizationUser)
 def invalidate_scope_cache_on_membership_change(sender, instance, **kwargs):
-    """Drop the cached scope set whenever a membership row changes.
+    """Drop the cached scope set when a membership row changes.
 
-    ``Auth.resolve_scope`` caches ``(user_id, org_slug) -> scopes`` for
-    ``USER_SCOPE_CACHE_TTL``. A role update or membership removal must clear
-    that entry so the new (or revoked) role takes effect immediately instead of
-    lingering for the cache TTL. ``add_user`` already covers the join case; this
-    covers every other save/delete path, including a bare ``.save()`` /
-    ``.asave()`` (e.g. role changes and the ``set_user_role`` test helper).
-
-    Imported locally because ``glitchtip.api.authentication`` imports this
-    module, and skipped for pending (user-less) invites, which have no cache
-    entry keyed by ``user_id``.
+    ``Auth.resolve_scope`` caches ``(user_id, org_slug) -> scopes``, so a role
+    change or removal must clear the entry to take effect before the TTL. The
+    import is local to avoid a cycle (``authentication`` imports this module);
+    user-less invites are skipped as they have no ``user_id``-keyed entry.
     """
     if instance.user_id is None:
         return
-    try:
-        org_slug = instance.organization.slug
-    except Organization.DoesNotExist:
-        # Membership row removed as part of the organization's own deletion;
-        # there is nothing left to authorize against.
+    # Fetch only the slug the cache key needs; a missing row (the membership was
+    # removed by the organization's own cascade delete) yields None -> nothing
+    # left to invalidate.
+    org_slug = (
+        Organization.objects.filter(id=instance.organization_id)
+        .values_list("slug", flat=True)
+        .first()
+    )
+    if org_slug is None:
         return
 
     from django.core.cache import cache
