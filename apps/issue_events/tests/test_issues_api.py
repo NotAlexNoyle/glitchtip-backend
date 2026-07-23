@@ -1685,7 +1685,7 @@ class OrganizationScopedIssueAPITestCase(GlitchTestCase):
         issue = await amake_issue(project=self.project, short_id=1)
         unaffiliated = await baker.amake("organizations_ext.Organization")
         res = await self.async_client.get(self.detail_url(unaffiliated.slug, issue.id))
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
 
     async def test_retrieve_not_my_issue(self):
         not_my_issue = await amake_issue()

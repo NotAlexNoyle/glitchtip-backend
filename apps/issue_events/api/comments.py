@@ -6,7 +6,7 @@ from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, has_issue_permission
+from glitchtip.api.permissions import has_issue_permission, has_permission
 
 from ..models import Comment, Issue
 from ..schema import CommentSchema
@@ -24,6 +24,11 @@ def get_queryset(
     if organization_slug:
         qs = qs.filter(issue__project__organization__slug=organization_slug)
     return qs
+
+
+class PostCommentSchema(Schema):
+    data: dict[Literal["text"], str]
+
 
 @router.get(
     "/issues/{int:issue_id}/comments/",
@@ -65,7 +70,7 @@ async def list_organization_comments(
 async def add_comment(
     request: AuthHttpRequest,
     issue_id: int,
-    payload: CommentSchema,
+    payload: PostCommentSchema,
 ):
     try:
         issue = await Issue.objects.aget(
@@ -95,7 +100,7 @@ async def add_organization_comment(
     request: AuthHttpRequest,
     organization_slug: str,
     issue_id: int,
-    payload: CommentSchema,
+    payload: PostCommentSchema,
 ):
     try:
         issue = await Issue.objects.aget(
@@ -126,7 +131,7 @@ async def update_comment(
     request: AuthHttpRequest,
     issue_id: int,
     comment_id: int,
-    payload: CommentSchema,
+    payload: PostCommentSchema,
 ):
     try:
         comment = await get_queryset(request, issue_id).aget(id=comment_id)
@@ -150,7 +155,7 @@ async def update_organization_comment(
     organization_slug: str,
     issue_id: int,
     comment_id: int,
-    payload: CommentSchema,
+    payload: PostCommentSchema,
 ):
     try:
         comment = await get_queryset(request, issue_id, organization_slug).aget(

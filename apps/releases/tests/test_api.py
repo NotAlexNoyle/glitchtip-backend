@@ -99,7 +99,9 @@ class ReleaseAPITestCase(GlitchTestCase):
             },
         )
         res = await self.async_client.delete(url)
-        self.assertEqual(res.status_code, 404)
+        # User is not a member of release2's organization -> 403 (was 404 before
+        # the permission rescope, when membership filtering hid the object).
+        self.assertEqual(res.status_code, 403)
         self.assertEqual(await Release.objects.acount(), 1)
 
     async def test_project_list(self):
