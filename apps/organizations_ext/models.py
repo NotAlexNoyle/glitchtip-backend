@@ -9,6 +9,8 @@ from django.core.validators import MaxValueValidator
 from django.db import models
 from django.db.models import Q, Sum
 from django.db.models.functions import Coalesce
+from django.db.models.signals import post_delete, post_save
+from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
@@ -482,3 +484,35 @@ class OrganizationSocialApp(models.Model):
 
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE)
     social_app = models.OneToOneField(SocialApp, on_delete=models.CASCADE)
+
+
+@receiver(post_save, sender=OrganizationUser)
+@receiver(post_delete, sender=OrganizationUser)
+def invalidate_scope_cache_on_membership_change(sender, instance, **kwargs):
+    """Drop the cached scope set whenever a membership row changes.
+
+    ``Auth.resolve_scope`` caches ``(user_id, org_slug) -> scopes`` for
+    ``USER_SCOPE_CACHE_TTL``. A role update or membership removal must clear
+    that entry so the new (or revoked) role takes effect immediately instead of
+    lingering for the cache TTL. ``add_user`` already covers the join case; this
+    covers every other save/delete path, including a bare ``.save()`` /
+    ``.asave()`` (e.g. role changes and the ``set_user_role`` test helper).
+
+    Imported locally because ``glitchtip.api.authentication`` imports this
+    module, and skipped for pending (user-less) invites, which have no cache
+    entry keyed by ``user_id``.
+    """
+    if instance.user_id is None:
+        return
+    try:
+        org_slug = instance.organization.slug
+    except Organization.DoesNotExist:
+        # Membership row removed as part of the organization's own deletion;
+        # there is nothing left to authorize against.
+        return
+
+    from django.core.cache import cache
+
+    from glitchtip.api.authentication import user_scope_cache_key
+
+    cache.delete(user_scope_cache_key(instance.user_id, org_slug))

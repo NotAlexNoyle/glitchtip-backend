@@ -48,7 +48,7 @@ class TeamAPITestCase(TestCase):
         await self.async_client.aforce_login(member)
         url = reverse("api:delete_team", args=[self.organization.slug, team.slug])
         res = await self.async_client.delete(url)
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
         self.assertTrue(await Team.objects.filter(id=team.id).aexists())
 
     async def test_update(self):

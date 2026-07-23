@@ -127,7 +127,7 @@ async def update_organization(
     "organizations/{slug:organization_slug}/",
     response={204: None},
 )
-@has_permission(["org:manager", "org:admin"])
+@has_permission(["org:admin"])
 async def delete_organization(request: AuthHttpRequest, organization_slug: str):
     organization = await aget_object_or_404(
         get_organizations_queryset(
