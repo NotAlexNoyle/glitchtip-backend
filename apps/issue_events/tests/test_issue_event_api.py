@@ -81,8 +81,9 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
         )
         url = get_list_issue_event_url(self.organization.slug, first_event.issue_id)
 
-        # +1 org-membership lookup from the org-scoped path resolving scope
-        with self.assertNumQueries(3):
+        # +2 authz queries from the bare route's has_issue_permission: the
+        # issue -> owning-org-slug resolution and the org-membership scope lookup.
+        with self.assertNumQueries(4):
             res = self.client.get(url)
 
         self.assertEqual(res.headers.get("X-Hits"), "52")
@@ -116,8 +117,9 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
         )
         url = get_list_issue_event_url(self.organization.slug, first_event.issue_id)
 
-        # +1 org-membership lookup from the org-scoped path resolving scope
-        with self.assertNumQueries(2):
+        # +2 authz queries from the bare route's has_issue_permission: the
+        # issue -> owning-org-slug resolution and the org-membership scope lookup.
+        with self.assertNumQueries(3):
             res = self.client.get(url)
 
         self.assertEqual(res.headers.get("X-Hits"), "2")
