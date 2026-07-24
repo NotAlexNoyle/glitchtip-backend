@@ -488,7 +488,7 @@ class OrganizationSocialApp(models.Model):
 
 @receiver(post_save, sender=OrganizationUser)
 @receiver(post_delete, sender=OrganizationUser)
-def invalidate_scope_cache_on_membership_change(sender, instance, **kwargs):
+def invalidate_scope_cache_on_membership_change(instance, **kwargs):
     """Drop the cached scope set when a membership row changes.
 
     ``Auth.resolve_scope`` caches ``(user_id, org_slug) -> scopes``, so a role
@@ -498,15 +498,14 @@ def invalidate_scope_cache_on_membership_change(sender, instance, **kwargs):
     """
     if instance.user_id is None:
         return
-    # Fetch only the slug the cache key needs; a missing row (the membership was
-    # removed by the organization's own cascade delete) yields None -> nothing
-    # left to invalidate.
-    org_slug = (
-        Organization.objects.filter(id=instance.organization_id)
-        .values_list("slug", flat=True)
-        .first()
-    )
-    if org_slug is None:
+    # Reuse the already-loaded related organization when present -- the
+    # aadd_user and API paths set it, so this adds no query -- and fall back to a
+    # fetch only when it is not loaded. A missing organization (the row was
+    # removed by the organization's own cascade delete) leaves nothing to
+    # invalidate.
+    try:
+        org_slug = instance.organization.slug
+    except Organization.DoesNotExist:
         return
 
     from django.core.cache import cache

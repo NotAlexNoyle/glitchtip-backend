@@ -259,22 +259,50 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
         self.event_json_url = get_event_json_url(
             self.organization.slug, self.event.issue_id, self.event.id
         )
+        self.org_list_url = reverse(
+            "api:list_organization_issue_event",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.event.issue_id,
+            },
+        )
+        self.org_detail_url = reverse(
+            "api:get_organization_issue_event",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.event.issue_id,
+                "event_id": self.event.id.hex,
+            },
+        )
+        self.org_latest_url = reverse(
+            "api:get_organization_latest_issue_event",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.event.issue_id,
+            },
+        )
 
     def test_list(self):
         self.assertGetReqStatusCode(self.list_url, 403)
         self.assertGetReqStatusCode(self.project_list_url, 403)
+        self.assertGetReqStatusCode(self.org_list_url, 403)
         self.auth_token.add_permission("event:read")
         self.assertGetReqStatusCode(self.list_url, 200)
         self.assertGetReqStatusCode(self.project_list_url, 200)
+        self.assertGetReqStatusCode(self.org_list_url, 200)
 
     def test_retrieve(self):
         self.assertGetReqStatusCode(self.detail_url, 403)
         self.assertGetReqStatusCode(self.project_detail_url, 403)
         self.assertGetReqStatusCode(self.latest_detail_url, 403)
+        self.assertGetReqStatusCode(self.org_detail_url, 403)
+        self.assertGetReqStatusCode(self.org_latest_url, 403)
         self.auth_token.add_permission("event:read")
         self.assertGetReqStatusCode(self.detail_url, 200)
         self.assertGetReqStatusCode(self.project_detail_url, 200)
         self.assertGetReqStatusCode(self.latest_detail_url, 200)
+        self.assertGetReqStatusCode(self.org_detail_url, 200)
+        self.assertGetReqStatusCode(self.org_latest_url, 200)
 
     def test_event_json_view(self):
         url = self.event_json_url
@@ -459,3 +487,17 @@ class OrganizationScopedIssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             )
         )
         self.assertEqual(res.status_code, 404)
+
+    async def test_non_member_forbidden(self):
+        """A session user who is not a member of the path org is denied at the
+        decorator (403), before any membership-filtered queryset runs -- this is
+        the authz behavior the ``*_wrong_organization`` cases (a member of the
+        other org) do not exercise."""
+        outsider_org = await baker.amake("organizations_ext.Organization")
+        for url in (
+            self.list_url(outsider_org.slug, self.issue.id),
+            self.latest_url(outsider_org.slug, self.issue.id),
+            self.detail_url(outsider_org.slug, self.issue.id, self.event.id.hex),
+        ):
+            res = await self.async_client.get(url)
+            self.assertEqual(res.status_code, 403)
