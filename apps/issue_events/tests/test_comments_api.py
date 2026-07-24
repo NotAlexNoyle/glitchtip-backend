@@ -4,7 +4,7 @@ from model_bakery import baker
 from apps.organizations_ext.constants import OrganizationUserRole
 from glitchtip.test_utils.test_case import GlitchTipTestCase
 
-from ..models import Comment
+from ..models import Comment, Issue
 
 
 # Create your tests here.
@@ -38,8 +38,29 @@ class CommentsApiTestCase(GlitchTipTestCase):
         self.assertEqual(res.json()["data"]["text"], "Test")
 
         url = reverse(
-            "api:list_comments",
+            "api:add_comment",
             kwargs={"issue_id": not_my_issue.id},
+        )
+        res = await self.async_client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 403)
+
+    async def test_org_comment_creation(self):
+        data = {"data": {"text": "Test"}}
+        not_my_issue = await baker.amake("issue_events.Issue")
+        res = await self.async_client.post(
+            self.url, data, content_type="application/json"
+        )
+
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["data"]["text"], "Test")
+
+        org_slug = await Issue.objects.filter(pk=not_my_issue.pk).values_list(
+            "project__organization__slug", flat=True
+        ).afirst()
+
+        url = reverse(
+            "api:add_organization_comment",
+            kwargs={"issue_id": not_my_issue.id, "organization_slug": org_slug},
         )
         res = await self.async_client.post(url, data, content_type="application/json")
         self.assertEqual(res.status_code, 403)
