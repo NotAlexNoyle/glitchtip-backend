@@ -488,7 +488,7 @@ class OrganizationSocialApp(models.Model):
 
 @receiver(post_save, sender=OrganizationUser)
 @receiver(post_delete, sender=OrganizationUser)
-def invalidate_scope_cache_on_membership_change(sender, instance, **kwargs):
+def invalidate_scope_cache_on_membership_change(instance, **kwargs):
     """Drop the cached scope set when a membership row changes.
 
     ``Auth.resolve_scope`` caches ``(user_id, org_slug) -> scopes``, so a role
