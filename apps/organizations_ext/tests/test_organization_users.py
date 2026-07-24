@@ -297,8 +297,13 @@ class OrganizationUsersTestCase(TestCase):
         self.assertEqual(res.status_code, 403)
 
     async def test_organization_users_create_without_org_specific_permissions(self):
-        """
-        Ensure queryset with role_required checks the correct organization user's role.
+        """Member creation is authorized against the caller's role in the target org.
+
+        The caller is ADMIN in ``organization_2`` (which lacks ``member:write``),
+        so the first invite is denied. After the role is raised to MANAGER the
+        same invite succeeds: the role change invalidates the cached scope set
+        immediately (see the ``post_save`` signal on ``OrganizationUser``), so
+        the new scopes apply without waiting out the scope-cache TTL.
         """
 
         organization_2 = await baker.amake("organizations_ext.Organization")
@@ -319,6 +324,7 @@ class OrganizationUsersTestCase(TestCase):
         await org_2_user.asave()
 
         res = await self.async_client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 201)
         self.assertTrue(
             await OrganizationUser.objects.filter(
                 organization=organization_2,
