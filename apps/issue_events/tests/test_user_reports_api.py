@@ -108,6 +108,15 @@ class OrganizationScopedUserReportTestCase(GlitchTipTestCaseMixin, TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(len(res.json()), 0)
 
+    async def test_non_member_forbidden(self):
+        """A session user who is not a member of the path org is denied at the
+        decorator (403), unlike ``test_list_wrong_organization`` (a member of
+        the other org, which membership-filters to an empty list)."""
+        outsider_org = await baker.amake("organizations_ext.Organization")
+        url = list_organization_user_reports_url(outsider_org.slug, self.event.issue_id)
+        res = await self.async_client.get(url)
+        self.assertEqual(res.status_code, 403)
+
 
 class UserReportAPIPermissionTests(APIPermissionTestCase):
     def setUp(self):
@@ -118,8 +127,13 @@ class UserReportAPIPermissionTests(APIPermissionTestCase):
             "issue_events.UserReport", project=self.project, issue=self.issue
         )
         self.list_url = list_user_reports_url(self.organization.slug, self.issue.id)
+        self.org_list_url = list_organization_user_reports_url(
+            self.organization.slug, self.issue.id
+        )
 
     def test_list(self):
         self.assertGetReqStatusCode(self.list_url, 403)
+        self.assertGetReqStatusCode(self.org_list_url, 403)
         self.auth_token.add_permission("event:read")
         self.assertGetReqStatusCode(self.list_url, 200)
+        self.assertGetReqStatusCode(self.org_list_url, 200)
