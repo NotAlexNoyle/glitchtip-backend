@@ -323,8 +323,6 @@ async def update_organization_member(
         ).select_related("organization"),
         id=member_id,
     )
-    if member.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "Forbidden")
     member.role = OrganizationUserRole.from_string(payload.org_role)
     # Disallow an ownerless organization
     if (
