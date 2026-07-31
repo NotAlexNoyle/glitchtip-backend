@@ -3,6 +3,7 @@ from model_bakery import baker
 
 from glitchtip.test_utils.test_case import GlitchTestCase
 
+from ..api import STATUS_PAGE_CHECK_MONITOR_LIMIT
 from ..constants import MonitorType
 
 
@@ -142,3 +143,40 @@ class StatusPageTestCase(GlitchTestCase):
         data = {"name": "foo"}
         res = await self.async_client.post(url, data, content_type="application/json")
         self.assertContains(res, data["name"], status_code=201)
+
+    async def test_status_page_api_caps_hydrated_monitors(self):
+        """Checks are hydrated for a bounded number of monitors per response.
+
+        Uncapped, this endpoint fetched and serialized 60 checks for every
+        monitor of every status page in the response — 120,000 MonitorCheck
+        objects for a 2,000-monitor status page, most of the cost being Python
+        object construction rather than SQL. Monitors past the cap are still
+        listed, but with an empty ``checks`` list.
+        """
+        status_page = await baker.amake(
+            "uptime.StatusPage", organization=self.organization
+        )
+        total = STATUS_PAGE_CHECK_MONITOR_LIMIT + 3
+        for i in range(total):
+            monitor = await baker.amake(
+                "uptime.Monitor",
+                organization=self.organization,
+                name=f"Monitor {i}",
+            )
+            await baker.amake(
+                "uptime.MonitorCheck",
+                monitor=monitor,
+                organization=self.organization,
+                is_up=True,
+            )
+            await status_page.monitors.aadd(monitor)
+
+        url = reverse("api:list_status_pages", args=(self.organization.slug,))
+        res = await self.async_client.get(url)
+
+        self.assertEqual(res.status_code, 200)
+        monitors = res.json()[0]["monitors"]
+        # Every monitor is still listed; only the check hydration is bounded.
+        self.assertEqual(len(monitors), total)
+        hydrated = [monitor for monitor in monitors if monitor["checks"]]
+        self.assertEqual(len(hydrated), STATUS_PAGE_CHECK_MONITOR_LIMIT)

@@ -1,11 +1,14 @@
 from collections import defaultdict
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.db import connection
 from django.db.models import Prefetch
 from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import aget_object_or_404
+from django.utils import timezone
 from ninja import Router, Status
 from ninja.pagination import paginate
 
@@ -13,6 +16,7 @@ from apps.organizations_ext.models import Organization
 from apps.projects.models import Project
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.pagination import AsyncLinkHeaderPagination
+from glitchtip.partition_manager import UUID7Helper
 
 from .models import Monitor, MonitorCheck, StatusPage
 from .schema import (
@@ -27,6 +31,35 @@ from .schema import (
 from .tasks import send_monitor_notification, update_uptime_statistics
 
 router = Router()
+
+# ── Check-fetch partition bounding ──────────────────────────────────
+# ``uptime_monitorcheck`` is partitioned RANGE (id) — a UUIDv7, so effectively
+# by time — and sub-partitioned HASH (organization_id). Filtering only on
+# monitor_id/organization_id prunes the hash dimension but leaves the range
+# dimension entirely unpruned, so Postgres opens an index scan on *every* daily
+# partition (~97 at the default 90-day retention) for every monitor on the page
+# — thousands of index descents to return 60 rows each. Adding a lower bound on
+# ``id`` prunes the range dimension too.
+
+# Coarse windows a bounded query may use. Each monitor is assigned the smallest
+# window expected to hold ``limit`` checks, so a page issues one query per
+# distinct window (usually one) instead of one per monitor. Keeping this set
+# small also bounds the number of distinct SQL literals, and therefore the
+# number of cached query plans.
+CHECK_WINDOW_BUCKETS_DAYS = (1, 7, 30)
+
+# Multiplier on the ideal span of ``limit`` checks. Absorbs missed checks and
+# short outages so the bounded query alone satisfies the common case; genuine
+# shortfalls fall through to an unbounded second pass.
+CHECK_WINDOW_SLACK = 2
+
+# Upper bound on how many monitors one ``/status-pages/`` response hydrates with
+# checks. Without it the endpoint fetches and serializes checks for every monitor
+# of every status page on the page — measured at 2,000 monitors and 120,000
+# MonitorCheck objects in a single request, the bulk of the cost being Python
+# object construction rather than SQL. Monitors past the cap serialize with an
+# empty ``checks`` list.
+STATUS_PAGE_CHECK_MONITOR_LIMIT = 50
 
 
 class MonitorPagination(AsyncLinkHeaderPagination):
@@ -60,7 +93,21 @@ class StatusPagePagination(AsyncLinkHeaderPagination):
         monitors = [
             monitor for status_page in page for monitor in status_page.monitors.all()
         ]
-        await attach_checks_to_monitors(monitors)
+        # Cap by distinct monitor id rather than by instance: a monitor shared
+        # across status pages yields one instance per page, and it must not be
+        # hydrated on one page while blank on another.
+        distinct_ids = list(dict.fromkeys(monitor.id for monitor in monitors))
+        hydrate_ids = set(distinct_ids[:STATUS_PAGE_CHECK_MONITOR_LIMIT])
+        await attach_checks_to_monitors(
+            [monitor for monitor in monitors if monitor.id in hydrate_ids]
+        )
+        # Monitors past the cap still need an empty prefetch cache: MonitorSchema
+        # reads ``checks`` as a reverse relation, which would otherwise fall back
+        # to a synchronous ORM query mid-serialization and raise
+        # SynchronousOnlyOperation.
+        for monitor in monitors:
+            if monitor.id not in hydrate_ids:
+                monitor._prefetched_objects_cache = {"checks": []}
         return page
 
 
@@ -77,6 +124,7 @@ async def fetch_checks_lateral(
     monitor_ids: list[int],
     organization_ids: list[int],
     limit: int = 60,
+    min_id: UUID | None = None,
 ) -> dict[int, list[MonitorCheck]]:
     """
     Efficiently fetch top N checks per monitor using LATERAL JOIN.
@@ -87,12 +135,27 @@ async def fetch_checks_lateral(
     - No need to process all historical checks
     - Filters by organization_id for partition pruning
 
+    ``min_id`` bounds the RANGE partition key from below, pruning the daily
+    partitions older than the bound. Callers should prefer
+    ``attach_checks_to_monitors``, which derives a safe bound per monitor.
+    Passing ``None`` scans every partition.
+
     Returns a dict mapping monitor_id -> list of MonitorCheck instances.
     """
     if not monitor_ids:
         return {}
 
-    sql = """
+    # Interpolated as a literal rather than bound as a query parameter: a
+    # parameterized bound prunes only at execution time, leaving the planner to
+    # carry all ~388 leaf partitions (measured at 48 ms of planning alone). A
+    # literal prunes at plan time, which is where that cost goes. Safe to
+    # interpolate — the round-trip through UUID() guarantees a bare UUID, and
+    # the value is always generated by UUID7Helper, never user input.
+    partition_bound = ""
+    if min_id is not None:
+        partition_bound = f"AND id >= '{UUID(str(min_id))}'::uuid"
+
+    sql = f"""
         SELECT c.id, c.organization_id, c.monitor_id, c.start_check,
                c.response_time, c.reason, c.is_up, c.is_change, c.data
         FROM unnest(%(monitor_ids)s::int[], %(organization_ids)s::int[]) AS m(id, org_id)
@@ -101,6 +164,7 @@ async def fetch_checks_lateral(
                    response_time, reason, is_up, is_change, data
             FROM uptime_monitorcheck
             WHERE monitor_id = m.id AND organization_id = m.org_id
+                  {partition_bound}
             ORDER BY start_check DESC
             LIMIT %(limit)s
         ) c
@@ -140,20 +204,89 @@ async def fetch_checks_lateral(
     return dict(checks_by_monitor)
 
 
+def _check_window(
+    monitor: Monitor, limit: int, now: datetime, retention: timedelta
+) -> timedelta | None:
+    """Smallest bucketed window expected to contain ``limit`` checks.
+
+    Returns ``None`` when no bucket is narrower than retention, i.e. the query
+    would span every partition regardless and the bound buys nothing.
+    """
+    # Span that ``limit`` checks occupy at this monitor's configured interval,
+    # widened to absorb gaps.
+    needed = timedelta(seconds=monitor.interval * limit * CHECK_WINDOW_SLACK)
+    # A monitor cannot have checks predating its own creation, so a young
+    # monitor only needs a window back to when it was created. This is what
+    # keeps newly-added monitors — which are always short of ``limit`` checks —
+    # off the all-partitions path.
+    span = min(needed, now - monitor.created)
+    for days in CHECK_WINDOW_BUCKETS_DAYS:
+        window = timedelta(days=days)
+        if window >= span and window < retention:
+            return window
+    return None
+
+
 async def attach_checks_to_monitors(
     monitors: list[Monitor], limit: int = 60
 ) -> list[Monitor]:
-    """Fetch and attach checks to a list of monitors using LATERAL JOIN."""
+    """Fetch and attach checks to a list of monitors using LATERAL JOIN.
+
+    Monitors are grouped by the partition-key window they need so each group is
+    fetched with a single plan-time-pruned query. Instances must have
+    ``interval`` and ``created`` loaded (no ``.only()``/``.defer()``), since the
+    window is derived from them.
+    """
     if not monitors:
         return monitors
     # Fetch once per distinct monitor: the same monitor can appear multiple
     # times (e.g. shared across status pages), and duplicate ids in the
     # unnest() would run the LATERAL subquery once per copy and double the
     # returned checks. Attach the result to every instance below.
-    org_by_monitor = {m.id: m.organization_id for m in monitors}
-    checks_by_monitor = await fetch_checks_lateral(
-        list(org_by_monitor), list(org_by_monitor.values()), limit
-    )
+    distinct_monitors: dict[int, Monitor] = {}
+    for monitor in monitors:
+        distinct_monitors.setdefault(monitor.id, monitor)
+
+    now = timezone.now()
+    retention = timedelta(days=settings.GLITCHTIP_UPTIME_RETENTION_DAYS)
+    by_window: dict[timedelta | None, list[Monitor]] = defaultdict(list)
+    for monitor in distinct_monitors.values():
+        by_window[_check_window(monitor, limit, now, retention)].append(monitor)
+
+    checks_by_monitor: dict[int, list[MonitorCheck]] = {}
+    unbounded_retry: list[Monitor] = []
+    for window, group in by_window.items():
+        fetched = await fetch_checks_lateral(
+            [m.id for m in group],
+            [m.organization_id for m in group],
+            limit,
+            min_id=None if window is None else UUID7Helper.from_datetime(now - window),
+        )
+        checks_by_monitor.update(fetched)
+        if window is None:
+            continue
+        # A short result is only conclusive when the window covered the whole of
+        # the monitor's existence. Otherwise the interval-derived estimate was
+        # too optimistic — a paused monitor, or a long gap in checks — and older
+        # rows may exist outside the window, so re-fetch those monitors
+        # unbounded. Rare in practice, and exactly equivalent to the old
+        # behaviour when it happens.
+        for monitor in group:
+            if (
+                len(fetched.get(monitor.id, ())) < limit
+                and window < now - monitor.created
+            ):
+                unbounded_retry.append(monitor)
+
+    if unbounded_retry:
+        checks_by_monitor.update(
+            await fetch_checks_lateral(
+                [m.id for m in unbounded_retry],
+                [m.organization_id for m in unbounded_retry],
+                limit,
+            )
+        )
+
     for monitor in monitors:
         # Use Django's prefetch cache so serializers see the checks
         monitor._prefetched_objects_cache = {
