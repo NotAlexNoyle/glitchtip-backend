@@ -43,9 +43,7 @@ router = Router()
 
 # Coarse windows a bounded query may use. Each monitor is assigned the smallest
 # window expected to hold ``limit`` checks, so a page issues one query per
-# distinct window (usually one) instead of one per monitor. Keeping this set
-# small also bounds the number of distinct SQL literals, and therefore the
-# number of cached query plans.
+# distinct window (usually one) instead of one per monitor.
 CHECK_WINDOW_BUCKETS_DAYS = (1, 7, 30)
 
 # Multiplier on the ideal span of ``limit`` checks. Absorbs missed checks and
@@ -95,9 +93,15 @@ class StatusPagePagination(AsyncLinkHeaderPagination):
         ]
         # Cap by distinct monitor id rather than by instance: a monitor shared
         # across status pages yields one instance per page, and it must not be
-        # hydrated on one page while blank on another.
-        distinct_ids = list(dict.fromkeys(monitor.id for monitor in monitors))
-        hydrate_ids = set(distinct_ids[:STATUS_PAGE_CHECK_MONITOR_LIMIT])
+        # hydrated on one page while blank on another. Sorted because neither
+        # Monitor.Meta nor the prefetch queryset defines an ordering, so slicing
+        # the database's own order would hydrate an arbitrary subset that varies
+        # between otherwise identical requests.
+        hydrate_ids = set(
+            sorted({monitor.id for monitor in monitors})[
+                :STATUS_PAGE_CHECK_MONITOR_LIMIT
+            ]
+        )
         await attach_checks_to_monitors(
             [monitor for monitor in monitors if monitor.id in hydrate_ids]
         )
@@ -236,6 +240,19 @@ async def attach_checks_to_monitors(
     fetched with a single plan-time-pruned query. Instances must have
     ``interval`` and ``created`` loaded (no ``.only()``/``.defer()``), since the
     window is derived from them.
+
+    Bounding ``id`` while ordering by ``start_check`` is safe because writers
+    mint the UUIDv7 ``id`` no earlier than the ``start_check`` they record:
+    ``save_monitor_checks`` passes the batch-start time while ids are minted
+    afterwards, and ``heartbeat_check`` captures ``start_check`` before the
+    insert. So a row inside the window by ``start_check`` is also inside it by
+    ``id``, and the bound cannot hide it. The one wrinkle is that UUIDv7 floors
+    to whole milliseconds, so the guarantee is exact only to within 1 ms —
+    irrelevant against a window of a day or more, and the short-result retry
+    below would catch it regardless. New write paths should preserve this
+    ordering; a writer that backdates ``start_check`` is fine (its rows are
+    merely returned by a wider bound than needed), one that backdates ``id`` is
+    not.
     """
     if not monitors:
         return monitors
@@ -319,6 +336,12 @@ async def heartbeat_check(
         is_up=True,
         reason=None,
         is_change=is_change,
+        # Captured before the insert so it is not read from the field default,
+        # which Django evaluates *after* the UUIDv7 ``id`` default. Bounded check
+        # fetches assume a row's id timestamp is not earlier than its
+        # ``start_check`` (see attach_checks_to_monitors); relying on the default
+        # inverted that by up to a millisecond on every heartbeat.
+        start_check=timezone.now(),
     )
 
     # Update hourly statistics

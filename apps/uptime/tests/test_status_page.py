@@ -180,3 +180,10 @@ class StatusPageTestCase(GlitchTestCase):
         self.assertEqual(len(monitors), total)
         hydrated = [monitor for monitor in monitors if monitor["checks"]]
         self.assertEqual(len(hydrated), STATUS_PAGE_CHECK_MONITOR_LIMIT)
+        # Which monitors get hydrated must be deterministic. Neither
+        # Monitor.Meta nor the prefetch queryset defines an ordering, so slicing
+        # the database's own order would vary between identical requests.
+        self.assertEqual(
+            sorted(monitor["name"] for monitor in hydrated),
+            sorted(f"Monitor {i}" for i in range(STATUS_PAGE_CHECK_MONITOR_LIMIT)),
+        )
