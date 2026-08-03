@@ -13,13 +13,23 @@ from ninja.security import SessionAuth as BaseSessionAuth
 from apps.api_tokens.models import APIToken
 from apps.organizations_ext.models import OrganizationUser
 from apps.organizations_ext.scopes import Scopes
+from apps.users.models import User
 
 USER_SCOPE_CACHE_KEY = "user_scope:v1:"
 USER_SCOPE_CACHE_TTL = 300
+USER_SUPERUSER_CACHE_KEY = "user_superuser:v1:"
+# Deliberately shorter than the scope TTL: nothing invalidates this entry (the
+# scope cache has membership-change hooks, is_superuser has none), and the flag
+# grants every scope, so a stale True is the most expensive staleness we have.
+USER_SUPERUSER_CACHE_TTL = 60
 
 
 def user_scope_cache_key(user_id: int, org_slug: str) -> str:
     return f"{USER_SCOPE_CACHE_KEY}{user_id}:{org_slug}"
+
+
+def user_superuser_cache_key(user_id: int) -> str:
+    return f"{USER_SUPERUSER_CACHE_KEY}{user_id}"
 
 
 @dataclass
@@ -51,6 +61,27 @@ class Auth:
         else:
             self.scope = set()
         return self.scope
+
+    async def is_superuser(self) -> bool:
+        """Whether this user is a Django superuser, cached per user.
+
+        ``is_superuser`` is a column on ``users_user``, and the session path
+        never loads the user row (see ``SessionAuth``), so this is a real query.
+        Call it only when a scope check has already failed - see
+        ``glitchtip.api.permissions``. Denials are rare, so the cost never lands
+        on the hot path.
+        """
+        key = user_superuser_cache_key(self.user_id)
+        cached = await cache.aget(key)
+        if cached is None:
+            cached = (
+                await User.objects.filter(id=self.user_id)
+                .values_list("is_superuser", flat=True)
+                .afirst()
+                or False
+            )
+            await cache.aset(key, cached, USER_SUPERUSER_CACHE_TTL)
+        return cached
 
 
 class AuthHttpRequest(HttpRequest):
