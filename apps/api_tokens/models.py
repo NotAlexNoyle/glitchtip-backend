@@ -4,6 +4,7 @@ import os
 from django.conf import settings
 from django.db import models
 
+from apps.organizations_ext.scopes import SCOPES
 from bitfield import BitField
 from glitchtip.base_models import CreatedModel
 
@@ -23,24 +24,7 @@ class APIToken(CreatedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     label = models.CharField(max_length=255, blank=True)
     scopes = BitField(
-        flags=(
-            "project:read",
-            "project:write",
-            "project:admin",
-            "project:releases",
-            "team:read",
-            "team:write",
-            "team:admin",
-            "event:read",
-            "event:write",
-            "event:admin",
-            "org:read",
-            "org:write",
-            "org:admin",
-            "member:read",
-            "member:write",
-            "member:admin",
-        )
+        flags=(SCOPES)
     )
 
     def __str__(self):
