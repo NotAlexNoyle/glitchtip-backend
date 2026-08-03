@@ -66,9 +66,7 @@ class SessionAuth(BaseSessionAuth):
     request.auth will result in the user id
     """
 
-    async def authenticate(
-        self, request: HttpRequest, key: Optional[str]
-    ) -> Optional[Auth]:
+    async def authenticate(self, request: HttpRequest, key: str | None) -> Auth | None:
         if settings.SESSION_ENGINE == "django.contrib.sessions.backends.cache":
             user_id = request.session.get(SESSION_KEY)
         # Django DB backed sessions don't support async yet
@@ -83,7 +81,7 @@ class TokenAuth(HttpBearer):
     Store the token object under data for checking scopes permissions.
     """
 
-    def __call__(self, request: HttpRequest) -> Optional[Any]:
+    def __call__(self, request: HttpRequest) -> Any | None:
         # Workaround https://github.com/vitalik/django-ninja/issues/989
         if request.resolver_match and request.resolver_match.url_name in [
             "setup_wizard_hash"
@@ -96,7 +94,7 @@ class TokenAuth(HttpBearer):
     async def get_anon(self):
         return AnonymousUser()
 
-    async def authenticate(self, request: HttpRequest, key: str) -> Optional[Auth]:
+    async def authenticate(self, request: HttpRequest, key: str) -> Auth | None:
         try:
             token = await APIToken.objects.aget(token=key, user__is_active=True)
         except APIToken.DoesNotExist:

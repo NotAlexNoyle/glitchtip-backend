@@ -185,26 +185,30 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
 
     async def test_relative_event_ordering(self):
         issue = await baker.amake("issue_events.issue", project=self.project)
+        org = self.project.organization
         now = timezone.now()
-        await baker.amake("issue_events.IssueEvent", issue=issue)
+        await baker.amake("issue_events.IssueEvent", issue=issue, organization=org)
         # Explicit, increasing UUIDv7 ids so id-based prev/next navigation is
         # deterministic (same-millisecond ids otherwise sort randomly).
         event1 = await baker.amake(
             "issue_events.IssueEvent",
             issue=issue,
+            organization=org,
             id=UUID7Helper.from_datetime(now + timedelta(seconds=1)),
         )
         event2 = await baker.amake(
             "issue_events.IssueEvent",
             issue=issue,
+            organization=org,
             id=UUID7Helper.from_datetime(now + timedelta(seconds=2)),
         )
         event3 = await baker.amake(
             "issue_events.IssueEvent",
             issue=issue,
+            organization=org,
             id=UUID7Helper.from_datetime(now + timedelta(seconds=3)),
         )
-        await baker.amake("issue_events.IssueEvent", issue=issue)
+        await baker.amake("issue_events.IssueEvent", issue=issue, organization=org)
         url = get_issue_event_url(self.organization.slug, issue.id, event2.id)
         res = await self.async_client.get(url)
         event_details = res.json()
@@ -457,6 +461,26 @@ class OrganizationScopedIssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
             )
         )
         self.assertEqual(res.status_code, 404)
+
+    async def test_retrieve_relative_event_ordering(self):
+        """prev/next are org-scoped subqueries; scoping must not break navigation."""
+        now = timezone.now()
+        events = [
+            await baker.amake(
+                "issue_events.IssueEvent",
+                issue=self.issue,
+                organization=self.organization,
+                id=UUID7Helper.from_datetime(now + timedelta(seconds=seconds)),
+            )
+            for seconds in (1, 2, 3)
+        ]
+        res = await self.async_client.get(
+            self.detail_url(self.organization.slug, self.issue.id, events[1].id.hex)
+        )
+        self.assertEqual(res.status_code, 200)
+        event_details = res.json()
+        self.assertEqual(event_details["nextEventID"], events[2].id.hex)
+        self.assertEqual(event_details["previousEventID"], events[0].id.hex)
 
     async def test_retrieve_by_sentry_event_id(self):
         """The UUIDv4 branch resolves the org separately; it must scope too."""

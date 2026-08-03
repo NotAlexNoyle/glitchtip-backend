@@ -108,6 +108,41 @@ async def resolve_assignee(
     return org_user, None
 
 
+async def _aggregate_tags(issue: Issue, key: str | None):
+    qs = issue.issuetag_set.filter(organization_id=issue.project.organization_id)
+    if key:
+        qs = qs.filter(tag_key__key=key)
+    qs = (
+        qs.values("tag_key__key", "tag_value__value")
+        .annotate(total_count=Sum("count"))
+        .order_by("-total_count")[:100000]
+    )
+    keys = {row["tag_key__key"] async for row in qs}
+    return [
+        {
+            "topValues": [
+                {
+                    "name": group["tag_value__value"],
+                    "value": group["tag_value__value"],
+                    "count": group["total_count"],
+                    "key": group["tag_key__key"],
+                }
+                for group in qs
+                if group["tag_key__key"] == key
+            ],
+            "uniqueValues": len(
+                [group for group in qs if group["tag_key__key"] == key]
+            ),
+            "key": key,
+            "name": key,
+            "totalValues": sum(
+                [group["total_count"] for group in qs if group["tag_key__key"] == key]
+            ),
+        }
+        for key in keys
+    ]
+
+
 @router.get(
     "/issues/{int:issue_id}/",
     response=IssueDetailSchema,
@@ -124,9 +159,8 @@ async def get_issue(request: AuthHttpRequest, issue_id: int):
     except Issue.DoesNotExist:
         raise Http404()
 
-
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",
     response=IssueDetailSchema,
     by_alias=True,
 )
@@ -161,9 +195,8 @@ async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
         return []
     return issue.first_release.data.get("commits", [])
 
-
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/commits/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/commits/",
     response=list[CommitSchema],
     by_alias=True,
 )
@@ -211,7 +244,7 @@ async def delete_issue(request: AuthHttpRequest, issue_id: int):
 
 
 @router.delete(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",
     response={204: None},
 )
 @has_permission(["event:write", "event:admin"])
@@ -227,7 +260,7 @@ async def delete_organization_issue(
 
 
 @router.put(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",
     response=IssueDetailSchema,
     by_alias=True,
 )
@@ -529,42 +562,12 @@ async def list_issue_tags(
     except Issue.DoesNotExist:
         raise Http404()
 
-    qs = issue.issuetag_set
-    if key:
-        qs = qs.filter(tag_key__key=key)
-    qs = (
-        qs.values("tag_key__key", "tag_value__value")
-        .annotate(total_count=Sum("count"))
-        .order_by("-total_count")[:100000]
-    )
-    keys = {row["tag_key__key"] async for row in qs}
-    return [
-        {
-            "topValues": [
-                {
-                    "name": group["tag_value__value"],
-                    "value": group["tag_value__value"],
-                    "count": group["total_count"],
-                    "key": group["tag_key__key"],
-                }
-                for group in qs
-                if group["tag_key__key"] == key
-            ],
-            "uniqueValues": len(
-                [group for group in qs if group["tag_key__key"] == key]
-            ),
-            "key": key,
-            "name": key,
-            "totalValues": sum(
-                [group["total_count"] for group in qs if group["tag_key__key"] == key]
-            ),
-        }
-        for key in keys
-    ]
+    return await _aggregate_tags(issue, key)
+
 
 
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/tags/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/tags/",
     response=list[IssueTagSchema],
     by_alias=True,
 )
@@ -581,38 +584,7 @@ async def list_organization_issue_tags(
     except Issue.DoesNotExist:
         raise Http404()
 
-    qs = issue.issuetag_set
-    if key:
-        qs = qs.filter(tag_key__key=key)
-    qs = (
-        qs.values("tag_key__key", "tag_value__value")
-        .annotate(total_count=Sum("count"))
-        .order_by("-total_count")[:100000]
-    )
-    keys = {row["tag_key__key"] async for row in qs}
-    return [
-        {
-            "topValues": [
-                {
-                    "name": group["tag_value__value"],
-                    "value": group["tag_value__value"],
-                    "count": group["total_count"],
-                    "key": group["tag_key__key"],
-                }
-                for group in qs
-                if group["tag_key__key"] == key
-            ],
-            "uniqueValues": len(
-                [group for group in qs if group["tag_key__key"] == key]
-            ),
-            "key": key,
-            "name": key,
-            "totalValues": sum(
-                [group["total_count"] for group in qs if group["tag_key__key"] == key]
-            ),
-        }
-        for key in keys
-    ]
+    return await _aggregate_tags(issue, key)
 
 
 class IssueStatsFilters(Schema):

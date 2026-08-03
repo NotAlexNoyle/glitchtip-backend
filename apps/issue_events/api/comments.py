@@ -1,6 +1,6 @@
-from typing import List, Literal
+from typing import Literal
 
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse
 from ninja import Schema, Status
 from ninja.errors import HttpError
 from ninja.pagination import paginate
@@ -32,7 +32,7 @@ class PostCommentSchema(Schema):
 
 @router.get(
     "/issues/{int:issue_id}/comments/",
-    response=List[CommentSchema],
+    response=list[CommentSchema],
     by_alias=True,
 )
 @paginate
@@ -46,8 +46,8 @@ async def list_comments(
 
 
 @router.get(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/",
-    response=List[CommentSchema],
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/",
+    response=list[CommentSchema],
     by_alias=True,
 )
 @has_permission(["event:read", "event:admin"])
@@ -55,8 +55,8 @@ async def list_comments(
 async def list_organization_comments(
     request: AuthHttpRequest,
     response: HttpResponse,
-    organization_slug: str,
     issue_id: int,
+    organization_slug: str,
 ):
     return get_queryset(request, issue_id, organization_slug)
 
@@ -91,7 +91,7 @@ async def add_comment(
 
 
 @router.post(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/",
     response={201: CommentSchema},
     by_alias=True,
 )
@@ -109,7 +109,7 @@ async def add_organization_comment(
             project__organization__users=request.auth.user_id,
         )
     except Issue.DoesNotExist:
-        raise HttpError(400, "Issue does not exist")
+        raise Http404()
 
     user_id = request.auth.user_id
     comment = await Comment.objects.acreate(
@@ -145,7 +145,7 @@ async def update_comment(
 
 
 @router.put(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/{int:comment_id}/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/{int:comment_id}/",
     response=CommentSchema,
     by_alias=True,
 )
@@ -162,7 +162,7 @@ async def update_organization_comment(
             id=comment_id
         )
     except Comment.DoesNotExist:
-        raise HttpError(400, "Comment does not exist")
+        raise Http404()
 
     comment.text = payload.data["text"]
     await comment.asave()
@@ -190,8 +190,9 @@ async def delete_comment(
     return Status(204, None)
 
 
+
 @router.delete(
-    "organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/{int:comment_id}/",
+    "/organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/{int:comment_id}/",
     response={204: None},
     by_alias=True,
 )
@@ -207,7 +208,7 @@ async def delete_organization_comment(
             id=comment_id
         )
     except Comment.DoesNotExist:
-        raise HttpError(400, "Comment does not exist")
+        raise Http404()
     await comment.adelete()
 
     return Status(204, None)

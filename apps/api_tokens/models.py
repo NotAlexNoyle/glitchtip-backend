@@ -1,6 +1,5 @@
 import binascii
 import os
-from typing import List
 
 from django.conf import settings
 from django.db import models
@@ -43,7 +42,7 @@ class APIToken(CreatedModel):
         setattr(self.scopes, permission, True)
         self.save(update_fields=["scopes"])
 
-    def add_permissions(self, permissions: List[str]):
+    def add_permissions(self, permissions: list[str]):
         """Add permission flags to scopes and save"""
         for permission in permissions:
             setattr(self.scopes, permission, True)
