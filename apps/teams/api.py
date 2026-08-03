@@ -294,7 +294,7 @@ async def list_project_teams(
     response={201: ProjectTeamSchema},
     by_alias=True,
 )
-@has_permission(["project.write", "project:admin"])
+@has_permission(["project:write", "project:admin"])
 async def add_team_to_project(
     request: AuthHttpRequest, organization_slug: str, project_slug: str, team_slug: str
 ):
@@ -324,7 +324,7 @@ async def add_team_to_project(
     response=ProjectTeamSchema,
     by_alias=True,
 )
-@has_permission(["project.write", "project:admin"])
+@has_permission(["project:write", "project:admin"])
 async def delete_team_from_project(
     request: AuthHttpRequest, organization_slug: str, project_slug: str, team_slug: str
 ):
