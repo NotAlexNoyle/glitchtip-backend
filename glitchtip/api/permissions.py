@@ -4,6 +4,7 @@ from ninja.errors import HttpError
 
 from .authentication import AuthHttpRequest
 
+
 def get_org_slug(kwargs: dict) -> str | None:
     return kwargs.get("organization_slug")
 

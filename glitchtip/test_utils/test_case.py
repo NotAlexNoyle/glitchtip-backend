@@ -1,6 +1,6 @@
 # pylint: disable=attribute-defined-outside-init,invalid-name
-from django.test import TestCase, TransactionTestCase
 from django.core.cache import cache
+from django.test import TestCase, TransactionTestCase
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole

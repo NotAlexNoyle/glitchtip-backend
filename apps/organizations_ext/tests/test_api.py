@@ -1,6 +1,6 @@
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
-from django.core.cache import cache
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole

@@ -8,7 +8,7 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, has_issue_permission
+from glitchtip.api.permissions import has_issue_permission, has_permission
 from glitchtip.partition_manager import UUID7Helper
 
 from ..models import Issue, IssueEvent, UserReport

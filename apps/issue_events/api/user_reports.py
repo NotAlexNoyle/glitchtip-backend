@@ -2,7 +2,7 @@ from django.http import HttpResponse
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, has_issue_permission
+from glitchtip.api.permissions import has_issue_permission, has_permission
 
 from ..models import UserReport
 from ..schema import UserReportSchema

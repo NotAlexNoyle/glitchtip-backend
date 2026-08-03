@@ -19,7 +19,7 @@ from apps.releases.models import Release
 from apps.releases.schema import CommitSchema
 from apps.teams.models import Team
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, has_issue_permission
+from glitchtip.api.permissions import has_issue_permission, has_permission
 
 from ..constants import EventStatus
 from ..models import Issue, IssueAggregate, IssueEvent, IssueHash, IssueIndex
