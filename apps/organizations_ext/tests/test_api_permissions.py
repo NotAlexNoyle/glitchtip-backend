@@ -1,7 +1,9 @@
+from django.core.cache import cache
 from django.urls import reverse
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
+from glitchtip.api.authentication import user_superuser_cache_key
 from glitchtip.test_utils.test_case import APIPermissionTestCase
 
 
@@ -56,6 +58,39 @@ class OrganizationAPIPermissionTests(APIPermissionTestCase):
         self.assertPutReqStatusCode(self.detail_url, data, 403)
         self.set_user_role(OrganizationUserRole.MANAGER)
         self.assertPutReqStatusCode(self.detail_url, data, 200)
+
+    def make_superuser(self):
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        # Any earlier denial cached is_superuser=False and nothing invalidates
+        # that key, so drop it rather than wait out USER_SUPERUSER_CACHE_TTL.
+        # Delete the one key, not cache.clear() - sessions are cache-backed, so
+        # clearing logs the test client out and the next request 401s.
+        cache.delete(user_superuser_cache_key(self.user.id))
+
+    def test_superuser_bypasses_insufficient_scope(self):
+        """A superuser clears the scope check at a role that would otherwise 403."""
+        self.set_client_credentials(None)
+        self.client.force_login(self.user)
+        self.set_user_role(OrganizationUserRole.MEMBER)
+        self.assertDeleteReqStatusCode(self.detail_url, 403)
+        self.make_superuser()
+        self.assertDeleteReqStatusCode(self.detail_url, 204)
+
+    def test_superuser_bypass_is_session_only(self):
+        """A superuser's token still means exactly the scopes it carries."""
+        self.make_superuser()
+        self.set_client_credentials(self.auth_token.token)
+        self.assertGetReqStatusCode(self.detail_url, 403)
+
+    def test_superuser_non_member_gets_404_not_403(self):
+        """The bypass clears the decorator; membership-filtered querysets still 404."""
+        other_org = baker.make("organizations_ext.Organization")
+        url = reverse("api:get_organization", args=[other_org.slug])
+        self.make_superuser()
+        self.set_client_credentials(None)
+        self.client.force_login(self.user)
+        self.assertGetReqStatusCode(url, 404)
 
 
 class OrganizationMemberAPIPermissionTests(APIPermissionTestCase):

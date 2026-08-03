@@ -9,6 +9,24 @@ def get_org_slug(kwargs: dict) -> str | None:
     return kwargs.get("organization_slug")
 
 
+async def is_denied(request: AuthHttpRequest, permissions: list[str]) -> bool:
+    """Whether the request's resolved scope fails to satisfy ``permissions``.
+
+    "Any of" semantics, with a superuser bypass on the failure path only, so the
+    extra user lookup never lands on a request that was going to succeed.
+
+    The bypass is deliberately **session-only**: a token carries its own scopes,
+    and a superuser who mints a narrowly-scoped token means that narrow scope.
+    Note it clears this decorator but not the views themselves - their querysets
+    filter on membership, so a non-member superuser trades a 403 for a 404.
+    """
+    if any(s in permissions for s in request.auth.scope):
+        return False
+    if request.auth.auth_type == "session" and await request.auth.is_superuser():
+        return False
+    return True
+
+
 def has_permission(permissions: list[str]):
     """
     Check scoped permissions.
@@ -21,8 +39,8 @@ def has_permission(permissions: list[str]):
     def decorator(f):
         @wraps(f)
         async def decorated_function(request: AuthHttpRequest, *args, **kwargs):
-            scopes = await request.auth.resolve_scope(get_org_slug(kwargs))
-            if not any(s in permissions for s in scopes):
+            await request.auth.resolve_scope(get_org_slug(kwargs))
+            if await is_denied(request, permissions):
                 raise HttpError(403, "Permission denied")
             return await f(request, *args, **kwargs)
 
@@ -69,10 +87,10 @@ def has_issue_permission(permissions: list[str]):
                     # against and nothing to leak, so defer to the view, whose
                     # membership-scoped queryset raises 404.
                     return await f(request, *args, **kwargs)
-                scopes = await request.auth.resolve_scope(organization_slug)
+                await request.auth.resolve_scope(organization_slug)
             else:
-                scopes = await request.auth.resolve_scope(None)
-            if not any(s in permissions for s in scopes):
+                await request.auth.resolve_scope(None)
+            if await is_denied(request, permissions):
                 raise HttpError(403, "Permission denied")
             return await f(request, *args, **kwargs)
 
