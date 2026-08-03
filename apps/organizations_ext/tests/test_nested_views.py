@@ -14,7 +14,8 @@ class OrganizationProjectsViewTestCase(GlitchTipTestCaseMixin, TestCase):
         )
 
     def test_organization_projects_list(self):
-        with self.assertNumQueries(2):
+        # +1 org-membership lookup from has_permission resolving the caller's scope.
+        with self.assertNumQueries(3):
             res = self.client.get(self.url)
         self.assertNotContains(res, self.organization.slug)
         self.assertContains(res, self.team.slug)

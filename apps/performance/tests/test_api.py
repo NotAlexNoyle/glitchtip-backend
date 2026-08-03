@@ -187,25 +187,20 @@ class TransactionGroupAPITestCase(GlitchTestCase):
 
         await self.async_client.aforce_login(user_b)
 
-        # List endpoint — should return empty
+        # A non-member is denied outright (403) under the rescoped permission
+        # model, rather than getting an empty/filtered result.
         list_url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/"
         res = await self.async_client.get(list_url)
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), [])
+        self.assertEqual(res.status_code, 403)
 
-        # Detail endpoint — should return 404
         detail_url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/"
         res = await self.async_client.get(detail_url)
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
 
-        # Spans endpoint — should return empty
         spans_url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/spans/"
         res = await self.async_client.get(spans_url)
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), [])
+        self.assertEqual(res.status_code, 403)
 
-        # Trend endpoint — should return empty
         trend_url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/trend/"
         res = await self.async_client.get(trend_url)
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), [])
+        self.assertEqual(res.status_code, 403)

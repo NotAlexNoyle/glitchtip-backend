@@ -1,3 +1,4 @@
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 from model_bakery import baker
@@ -15,6 +16,7 @@ class OrganizationsAPITestCase(TestCase):
         cls.url = reverse("api:list_organizations")
 
     def setUp(self):
+        cache.clear()
         self.client.force_login(self.user)
         self.async_client.force_login(self.user)
 

@@ -1,3 +1,4 @@
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -38,6 +39,7 @@ class ProjectsAPITestCase(TestCase):
         )
 
     def setUp(self):
+        cache.clear()
         self.client.force_login(self.user)
         self.async_client.force_login(self.user)
 
@@ -177,7 +179,7 @@ class ProjectsAPITestCase(TestCase):
         await self.async_client.aforce_login(member)
         url = reverse("api:delete_project", args=[self.organization.slug, project.slug])
         res = await self.async_client.delete(url)
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
         await project.arefresh_from_db()
 
     async def test_project_key_delete_requires_admin_role(self):
@@ -192,12 +194,13 @@ class ProjectsAPITestCase(TestCase):
             args=[self.organization.slug, self.project.slug, key.public_key],
         )
         res = await self.async_client.delete(url)
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
         self.assertTrue(await ProjectKey.objects.filter(id=key.id).aexists())
 
 
 class TeamProjectsAPITestCase(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = baker.make("users.user")
         self.organization = baker.make("organizations_ext.Organization")
         self.organization.add_user(self.user, OrganizationUserRole.ADMIN)

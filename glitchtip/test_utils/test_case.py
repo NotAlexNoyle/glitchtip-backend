@@ -1,4 +1,5 @@
 # pylint: disable=attribute-defined-outside-init,invalid-name
+from django.core.cache import cache
 from django.test import TestCase, TransactionTestCase
 from model_bakery import baker
 
@@ -47,6 +48,10 @@ class GlitchTestCase(TestCase):
 
 class GlitchTipTestCaseMixin:
     organization: Organization | None = None
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()  # scope cache (user_scope:v1:*) isn't flushed between tests
 
     def create_project(self):
         """Create project, dsn, and organization"""
@@ -97,6 +102,10 @@ class APIPermissionTestCase(TestCase):
     """Base class for testing views with permissions"""
 
     token: str | None = None
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()  # scope cache (user_scope:v1:*) isn't flushed between tests
 
     def create_user_org(self):
         self.user = baker.make("users.user")

@@ -170,7 +170,7 @@ class AlertAPITestCase(GlitchTipTestCaseMixin, TestCase):
         }
         res = await self.async_client.post(url, data, content_type="application/json")
         # Member without project team membership cannot create alerts
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
 
         org_user.role = OrganizationUserRole.ADMIN
         await org_user.asave()

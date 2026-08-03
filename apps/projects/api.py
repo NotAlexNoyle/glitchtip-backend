@@ -74,7 +74,6 @@ def get_project_keys_queryset(
     by_alias=True,
 )
 @paginate
-@has_permission(["project:read"])
 async def list_projects(request: AuthHttpRequest, response: HttpResponse):
     """List all projects that a user has access to"""
     return (

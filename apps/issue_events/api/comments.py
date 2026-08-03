@@ -6,7 +6,7 @@ from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_issue_permission, has_permission
 
 from ..models import Comment, Issue
 from ..schema import CommentSchema
@@ -16,12 +16,18 @@ from . import router
 def get_queryset(
     request: AuthHttpRequest, issue_id: int, organization_slug: str | None = None
 ):
+    user_id = request.auth.user_id
     qs = Comment.objects.select_related("user").filter(
-        issue__project__organization__users=request.auth.user_id, issue__id=issue_id
+        issue__project__organization__users=user_id,
+        issue__id=issue_id,
     )
     if organization_slug:
         qs = qs.filter(issue__project__organization__slug=organization_slug)
     return qs
+
+
+class PostCommentSchema(Schema):
+    data: dict[Literal["text"], str]
 
 
 @router.get(
@@ -29,10 +35,12 @@ def get_queryset(
     response=list[CommentSchema],
     by_alias=True,
 )
-@has_permission(["event:read", "event:admin"])
 @paginate
+@has_issue_permission(["event:read", "event:admin"])
 async def list_comments(
-    request: AuthHttpRequest, response: HttpResponse, issue_id: int
+    request: AuthHttpRequest,
+    response: HttpResponse,
+    issue_id: int,
 ):
     return get_queryset(request, issue_id)
 
@@ -53,16 +61,12 @@ async def list_organization_comments(
     return get_queryset(request, issue_id, organization_slug)
 
 
-class PostCommentSchema(Schema):
-    data: dict[Literal["text"], str]
-
-
 @router.post(
     "/issues/{int:issue_id}/comments/",
     response={201: CommentSchema},
     by_alias=True,
 )
-@has_permission(["event:write", "event:admin"])
+@has_issue_permission(["event:write", "event:admin"])
 async def add_comment(
     request: AuthHttpRequest,
     issue_id: int,
@@ -70,7 +74,8 @@ async def add_comment(
 ):
     try:
         issue = await Issue.objects.aget(
-            id=issue_id, project__organization__users=request.auth.user_id
+            id=issue_id,
+            project__organization__users=request.auth.user_id,
         )
     except Issue.DoesNotExist:
         raise HttpError(400, "Issue does not exist")
@@ -100,8 +105,8 @@ async def add_organization_comment(
     try:
         issue = await Issue.objects.aget(
             id=issue_id,
-            project__organization__users=request.auth.user_id,
             project__organization__slug=organization_slug,
+            project__organization__users=request.auth.user_id,
         )
     except Issue.DoesNotExist:
         raise Http404()
@@ -121,7 +126,7 @@ async def add_organization_comment(
     response=CommentSchema,
     by_alias=True,
 )
-@has_permission(["event:write", "event:admin"])
+@has_issue_permission(["event:write", "event:admin"])
 async def update_comment(
     request: AuthHttpRequest,
     issue_id: int,
@@ -170,7 +175,7 @@ async def update_organization_comment(
     response={204: None},
     by_alias=True,
 )
-@has_permission(["event:admin"])
+@has_issue_permission(["event:admin"])
 async def delete_comment(
     request: AuthHttpRequest,
     issue_id: int,
@@ -183,6 +188,7 @@ async def delete_comment(
     await comment.adelete()
 
     return Status(204, None)
+
 
 
 @router.delete(

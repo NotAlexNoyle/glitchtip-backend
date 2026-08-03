@@ -672,7 +672,10 @@ class MultiDateColdStorageTestCase(GlitchTipTestCaseMixin, TransactionTestCase):
             all_ids = self._write_parquet_files(issue.id)
             newest_ids = all_ids[self.dates[-1].strftime("%Y%m%d")]
 
-            url = reverse("api:get_latest_issue_event", kwargs={"issue_id": issue.id})
+            url = reverse(
+                "api:get_latest_issue_event",
+                kwargs={"issue_id": issue.id},
+            )
             res = self.client.get(url)
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["id"], newest_ids[-1].hex)

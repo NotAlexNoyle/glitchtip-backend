@@ -14,7 +14,7 @@ from apps.teams.models import Team
 from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
-from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.authentication import AuthHttpRequest, user_scope_cache_key
 from glitchtip.api.permissions import has_permission
 
 from .constants import OrganizationUserRole
@@ -52,7 +52,6 @@ GET /api/0/teams/{organization_slug}/{team_slug}/members/ (Not documented in sen
 
 @router.get("organizations/", response=list[OrganizationSchema], by_alias=True)
 @paginate
-@has_permission(["org:read", "org:write", "org:admin"])
 async def list_organizations(
     request: AuthHttpRequest,
     response: HttpResponse,
@@ -80,7 +79,6 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
 
 
 @router.post("organizations/", response={201: OrganizationDetailSchema}, by_alias=True)
-@has_permission(["org:write", "org:admin"])
 async def create_organization(request: AuthHttpRequest, payload: OrganizationInSchema):
     """
     Create new organization
@@ -120,8 +118,6 @@ async def update_organization(
             organization_slug=organization_slug,
         ),
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     for attr, value in payload.dict(exclude_unset=True).items():
         setattr(organization, attr, value)
     await organization.asave()
@@ -141,8 +137,6 @@ async def delete_organization(request: AuthHttpRequest, organization_slug: str):
             organization_slug=organization_slug,
         )
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     await organization.adelete()
     return Status(204, None)
 
@@ -222,8 +216,6 @@ async def create_organization_member(
         .filter(organization_users__user=user)
         .prefetch_related("organization_users"),
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     email = payload.email
     if (
         not await ais_user_registration_open()
@@ -279,7 +271,7 @@ async def create_organization_member(
     "organizations/{slug:organization_slug}/members/{int:member_id}/",
     response={204: None},
 )
-@has_permission(["member:admin"])
+@has_permission(["member:read", "member:write", "member:admin"])
 async def delete_organization_member(
     request: AuthHttpRequest, organization_slug: str, member_id: int
 ):
@@ -292,16 +284,21 @@ async def delete_organization_member(
     ).aexists():
         raise HttpError(400, "User is organization owner. Transfer ownership first.")
     org_user = await aget_object_or_404(
-        get_organization_users_queryset(user_id, organization_slug, role_required=True),
+        get_organization_users_queryset(user_id, organization_slug),
         id=member_id,
     )
-    # Check org role of user initiating request, but allow org users to remove themselves
-    if org_user.actor_role < OrganizationUserRole.MANAGER and not (
-        org_user.user and org_user.user.id == user_id
+    # Members may always remove themselves; removing anyone else requires the
+    # member:admin scope. The read-tier decorator above only gates that the
+    # caller has *some* member access to the org.
+    is_self = bool(org_user.user and org_user.user_id == user_id)
+    if not is_self and "member:admin" not in await request.auth.resolve_scope(
+        organization_slug
     ):
         raise HttpError(403, "Forbidden")
     try:
         await org_user.adelete()
+        if org_user.user_id:
+            await cache.adelete(user_scope_cache_key(org_user.user_id, organization_slug))
     except IntegrityError as err:
         if is_member_guard_violation(err):
             raise HttpError(
@@ -336,8 +333,6 @@ async def update_organization_member(
         ).select_related("organization"),
         id=member_id,
     )
-    if member.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "Forbidden")
     member.role = OrganizationUserRole.from_string(payload.org_role)
     # Disallow an ownerless organization
     if (
@@ -350,6 +345,8 @@ async def update_organization_member(
     ):
         raise ValidationError("Organization must have at least one owner")
     await member.asave()
+    if member.user_id:
+        await cache.adelete(user_scope_cache_key(member.user_id, organization_slug))
     return member
 
 
@@ -436,4 +433,9 @@ async def accept_invite(
         .prefetch_related("user__socialaccount_set")
         .aget()
     )
+
+    if org_user.user_id:
+        await cache.adelete(
+            user_scope_cache_key(org_user.user_id, org_user.organization.slug)
+        )
     return {"accept_invite": payload.accept_invite, "org_user": org_user}

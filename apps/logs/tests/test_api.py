@@ -284,8 +284,8 @@ class LogsAPITestCase(GlitchTipTestCaseMixin, TestCase):
         url = reverse("api:list_logs", kwargs={"organization_slug": other_org.slug})
         res = await self.async_client.get(url)
 
-        # Should get 404 as user doesn't belong to this org
-        self.assertEqual(res.status_code, 404)
+        # Should get 403 as user doesn't belong to this org
+        self.assertEqual(res.status_code, 403)
 
 
 class LogsAPIPermissionTestCase(TestCase):

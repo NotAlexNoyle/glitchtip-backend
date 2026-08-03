@@ -8,7 +8,7 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_issue_permission, has_permission
 from glitchtip.partition_manager import UUID7Helper
 
 from ..models import Issue, IssueEvent, UserReport
@@ -209,11 +209,16 @@ async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uui
     return cold_event
 
 
-@router.get("/issues/{int:issue_id}/events/", response=list[IssueEventSchema])
+@router.get(
+    "/issues/{int:issue_id}/events/",
+    response=list[IssueEventSchema],
+)
 @paginate
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_issue_permission(["event:read", "event:write", "event:admin"])
 async def list_issue_event(
-    request: AuthHttpRequest, response: HttpResponse, issue_id: int
+    request: AuthHttpRequest,
+    response: HttpResponse,
+    issue_id: int,
 ):
     # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering
     return get_queryset(request, issue_id=issue_id).order_by("-id")
@@ -254,10 +259,19 @@ async def list_organization_issue_event(
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_issue_permission(["event:read", "event:write", "event:admin"])
 async def get_latest_issue_event(request: AuthHttpRequest, issue_id: int):
     # Resolve issue first to get organization_id for hash partition pruning
-    issue = await _resolve_issue(request, issue_id)
+    issue = (
+        await Issue.objects.filter(
+            id=issue_id,
+            project__organization__users=request.auth.user_id,
+        )
+        .select_related("project__organization", "index")
+        .afirst()
+    )
+    if not issue:
+        raise Http404()
     return await _get_latest_event_for_issue(request, issue, issue_id)
 
 
@@ -280,7 +294,7 @@ async def get_organization_latest_issue_event(
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_issue_permission(["event:read", "event:write", "event:admin"])
 async def get_issue_event(request: AuthHttpRequest, issue_id: int, event_id: uuid.UUID):
     issue = await _resolve_issue(request, issue_id)
     return await _get_issue_event(request, issue, event_id)

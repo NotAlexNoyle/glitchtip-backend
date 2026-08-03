@@ -21,7 +21,10 @@ class ProjectAPIPermissionTests(APIPermissionTestCase):
         )
 
     def test_list(self):
-        self.assertGetReqStatusCode(self.list_url, 403)
+        # The slug-less projects/ list is not scope-gated (like list_organizations):
+        # it returns only the caller's own projects, so it works without a scope.
+        self.assertGetReqStatusCode(self.list_url, 200)
+        # The org/team-scoped list does require project:read.
         self.assertGetReqStatusCode(self.team_list_url, 403)
 
         self.auth_token.add_permission("project:read")
@@ -60,7 +63,7 @@ class ProjectAPIPermissionTests(APIPermissionTestCase):
         self.set_client_credentials(None)
         self.client.force_login(self.user)
         self.set_user_role(OrganizationUserRole.MEMBER)
-        self.assertDeleteReqStatusCode(self.detail_url, 404)
+        self.assertDeleteReqStatusCode(self.detail_url, 403)
 
         self.set_user_role(OrganizationUserRole.OWNER)
         self.assertDeleteReqStatusCode(self.detail_url, 204)
