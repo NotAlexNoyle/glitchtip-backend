@@ -8,7 +8,6 @@ from glitchtip.url_validation import validate_public_url
 class ImportIn(CamelSchema):
     url: HttpUrl
     auth_token: str
-    organization_slug: str
 
     @field_validator("url")
     @classmethod

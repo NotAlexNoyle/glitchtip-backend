@@ -209,41 +209,6 @@ async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uui
     return cold_event
 
 
-async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uuid.UUID):
-    """Return one event for an already-resolved issue: hot table, then cold storage.
-
-    Shared by the bare and organization-scoped ``.../events/{event_id}/`` routes.
-    The caller resolves ``issue`` and so pins the organization; the slug never
-    reaches this far.
-    """
-    org_id = issue.project.organization_id
-    # organization_id is already filtered in - it prunes the hash sub-partitions for
-    # the event lookup and for the prev/next subqueries alike.
-    qs = _get_issue_event_queryset(request, issue.id, org_id)
-
-    # A UUIDv7 event_id is our own primary key; anything else is a client-provided
-    # sentry SDK event_id (typically UUIDv4).
-    if is_uuid7(event_id):
-        event = await qs.filter(id=event_id).afirst()
-    else:
-        event = await qs.filter(event_id=event_id).afirst()
-
-    if event:
-        event.user_report = await get_user_report(event.id)
-        return event
-
-    # Fall back to cold storage
-    cold_event = await asyncio.to_thread(_get_event_from_cold, event_id, org_id)
-    if not cold_event:
-        raise Http404()
-
-    cold_event.issue = issue
-    cold_event.previous = None
-    cold_event.next = None
-    cold_event.user_report = await get_user_report(cold_event.id)
-    return cold_event
-
-
 @router.get(
     "/issues/{int:issue_id}/events/",
     response=list[IssueEventSchema],
@@ -329,7 +294,7 @@ async def get_organization_latest_issue_event(
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_issue_permission(["event:read", "event:write", "event:admin"])
 async def get_issue_event(request: AuthHttpRequest, issue_id: int, event_id: uuid.UUID):
     issue = await _resolve_issue(request, issue_id)
     return await _get_issue_event(request, issue, event_id)
