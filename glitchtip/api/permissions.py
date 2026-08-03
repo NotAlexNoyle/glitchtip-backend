@@ -22,9 +22,7 @@ async def is_denied(request: AuthHttpRequest, permissions: list[str]) -> bool:
     """
     if any(s in permissions for s in request.auth.scope):
         return False
-    if request.auth.auth_type == "session" and await request.auth.is_superuser():
-        return False
-    return True
+    return not (request.auth.auth_type == "session" and await request.auth.is_superuser())
 
 
 def has_permission(permissions: list[str]):
