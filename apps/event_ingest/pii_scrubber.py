@@ -137,6 +137,18 @@ EVENT_SECTIONS: tuple[str, ...] = (
     "message",
     "csp",  # security/CSP reports (blocked_uri, document_uri, script_sample)
     "spans",  # transaction events
+    # ``errors`` is the event protocol's processing-error list, and it carries
+    # raw data in two ways. A client is free to send the key itself, and the
+    # server generates entries of its own during schema validation:
+    # EventProcessingError(type, name, value=v) stores the *entire unvalidated
+    # field* in ``value`` (apps/shared/schema/utils.py), and the fields wrapped
+    # that way are exactly the PII-bearing ones -- request, user, contexts,
+    # exception, breadcrumbs, threads, debug_meta. Generation happens during
+    # validation, before scrub_event runs, so those entries hold pre-scrub data.
+    # Either way ``errors`` is in the worker's persisted ``include`` set and
+    # lands verbatim in IssueEvent.data, so it needs the same recursive walk as
+    # any other client-influenced section.
+    "errors",
 )
 # Log items are flat (no sections); they are scrubbed via Scrubber.scrub_log.
 

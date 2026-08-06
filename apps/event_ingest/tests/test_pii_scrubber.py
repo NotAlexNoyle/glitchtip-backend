@@ -123,6 +123,59 @@ class SectionScopingTests(SimpleTestCase):
         self.assertEqual(event["password"], "not-walked")
         self.assertEqual(event["extra"]["password"], PLACEHOLDER)
 
+    def test_errors_section_is_walked(self):
+        # A client may send `errors` itself; it is persisted into
+        # IssueEvent.data verbatim, so it needs the same walk as any other
+        # client-influenced section.
+        s = scrubber()
+        event = {
+            "errors": [
+                {
+                    "type": "invalid_data",
+                    "name": "exception",
+                    "value": {"vars": {"password": "hunter2"}},
+                }
+            ]
+        }
+        s.scrub_event(event)
+        self.assertEqual(event["errors"][0]["value"]["vars"]["password"], PLACEHOLDER)
+        # Structural fields on the entry survive.
+        self.assertEqual(event["errors"][0]["type"], "invalid_data")
+        self.assertEqual(event["errors"][0]["name"], "exception")
+
+    def test_server_generated_error_entry_is_scrubbed(self):
+        # Regression: EventProcessingError stores the *entire unvalidated
+        # field* in `value`, and it is built during schema validation --
+        # before scrub_event runs. A malformed `request` therefore carried the
+        # raw Authorization/Cookie headers into `errors[0].value` and, with
+        # `errors` outside EVENT_SECTIONS, straight through to persistence
+        # despite scrubbing being enabled.
+        s = scrubber()
+        event = {
+            "errors": [
+                {
+                    "type": "invalid_data",
+                    "name": "request",
+                    "value": {
+                        "headers": {
+                            "Authorization": "Bearer sk-live-secret",
+                            "Cookie": "sessionid=abc123",
+                            "User-Agent": "curl/8",
+                        },
+                        "url": "https://app.example.com/submit",
+                    },
+                }
+            ]
+        }
+        s.scrub_event(event)
+        headers = event["errors"][0]["value"]["headers"]
+        self.assertEqual(headers["Authorization"], PLACEHOLDER)
+        self.assertEqual(headers["Cookie"], PLACEHOLDER)
+        self.assertEqual(headers["User-Agent"], "curl/8")
+        self.assertEqual(
+            event["errors"][0]["value"]["url"], "https://app.example.com/submit"
+        )
+
     def test_stack_frame_vars_scrubbed(self):
         s = scrubber()
         event = {
