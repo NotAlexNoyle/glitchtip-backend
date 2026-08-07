@@ -32,7 +32,7 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str], organizat
 
         # stepping up through the roles, find the minimum role needed to perform operation.
         for role in ROLES:
-            if set(permissions).union(role['scopes']):
+            if set(permissions) & role['scopes']:
                 return f'Permission denied. Operation requires {role['name'].upper()}, you are a {org_user.get_role().upper()}'
     return "Permission denied"
 
