@@ -28,9 +28,12 @@ dependencies = [
     "django-import-export~=4.1",
     # Library-only: psycopg.sql composition and Jsonb/Json parameter
     # wrappers, plus the import Django's stock postgresql backend performs.
-    # No database I/O flows through psycopg, so the C/binary implementations
-    # buy nothing here: the pure-Python one loads the system libpq (libpq5 in
-    # the image) and never issues a query. Do not add the [binary] extra.
+    # No application database I/O flows through psycopg — every query goes
+    # through gt_rust — so the C/binary implementations buy nothing here and
+    # the pure-Python one against the system libpq (libpq5 in the image) is
+    # enough. Do not add the [binary] extra. Note the test suite does open one
+    # psycopg connection of its own (test_batched_delete polls pg_locks), so
+    # libpq has to be present to run the tests as well as to import.
     "psycopg~=3.1",
     "django-ninja~=1.6",
     "boto3~=1.34",
