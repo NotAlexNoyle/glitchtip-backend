@@ -28,7 +28,9 @@ dependencies = [
     "django-import-export~=4.1",
     # Library-only: psycopg.sql composition and Jsonb/Json parameter
     # wrappers, plus the import Django's stock postgresql backend performs.
-    # No database I/O flows through psycopg
+    # No database I/O flows through psycopg, so the C/binary implementations
+    # buy nothing here: the pure-Python one loads the system libpq (libpq5 in
+    # the image) and never issues a query. Do not add the [binary] extra.
     "psycopg~=3.1",
     "django-ninja~=1.6",
     "boto3~=1.34",
@@ -46,8 +48,9 @@ dependencies = [
     "minidump>=0.0.24",
     "arro3-core~=0.8",
     "arro3-io~=0.8",
-    # Matches Django major/minor
-    "django-async-backend>=6.0,<6.1",
+    # Matches Django major/minor. 6.0.9 is the first release that makes
+    # psycopg's binary build an extra rather than a hard requirement.
+    "django-async-backend>=6.0.9,<6.1",
     "opentelemetry-proto~=1.0",
 ]
 
