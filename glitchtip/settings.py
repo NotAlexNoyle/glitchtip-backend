@@ -132,6 +132,30 @@ GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE = env.int(
     5 * 1024 * 1024,  # 5 MB
 )
 
+# Limits size (in bytes) of an uploaded artifact bundle once expanded on disk,
+# and the number of entries it may contain. A zip's compression ratio has no
+# ceiling, so without these a small upload can fill a worker's local disk and
+# take unrelated work on that pod down with it. Enforced in
+# sentry.utils.zip.safe_extract_zip against the bytes actually written; the
+# sizes an archive declares for itself are uploader-supplied metadata.
+#
+# Both are also applied to the archive before it is opened. That is not
+# redundant: reading a zip's directory allocates an entry object per member
+# well before any post-open check could count them, so on their own these
+# would cap the files written without capping the memory spent deciding to
+# write them.
+#
+# 512 MB is well past any real source-map bundle — a large single-page app's
+# minified chunks plus their maps, sourcesContent included, land in the tens
+# of MB — while keeping one assemble task's worst case bounded. 10,000 entries
+# is likewise far above a real bundle's file count. Operators building
+# something genuinely larger can raise either via env.
+GLITCHTIP_MAX_UNZIPPED_ARCHIVE_SIZE = env.int(
+    "GLITCHTIP_MAX_UNZIPPED_ARCHIVE_SIZE",
+    512 * 1024 * 1024,  # 512 MB
+)
+GLITCHTIP_MAX_ARCHIVE_MEMBERS = env.int("GLITCHTIP_MAX_ARCHIVE_MEMBERS", 10_000)
+
 # Mean seconds between in-process gc.collect() + malloc_trim() passes that
 # return freed heap pages to the OS (see glitchtip/memory_trim.py). 0 disables.
 GLITCHTIP_MALLOC_TRIM_INTERVAL = env.int("GLITCHTIP_MALLOC_TRIM_INTERVAL", 3600)
@@ -157,10 +181,13 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = env.int(
     default=global_settings.DATA_UPLOAD_MAX_NUMBER_FIELDS,
 )
 
-# Hash sub-partitions per time partition. Raising this multiplies the
-# partitions, and the indexes on them, that Postgres locks for a query or DDL
-# statement it can't narrow to one partition. Raise max_locks_per_transaction
-# with it; 512 is a reasonable floor at any bucket count.
+# Hash sub-partitions per time partition. Scale it with the number of
+# organizations; 2 is the floor that still sub-partitions, so a query that
+# forgets to filter on organization_id is visible in development instead of
+# only in production. Raising it multiplies the partitions, and the indexes on
+# them, that Postgres locks for work it can't narrow to one organization
+# (retention sweeps, archival, DDL on a parent) — so raise
+# max_locks_per_transaction with it; 512 is a reasonable floor at any count.
 PARTITION_HASH_BUCKETS = env.int("PARTITION_HASH_BUCKETS", 2)
 
 # ── Retention settings ──────────────────────────────────────────────
@@ -896,15 +923,7 @@ if VALKEY_HOST:
 else:
     VALKEY_URL = env.str("VALKEY_URL", env.str("REDIS_URL", "redis://redis:6379/0"))
 
-# Serve POST /api/<project_id>/envelope/ entirely in Rust (gt_rust.ingest):
-# DSN auth, decompression/framing, PII scrubbing, dedupe and vtasks enqueue
-# run on the shared tokio runtime, and the event payload never materializes
-# on the Python heap. The ingest path issues its auth query on the very pool
-# the ORM uses (gt_rust is the only database engine). With VALKEY_URL the
-# cache/broker ops ride gt_rust's valkey driver; without it they run against
-# the vcache_entry table and the db_queuedtask broker on the same pool.
-GLITCHTIP_RUST_INGEST = env.bool("GLITCHTIP_RUST_INGEST", False)
-# Add other settings that apply to both methods.
+# Settings applied to every DATABASES entry, however it was configured above.
 for db_config in DATABASES.values():
     # gt_rust.django_backend extends Django's stock postgresql backend and
     # adds the AsyncDatabaseWrapper that django-async-backend's
@@ -984,8 +1003,15 @@ TASKS = {
 VTASKS_QUEUES = {
     "default": {},
     "ingest": {
+        # Batch size and per-queue concurrency bound the worker's peak working
+        # set: every fetched batch holds its full envelope payloads in memory
+        # until the batch completes, so worst case ≈ worker_concurrency × count
+        # payloads resident at once while draining a backlog. 25 × 12 drains a
+        # deep backlog as fast as 100-task batches on the shared pool did, at
+        # roughly a quarter of the peak RSS.
+        "worker_concurrency": env.int("VTASKS_INGEST_CONCURRENCY", 12),
         "batch": {
-            "count": 100,
+            "count": env.int("VTASKS_INGEST_BATCH_COUNT", 25),
             "timeout": 2.0,
         },
     },
@@ -1042,12 +1068,11 @@ if VALKEY_URL:
     SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 else:  # Fallback to database cache
     # The django_cache table is also the store the Rust ingest path reads
-    # and writes (block/dedupe keys) when GLITCHTIP_RUST_INGEST runs
-    # without a Valkey — one cache either way. MAX_ENTRIES is raised from
-    # Django's default 300: ingest dedupe writes one 5-minute key per
-    # event, and the default would make every Python-side set() cull a
-    # third of the table (dropping live dedupe/block keys) under even
-    # modest event volume.
+    # and writes (block/dedupe keys) when it runs without a Valkey — one
+    # cache either way. MAX_ENTRIES is raised from Django's default 300:
+    # ingest dedupe writes one 5-minute key per event, and the default would
+    # make every Python-side set() cull a third of the table (dropping live
+    # dedupe/block keys) under even modest event volume.
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.db.DatabaseCache",

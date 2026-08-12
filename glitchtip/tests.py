@@ -616,6 +616,105 @@ class PartitionCreationDDLTestCase(TransactionTestCase):
             logs.output,
         )
 
+    def test_fills_incomplete_legacy_set_at_its_own_modulus(self):
+        """
+        A partition left with an INCOMPLETE hash set at an older modulus must be
+        repaired at that modulus, even though it differs from the configured
+        bucket count. The missing remainder tiles none of the keyspace, so rows
+        hashing there are rejected with 23514 — and since lowering the
+        configured count makes every legacy partition take the differing-modulus
+        path, bailing out here would leave a slice of organizations unable to
+        ingest for the rest of the partition's retention window.
+        """
+        partition_name = f"{self.PARENT}_20260703"
+        start = datetime(2026, 7, 3, tzinfo=UTC)
+        end = datetime(2026, 7, 4, tzinfo=UTC)
+
+        # A legacy modulus-4 set that is missing remainder 3.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                CREATE TABLE {partition_name} PARTITION OF {self.PARENT}
+                FOR VALUES FROM ('2026-07-03') TO ('2026-07-04')
+                PARTITION BY HASH (organization_id);
+                """
+            )
+            for remainder in range(3):
+                cursor.execute(
+                    f"""
+                    CREATE TABLE {partition_name}_h{remainder}
+                    PARTITION OF {partition_name}
+                    FOR VALUES WITH (MODULUS 4, REMAINDER {remainder});
+                    """
+                )
+
+        # Configured count is 2 — it cannot be applied to a modulus-4 set, but
+        # the gap still has to be filled.
+        with self._assert_partition_logs("WARNING") as logs:
+            result = self.manager.execute_partition_creation(
+                parent_table=self.PARENT,
+                partition_name=partition_name,
+                start_date=start,
+                end_date=end,
+                hash_buckets=2,
+                key_type="datetime",
+            )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(len(self.manager.list_partitions(partition_name)), 4)
+        # Repaired at the set's own modulus, not the configured one.
+        self.assertEqual(self._child_moduli(partition_name), [4])
+        self.assertTrue(
+            any("incomplete" in message for message in logs.output), logs.output
+        )
+
+        # Every organization can now be routed. Without the missing remainder
+        # some of these rows raise 23514 "no partition of relation found".
+        with connection.cursor() as cursor:
+            for organization_id in range(1, 40):
+                cursor.execute(
+                    f"INSERT INTO {self.PARENT} (date, organization_id) "
+                    f"VALUES ('2026-07-03', %s);",
+                    [organization_id],
+                )
+
+    def test_skips_plain_leaf_range_partition(self):
+        """
+        A range partition created as a plain leaf (hash_buckets=0, as the legacy
+        event importer does) must be left alone rather than have hash children
+        forced onto it — that raises 42P17 and would abort the whole maintenance
+        run, starving later tables of their partitions.
+        """
+        partition_name = f"{self.PARENT}_20260704"
+        start = datetime(2026, 7, 4, tzinfo=UTC)
+        end = datetime(2026, 7, 5, tzinfo=UTC)
+
+        self.manager.execute_partition_creation(
+            parent_table=self.PARENT,
+            partition_name=partition_name,
+            start_date=start,
+            end_date=end,
+            hash_buckets=0,
+            key_type="datetime",
+        )
+        self.assertFalse(self.manager.is_table_partitioned(partition_name))
+
+        with self._assert_partition_logs("WARNING") as logs:
+            result = self.manager.execute_partition_creation(
+                parent_table=self.PARENT,
+                partition_name=partition_name,
+                start_date=start,
+                end_date=end,
+                hash_buckets=2,
+                key_type="datetime",
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(self.manager.list_partitions(partition_name), [])
+        self.assertTrue(
+            any("plain leaf" in message for message in logs.output), logs.output
+        )
+
     def test_fills_genuinely_missing_bucket_at_matching_modulus(self):
         """
         The healthy gap-fill path still works: if a range partition has hash
@@ -1173,7 +1272,6 @@ json.dump({
     "cache_options": settings.CACHES["default"].get("OPTIONS", {}),
     "task_backend": settings.TASKS["default"]["BACKEND"],
     "session_engine": settings.SESSION_ENGINE,
-    "rust_ingest": settings.GLITCHTIP_RUST_INGEST,
     "database_engine": settings.DATABASE_ENGINE,
 }, __import__("sys").stdout)
 """
@@ -1332,30 +1430,13 @@ class CacheConfigTestCase(TestCase):
         )
 
     def test_empty_valkey_url_falls_back_to_db(self):
-        """VALKEY_URL="" → database cache + DB task backend."""
+        """VALKEY_URL="" → database cache + DB task backend. The Rust DB
+        engine (which also carries the Rust ingest path's cache and broker
+        ops in this shape) is unconditional."""
         info = self._probe({"VALKEY_URL": ""})
         self.assertEqual(info["cache_backend"], self.DB_CACHE_BACKEND)
         self.assertEqual(info["task_backend"], self.VTASKS_DB)
-
-    def test_rust_ingest_flag_enables_with_valkey(self):
-        """GLITCHTIP_RUST_INGEST with valkey configured stays enabled; the
-        Rust DB engine is unconditional."""
-        info = self._probe(
-            {"VALKEY_URL": "redis://valkey:6379/0", "GLITCHTIP_RUST_INGEST": "true"}
-        )
-        self.assertTrue(info["rust_ingest"])
         self.assertEqual(info["database_engine"], "gt_rust.django_backend")
-
-    def test_rust_ingest_without_valkey_stays_enabled(self):
-        """Flag on + no valkey: the Postgres-only shape. The Rust path runs
-        its cache ops against the django_cache table and enqueues on the
-        db_queuedtask broker, so the flag stays enabled alongside the DB
-        cache and DB task backend."""
-        info = self._probe({"VALKEY_URL": "", "GLITCHTIP_RUST_INGEST": "true"})
-        self.assertTrue(info["rust_ingest"])
-        self.assertEqual(info["database_engine"], "gt_rust.django_backend")
-        self.assertEqual(info["cache_backend"], self.DB_CACHE_BACKEND)
-        self.assertEqual(info["task_backend"], self.VTASKS_DB)
 
     def test_no_valkey_env_defaults_to_vcache(self):
         """When no VALKEY_URL/REDIS_URL is set at all, settings.py defaults to
