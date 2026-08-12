@@ -63,7 +63,7 @@ class ResolveScopeTestCase(TestCase):
         auth = Auth(other.id, "session")
         self.assertEqual(await auth.resolve_scope(self.org.slug), set())
         with self.assertRaises(ScopeNotResolved):
-            auth.org_id
+            _ = auth.org_id
 
     async def test_no_org_slug_returns_empty(self):
         self.assertEqual(await Auth(self.user.id, "session").resolve_scope(), set())
@@ -71,4 +71,4 @@ class ResolveScopeTestCase(TestCase):
     def test_org_id_before_resolution_raises(self):
         """A view that forgot its permission decorator must fail loudly."""
         with self.assertRaises(ScopeNotResolved):
-            Auth(self.user.id, "session").org_id
+            _ = Auth(self.user.id, "session").org_id
