@@ -77,6 +77,13 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
     """
     Provides informative 403 Messages.
 
+    When the actor has no membership in the organization at all, say that.
+    Scope never entered into the decision, and naming a scope shortfall would
+    be wrong: a token holding every scope it was asked for still lands here,
+    and would otherwise be told it is missing an empty list of scopes. The
+    same message covers an organization that does not exist, so the two stay
+    indistinguishable.
+
     When a token 403s, tell the user exactly what scope they are lacking
     (example: 'org:write'). When a user in a session 403s, tell the user what
     role they need to perform the action (example: need Admin, but are Member).
@@ -84,15 +91,18 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
     The acting role came back with the scope resolution, so this costs no
     additional query.
     """
+    if user_auth.actor_role is None:
+        return "Permission denied. You are not a member of this organization"
+
     if user_auth.auth_type == "token":
         missing = set(permissions).difference(set(user_auth.data.get_scopes()))
+        # Sorted, not just listed: set iteration order for strings shifts with
+        # per-process hash randomization, so an unsorted message would vary
+        # between servers for the same denial.
         return (
             "Permission denied. Token must have one or more of these scopes: "
-            f"{list(missing)}"
+            f"{sorted(missing)}"
         )
-
-    if user_auth.actor_role is None:
-        return "Permission denied"
 
     actor_role_name = OrganizationUserRole(user_auth.actor_role).label
     # Stepping up through the roles, find the minimum role needed to perform
