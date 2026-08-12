@@ -11,7 +11,7 @@ from apps.organizations_ext.models import Organization
 from apps.shared.types import MeID
 from apps.teams.models import Team
 from apps.teams.schema import ProjectTeamSchema
-from glitchtip.api.permissions import AuthHttpRequest, has_permission
+from glitchtip.api.permissions import AuthHttpRequest, has_permission, scoped_org_id
 
 from .models import Project, ProjectKey, UserProjectAlert
 from .schema import (
@@ -43,8 +43,21 @@ GET /api/0/organizations/{organization_slug}/projects/
 
 
 def get_projects_queryset(
-    user_id: int, organization_slug: str | None = None, team_slug: str | None = None
+    user_id: int,
+    organization_slug: str | None = None,
+    team_slug: str | None = None,
+    org_id: int | None = None,
 ):
+    if org_id is not None:
+        # The permission decorator resolved this org and verified membership,
+        # so the organization join and membership M2M join both go away. The
+        # is_member annotation stays -- it is per-team data, not membership.
+        qs = Project.annotate_is_member(
+            Project.undeleted_objects.filter(organization_id=org_id), user_id
+        )
+        if team_slug:
+            qs = qs.filter(teams__slug=team_slug)
+        return qs
     qs = Project.annotate_is_member(
         Project.undeleted_objects.filter(organization__users=user_id), user_id
     )
@@ -212,7 +225,11 @@ async def list_organization_projects(
     query: Filter on team, ex: ?query=!team:burke-software
     """
     queryset = (
-        get_projects_queryset(request.auth.user_id, organization_slug=organization_slug)
+        get_projects_queryset(
+            request.auth.user_id,
+            organization_slug=organization_slug,
+            org_id=scoped_org_id(request),
+        )
         .prefetch_related("teams")
         .order_by("name")
     )

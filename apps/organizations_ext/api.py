@@ -14,8 +14,8 @@ from apps.teams.models import Team
 from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
-from glitchtip.api.authentication import AuthHttpRequest, user_scope_cache_key
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .constants import OrganizationUserRole
 from .invitation_backend import InvitationTokenGenerator
@@ -73,7 +73,11 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
     """Return Organization with project and team details."""
     return await aget_object_or_404(
         get_organizations_queryset(
-            request.auth.user_id, add_details=True, organization_slug=organization_slug
+            request.auth.user_id,
+            add_details=True,
+            organization_slug=organization_slug,
+            org_id=scoped_org_id(request),
+            actor_role=request.auth.actor_role,
         )
     )
 
@@ -151,7 +155,9 @@ async def delete_organization(request: AuthHttpRequest, organization_slug: str):
 async def list_organization_members(
     request: AuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
-    return get_organization_users_queryset(request.auth.user_id, organization_slug)
+    return get_organization_users_queryset(
+        request.auth.user_id, organization_slug, org_id=scoped_org_id(request)
+    )
 
 
 @router.get(
@@ -297,8 +303,6 @@ async def delete_organization_member(
         raise HttpError(403, "Forbidden")
     try:
         await org_user.adelete()
-        if org_user.user_id:
-            await cache.adelete(user_scope_cache_key(org_user.user_id, organization_slug))
     except IntegrityError as err:
         if is_member_guard_violation(err):
             raise HttpError(
@@ -345,8 +349,6 @@ async def update_organization_member(
     ):
         raise ValidationError("Organization must have at least one owner")
     await member.asave()
-    if member.user_id:
-        await cache.adelete(user_scope_cache_key(member.user_id, organization_slug))
     return member
 
 
@@ -434,8 +436,4 @@ async def accept_invite(
         .aget()
     )
 
-    if org_user.user_id:
-        await cache.adelete(
-            user_scope_cache_key(org_user.user_id, org_user.organization.slug)
-        )
     return {"accept_invite": payload.accept_invite, "org_user": org_user}

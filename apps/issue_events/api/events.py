@@ -8,7 +8,11 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_issue_permission, has_permission
+from glitchtip.api.permissions import (
+    has_issue_permission,
+    has_permission,
+    scoped_org_id,
+)
 from glitchtip.partition_manager import UUID7Helper
 
 from ..models import Issue, IssueEvent, UserReport
@@ -24,7 +28,14 @@ def get_queryset(
     project_slug: str | None = None,
 ):
     user_id = request.auth.user_id
-    qs = IssueEvent.objects.filter(issue__project__organization__users=user_id)
+    org_id = scoped_org_id(request)
+    if org_id is not None:
+        # Membership was verified by the permission decorator; filtering on the
+        # resolved org id drops the join to organization *and* the M2M join to
+        # the membership table.
+        qs = IssueEvent.objects.filter(issue__project__organization_id=org_id)
+    else:
+        qs = IssueEvent.objects.filter(issue__project__organization__users=user_id)
     if issue_id:
         qs = qs.filter(issue_id=issue_id)
     if organization_slug:
@@ -49,11 +60,17 @@ async def _resolve_issue(
     downstream scopes by ``issue.project.organization_id``, which prunes the
     IssueEvent hash sub-partitions without joining back to organization.
     """
-    qs = Issue.objects.filter(
-        id=issue_id, project__organization__users=request.auth.user_id
-    )
-    if organization_slug:
-        qs = qs.filter(project__organization__slug=organization_slug)
+    org_id = scoped_org_id(request)
+    if org_id is not None:
+        # The decorator resolved (and membership-checked) the organization, so
+        # the slug filter and membership join are both redundant here.
+        qs = Issue.objects.filter(id=issue_id, project__organization_id=org_id)
+    else:
+        qs = Issue.objects.filter(
+            id=issue_id, project__organization__users=request.auth.user_id
+        )
+        if organization_slug:
+            qs = qs.filter(project__organization__slug=organization_slug)
     issue = await qs.select_related("project__organization", "index").afirst()
     if not issue:
         raise Http404()
@@ -262,14 +279,15 @@ async def list_organization_issue_event(
 @has_issue_permission(["event:read", "event:write", "event:admin"])
 async def get_latest_issue_event(request: AuthHttpRequest, issue_id: int):
     # Resolve issue first to get organization_id for hash partition pruning
-    issue = (
-        await Issue.objects.filter(
-            id=issue_id,
-            project__organization__users=request.auth.user_id,
+    org_id = scoped_org_id(request)
+    base = (
+        Issue.objects.filter(id=issue_id, project__organization_id=org_id)
+        if org_id is not None
+        else Issue.objects.filter(
+            id=issue_id, project__organization__users=request.auth.user_id
         )
-        .select_related("project__organization", "index")
-        .afirst()
     )
+    issue = await base.select_related("project__organization", "index").afirst()
     if not issue:
         raise Http404()
     return await _get_latest_event_for_issue(request, issue, issue_id)

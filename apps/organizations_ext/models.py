@@ -9,8 +9,6 @@ from django.core.validators import MaxValueValidator
 from django.db import models
 from django.db.models import Q, Sum
 from django.db.models.functions import Coalesce
-from django.db.models.signals import post_delete, post_save
-from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
@@ -333,16 +331,6 @@ class Organization(SharedBaseModel, OrganizationBase):
             self._org_owner_model.objects.create(
                 organization=self, organization_user=org_user
             )
-        # Membership just changed; drop any stale scope cache so a resolve that
-        # ran before the user joined (and cached an empty scope set) can't keep
-        # them locked out for the cache TTL. Mirrors the invalidation the member
-        # role-update/remove endpoints already do. Imported locally because
-        # glitchtip.api.authentication imports this module.
-        from django.core.cache import cache
-
-        from glitchtip.api.authentication import user_scope_cache_key
-
-        cache.delete(user_scope_cache_key(user.id, self.slug))
         return org_user
 
     async def aadd_user(self, user, role=OrganizationUserRole.MEMBER):
@@ -355,12 +343,6 @@ class Organization(SharedBaseModel, OrganizationBase):
             await self._org_owner_model.objects.acreate(
                 organization=self, organization_user=org_user
             )
-        # See add_user: invalidate any stale scope cache on join.
-        from django.core.cache import cache
-
-        from glitchtip.api.authentication import user_scope_cache_key
-
-        await cache.adelete(user_scope_cache_key(user.id, self.slug))
         return org_user
 
     @property
@@ -494,32 +476,3 @@ class OrganizationSocialApp(models.Model):
         "the organization's own login page. Settable here only — the "
         "organization API never writes it.",
     )
-
-
-@receiver(post_save, sender=OrganizationUser)
-@receiver(post_delete, sender=OrganizationUser)
-def invalidate_scope_cache_on_membership_change(instance, **kwargs):
-    """Drop the cached scope set when a membership row changes.
-
-    ``Auth.resolve_scope`` caches ``(user_id, org_slug) -> scopes``, so a role
-    change or removal must clear the entry to take effect before the TTL. The
-    import is local to avoid a cycle (``authentication`` imports this module);
-    user-less invites are skipped as they have no ``user_id``-keyed entry.
-    """
-    if instance.user_id is None:
-        return
-    # Reuse the already-loaded related organization when present -- the
-    # aadd_user and API paths set it, so this adds no query -- and fall back to a
-    # fetch only when it is not loaded. A missing organization (the row was
-    # removed by the organization's own cascade delete) leaves nothing to
-    # invalidate.
-    try:
-        org_slug = instance.organization.slug
-    except Organization.DoesNotExist:
-        return
-
-    from django.core.cache import cache
-
-    from glitchtip.api.authentication import user_scope_cache_key
-
-    cache.delete(user_scope_cache_key(instance.user_id, org_slug))

@@ -1,4 +1,13 @@
-from django.db.models import Count, Exists, OuterRef, Prefetch, QuerySet, Subquery
+from django.db.models import (
+    Count,
+    Exists,
+    IntegerField,
+    OuterRef,
+    Prefetch,
+    QuerySet,
+    Subquery,
+    Value,
+)
 
 from apps.projects.models import Project
 from apps.teams.models import Team
@@ -14,21 +23,34 @@ def get_organization_for_user(
 
 
 def get_organizations_queryset(
-    user_id, role_required=False, add_details=False, organization_slug=None
+    user_id,
+    role_required=False,
+    add_details=False,
+    organization_slug=None,
+    org_id=None,
+    actor_role=None,
 ):
-    qs = Organization.objects.filter(users=user_id, is_deleted=False)
+    if org_id is not None:
+        # Membership was verified by the permission decorator, which also
+        # returned the role -- so the membership filter and the actor_role
+        # correlated subquery are both redundant.
+        qs = Organization.objects.filter(id=org_id, is_deleted=False)
+        if role_required or add_details:
+            qs = qs.annotate(actor_role=Value(actor_role, IntegerField()))
+    else:
+        qs = Organization.objects.filter(users=user_id, is_deleted=False)
 
-    if organization_slug:
-        qs = qs.filter(slug=organization_slug)
+        if organization_slug:
+            qs = qs.filter(slug=organization_slug)
 
-    if role_required or add_details:
-        qs = qs.annotate(
-            actor_role=Subquery(
-                qs.filter(organization_users__user=user_id).values(
-                    "organization_users__role"
-                )[:1]
+        if role_required or add_details:
+            qs = qs.annotate(
+                actor_role=Subquery(
+                    qs.filter(organization_users__user=user_id).values(
+                        "organization_users__role"
+                    )[:1]
+                )
             )
-        )
     if add_details:
         qs = qs.prefetch_related(
             Prefetch(
@@ -58,13 +80,17 @@ def get_organization_users_queryset(
     team_slug: str | None = None,
     role_required=False,
     add_details=False,
+    org_id=None,
 ):
-    qs = (
-        OrganizationUser.objects.filter(
+    base = (
+        OrganizationUser.objects.filter(organization_id=org_id)
+        if org_id is not None
+        else OrganizationUser.objects.filter(
             organization__users=user_id, organization__slug=organization_slug
         )
-        .select_related("user", "organization__owner")
-        .prefetch_related("user__socialaccount_set")
+    )
+    qs = base.select_related("user", "organization__owner").prefetch_related(
+        "user__socialaccount_set"
     )
     if team_slug:
         qs = qs.filter(teams__slug=team_slug)

@@ -6,7 +6,11 @@ from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_issue_permission, has_permission
+from glitchtip.api.permissions import (
+    has_issue_permission,
+    has_permission,
+    scoped_org_id,
+)
 
 from ..models import Comment, Issue
 from ..schema import CommentSchema
@@ -17,6 +21,12 @@ def get_queryset(
     request: AuthHttpRequest, issue_id: int, organization_slug: str | None = None
 ):
     user_id = request.auth.user_id
+    org_id = scoped_org_id(request)
+    if org_id is not None:
+        # Membership already verified by the permission decorator.
+        return Comment.objects.select_related("user").filter(
+            issue__project__organization_id=org_id, issue__id=issue_id
+        )
     qs = Comment.objects.select_related("user").filter(
         issue__project__organization__users=user_id,
         issue__id=issue_id,

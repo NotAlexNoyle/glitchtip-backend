@@ -88,11 +88,18 @@ async def get_queryset(
     user_id: int | None,
     organization_slug: str | None = None,
     project_slug: str | None = None,
+    org_id: int | None = None,
 ) -> QuerySet[Issue]:
     qs = Issue.objects
     leaf_org_id: int | None = None
 
-    if organization_slug:
+    if org_id is not None:
+        # The permission decorator already resolved this organization *and*
+        # verified the actor's membership in it, so neither the org lookup nor
+        # the membership join is needed here.
+        qs = qs.filter(project__organization_id=org_id)
+        leaf_org_id = org_id
+    elif organization_slug:
         if user_id:
             organization = await aget_object_or_404(
                 Organization, users=user_id, slug=organization_slug

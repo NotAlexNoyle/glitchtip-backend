@@ -4,6 +4,7 @@ import re
 import uuid
 from timeit import default_timer as timer
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.postgres.search import SearchVector
 from django.db.models import Value
@@ -1442,9 +1443,11 @@ class BareIssueRouteAuthzTestCase(GlitchTestCase):
     - issue does not exist anywhere -> 404 (nothing to authorize against, so
       ``has_issue_permission`` defers to the view rather than leaking a 403)
 
-    Token auth resolves its scopes from the token itself, independent of any
-    org; that path is exercised by ``IssueEventAPIPermissionTestCase`` (issues)
-    and ``CommentsAPIPermissionTests`` (comments).
+    A token carries its own scopes independent of any org, so its visibility of
+    a foreign issue stays where it has always been decided -- the view's
+    membership-scoped queryset, which 404s. The scope side of the token path is
+    exercised by ``IssueEventAPIPermissionTestCase`` (issues) and
+    ``CommentsAPIPermissionTests`` (comments).
     """
 
     @classmethod
@@ -1471,6 +1474,18 @@ class BareIssueRouteAuthzTestCase(GlitchTestCase):
     async def test_nonexistent_issue_is_not_found(self):
         url = reverse("api:get_issue", kwargs={"issue_id": 99999})
         res = await self.async_client.get(url)
+        self.assertEqual(res.status_code, 404)
+
+    async def test_token_on_foreign_issue_is_not_found(self):
+        """A token's foreign-issue visibility is decided by the view, not the
+        decorator, so it 404s where a session user is told 403."""
+        token = await baker.amake("api_tokens.APIToken", user=self.user)
+        await sync_to_async(token.add_permissions)(["event:read"])
+        other_issue = await baker.amake("issue_events.Issue")
+        url = reverse("api:get_issue", kwargs={"issue_id": other_issue.id})
+        res = await self.async_client.get(
+            url, headers={"authorization": f"Bearer {token.token}"}
+        )
         self.assertEqual(res.status_code, 404)
 
 

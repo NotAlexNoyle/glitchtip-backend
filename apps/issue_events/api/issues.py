@@ -19,7 +19,11 @@ from apps.releases.models import Release
 from apps.releases.schema import CommitSchema
 from apps.teams.models import Team
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_issue_permission, has_permission
+from glitchtip.api.permissions import (
+    has_issue_permission,
+    has_permission,
+    scoped_org_id,
+)
 
 from ..constants import EventStatus
 from ..models import Issue, IssueAggregate, IssueEvent, IssueHash, IssueIndex
@@ -150,7 +154,7 @@ async def _aggregate_tags(issue: Issue, key: str | None):
 )
 @has_issue_permission(["event:read", "event:write", "event:admin"])
 async def get_issue(request: AuthHttpRequest, issue_id: int):
-    qs = await get_queryset(request.auth.user_id)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     qs = qs.annotate(
         user_report_count=Count("userreport", distinct=True),
     )
@@ -353,11 +357,16 @@ async def list_issues(
     filters: Query[IssueFilters],
     sort: sort_options = "-last_seen",
 ):
+    resolved_org_id = scoped_org_id(request)
     qs = (
-        await get_queryset(request.auth.user_id, organization_slug=organization_slug)
+        await get_queryset(
+            request.auth.user_id,
+            organization_slug=organization_slug,
+            org_id=resolved_org_id,
+        )
     ).filter(is_deleted=False)
     event_id: UUID | None = None
-    organization_id: int | None = None
+    organization_id: int | None = resolved_org_id
     if filters.query:
         try:
             event_id = UUID(filters.query)
@@ -366,7 +375,7 @@ async def list_issues(
         if event_id is not None:
             request.matching_event_id = event_id
             response["X-Sentry-Direct-Hit"] = "1"
-        if event_id is None or not is_uuid7(event_id):
+        if organization_id is None and (event_id is None or not is_uuid7(event_id)):
             # Both text search (index join) and client-SDK UUIDv4
             # event-id lookups scan org-partitioned tables. Resolve the
             # org id so Postgres can prune hash partitions instead of
@@ -556,7 +565,7 @@ async def list_issue_tags(
     issue_id: int,
     key: str | None = None,
 ):
-    qs = await get_queryset(request.auth.user_id)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     try:
         issue = await qs.filter(id=issue_id).aget()
     except Issue.DoesNotExist:
@@ -598,6 +607,10 @@ class IssueStatsFilters(Schema):
     summary="Retrieve Statistics for a Set of Issues",
     by_alias=True,
 )
+# This endpoint previously returned issue data with no scope check at all. Its
+# queryset is membership-filtered, so it was not a data leak, but a token with
+# no event scope could read it.
+@has_permission(["event:read", "event:write", "event:admin"])
 async def issue_stats(
     request: AuthHttpRequest, organization_slug: str, filters: Query[IssueStatsFilters]
 ):
@@ -608,11 +621,14 @@ async def issue_stats(
     [timestamp, count] pairs.
     """
     user_id = request.auth.user_id
-    organization = await aget_object_or_404(
-        Organization, users=user_id, slug=organization_slug
-    )
+    resolved_org_id = scoped_org_id(request)
+    if resolved_org_id is None:
+        organization = await aget_object_or_404(
+            Organization, users=user_id, slug=organization_slug
+        )
+        resolved_org_id = organization.id
     issues_qs = Issue.objects.filter(
-        project__organization_id=organization.id, id__in=filters.groups
+        project__organization_id=resolved_org_id, id__in=filters.groups
     ).select_related("index")[:200]  # Sanity limit; leaf for count/last_seen
 
     issue_list = [issue async for issue in issues_qs]

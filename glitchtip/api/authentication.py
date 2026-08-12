@@ -5,21 +5,23 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY
 from django.contrib.auth.models import AnonymousUser
-from django.core.cache import cache
 from django.http import HttpRequest
 from ninja.security import HttpBearer
 from ninja.security import SessionAuth as BaseSessionAuth
 
 from apps.api_tokens.models import APIToken
+from apps.organizations_ext.constants import OrganizationUserRole
 from apps.organizations_ext.models import OrganizationUser
 from apps.organizations_ext.scopes import Scopes
 
-USER_SCOPE_CACHE_KEY = "user_scope:v1:"
-USER_SCOPE_CACHE_TTL = 300
 
+class ScopeNotResolved(Exception):
+    """A view asked for a scope-derived value before any permission check ran.
 
-def user_scope_cache_key(user_id: int, org_slug: str) -> str:
-    return f"{USER_SCOPE_CACHE_KEY}{user_id}:{org_slug}"
+    Views filter by ``Auth.org_id`` instead of re-deriving membership, so a
+    route that forgot its permission decorator must fail loudly (500) rather
+    than fall through to an unfiltered queryset.
+    """
 
 
 @dataclass
@@ -28,29 +30,78 @@ class Auth:
     auth_type: Literal["session", "token"]
     data: Any = None
     scope: set[Scopes] = field(default_factory=set)
+    # Populated by resolve_scope. actor_role is the OrganizationUserRole int of
+    # the acting user's membership in the resolved organization.
+    actor_role: int | None = None
+    # The resolved organization PK, and the memo key it was resolved for (an
+    # organization slug, or an issue id for the bare /issues/{id}/ routes).
+    _org_id: int | None = None
+    _resolved_for: str | int | None = None
+    _resolved: bool = False
+    # Only meaningful when _resolved_for is an issue id: whether that issue
+    # exists at all, which separates "not found" from "not a member of its org".
+    _issue_exists: bool = False
+
+    @property
+    def org_id(self) -> int:
+        """The organization the permission check resolved for this request."""
+        if not self._resolved or self._org_id is None:
+            raise ScopeNotResolved(
+                "Auth.org_id read before a permission check resolved an "
+                "organization -- is the view missing @has_permission?"
+            )
+        return self._org_id
 
     async def resolve_scope(self, organization_slug: str | None = None) -> set[Scopes]:
+        """Resolve (org id, role, scope) in one query, memoized per request.
+
+        Pulls the source of permissions - scope - up into its own field in the
+        Auth class. Depending on the type of Auth this generates the related
+        scope.
+
+        There is no cross-request cache: the membership row is read in the same
+        request that authorizes against it, so there is nothing to invalidate
+        and a role change takes effect on the next request. The memo is
+        per-Auth-instance, and Auth lives exactly one request.
         """
-        Pulls the source of permissions - scope - up into its own field
-        in Auth class. Depending on the type of Auth this generates the
-        related scope.
-        """
-        if self.auth_type == "token":
-            self.scope = set(self.data.get_scopes())
-        elif organization_slug:
-            key = user_scope_cache_key(self.user_id, organization_slug)
-            cached = await cache.aget(key)
-            if cached is None:
-                org_user = await OrganizationUser.objects.filter(
-                    user_id=self.user_id,
-                    organization__slug=organization_slug,
-                ).afirst()
-                cached = list(org_user.get_scopes()) if org_user else []
-                await cache.aset(key, cached, USER_SCOPE_CACHE_TTL)
-            self.scope = set(cached)
-        else:
-            self.scope = set()
+        if self._resolved and self._resolved_for == organization_slug:
+            return self.scope
+
+        if organization_slug is None:
+            # Token auth with no organization in the path (the bare
+            # /issues/{id}/ routes): scopes come off the token alone.
+            self.scope = (
+                set(self.data.get_scopes()) if self.auth_type == "token" else set()
+            )
+            self._resolved, self._resolved_for = True, organization_slug
+            return self.scope
+
+        row = await (
+            OrganizationUser.objects.filter(
+                user_id=self.user_id, organization__slug=organization_slug
+            )
+            .values("organization_id", "role")
+            .afirst()
+        )
+        self._apply_membership_row(row, organization_slug)
         return self.scope
+
+    def _apply_membership_row(
+        self, row: dict | None, resolved_for: str | int | None
+    ) -> None:
+        """Set scope/org_id/actor_role from a ``{organization_id, role}`` row."""
+        self._resolved, self._resolved_for = True, resolved_for
+        if row is None:
+            self._org_id, self.actor_role, self.scope = None, None, set()
+            return
+        self._org_id = row["organization_id"]
+        if self.auth_type == "token":
+            # Membership gates *visibility*; the token still supplies scope.
+            self.actor_role = row["role"]
+            self.scope = set(self.data.get_scopes())
+        else:
+            self.actor_role = row["role"]
+            self.scope = set(OrganizationUserRole.get_role(row["role"])["scopes"])
 
 
 class AuthHttpRequest(HttpRequest):

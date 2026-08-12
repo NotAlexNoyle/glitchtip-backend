@@ -10,7 +10,7 @@ from apps.organizations_ext.models import Organization, OrganizationUser
 from apps.projects.models import Project
 from apps.shared.types import MeID
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .models import Team
 from .schema import ProjectTeamSchema, TeamIn, TeamProjectSchema, TeamSchema
@@ -44,8 +44,14 @@ def get_team_queryset(
     id: int | None = None,
     add_details=False,
     add_projects=False,
+    org_id: int | None = None,
 ):
-    qs = Team.objects.filter(organization__slug=organization_slug)
+    if org_id is not None:
+        # Decorator-resolved org: drops the organization join for the slug and
+        # the membership M2M join below.
+        qs = Team.objects.filter(organization_id=org_id)
+    else:
+        qs = Team.objects.filter(organization__slug=organization_slug)
     if team_slug:
         qs = qs.filter(slug=team_slug)
     if project_slug:
@@ -53,7 +59,8 @@ def get_team_queryset(
     if id:
         qs = qs.filter(id=id)
     if user_id:
-        qs = qs.filter(organization__users=user_id)
+        if org_id is None:
+            qs = qs.filter(organization__users=user_id)
         if add_details:
             qs = qs.annotate(
                 is_member=Exists(
@@ -157,6 +164,7 @@ async def list_teams(
         user_id=request.auth.user_id,
         add_details=True,
         add_projects=True,
+        org_id=scoped_org_id(request),
     )
 
 
