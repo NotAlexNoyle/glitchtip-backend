@@ -6,7 +6,7 @@ from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import OrganizationUserRole
-from apps.organizations_ext.models import Organization, OrganizationUser
+from apps.organizations_ext.models import OrganizationUser
 from apps.projects.models import Project
 from apps.shared.types import MeID
 from glitchtip.api.authentication import AuthHttpRequest
@@ -178,14 +178,13 @@ async def create_team(
     request: AuthHttpRequest, organization_slug: str, payload: TeamIn
 ):
     user_id = request.auth.user_id
-    organization = await aget_object_or_404(
-        Organization,
-        slug=organization_slug,
-        users=user_id,
-        organization_users__role__gte=OrganizationUserRole.ADMIN,
+    organization_id = scoped_org_id(request)
+    team = await Team.objects.acreate(
+        organization_id=organization_id, slug=payload.slug
     )
-    team = await Team.objects.acreate(organization=organization, slug=payload.slug)
-    org_user = await organization.organization_users.filter(user=user_id).afirst()
+    org_user = await OrganizationUser.objects.filter(
+        organization_id=organization_id, user=user_id
+    ).afirst()
     await team.members.aadd(org_user)
     return await get_team_queryset(
         organization_slug,

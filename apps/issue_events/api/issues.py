@@ -8,13 +8,12 @@ from django.db.models import Count, F, Sum
 from django.db.models.functions import TruncDay
 from django.db.models.query import QuerySet
 from django.http import Http404, HttpResponse
-from django.shortcuts import aget_object_or_404
 from django.utils import timezone
 from ninja import Field, Query, Schema, Status
 from ninja.errors import HttpError
 from ninja.pagination import paginate
 
-from apps.organizations_ext.models import Organization, OrganizationUser
+from apps.organizations_ext.models import OrganizationUser
 from apps.releases.models import Release
 from apps.releases.schema import CommitSchema
 from apps.teams.models import Team
@@ -38,7 +37,6 @@ from ..services import (
     IssueFilters,
     filter_issue_list,
     get_queryset,
-    is_uuid7,
     sort_options,
 )
 from ..tasks import delete_issue_task, update_issues_task
@@ -163,6 +161,7 @@ async def get_issue(request: AuthHttpRequest, issue_id: int):
     except Issue.DoesNotExist:
         raise Http404()
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",
     response=IssueDetailSchema,
@@ -172,7 +171,7 @@ async def get_issue(request: AuthHttpRequest, issue_id: int):
 async def get_organization_issue(
     request: AuthHttpRequest, organization_slug: str, issue_id: int
 ):
-    qs = await get_queryset(request.auth.user_id, organization_slug=organization_slug)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     qs = qs.annotate(
         user_report_count=Count("userreport", distinct=True),
     )
@@ -199,6 +198,7 @@ async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
         return []
     return issue.first_release.data.get("commits", [])
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/commits/",
     response=list[CommitSchema],
@@ -208,7 +208,7 @@ async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
 async def list_organization_issue_commits(
     request: AuthHttpRequest, organization_slug: str, issue_id: int
 ):
-    qs = await get_queryset(request.auth.user_id, organization_slug=organization_slug)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     try:
         issue = await qs.select_related("first_release").filter(id=issue_id).aget()
     except Issue.DoesNotExist:
@@ -255,7 +255,7 @@ async def delete_issue(request: AuthHttpRequest, issue_id: int):
 async def delete_organization_issue(
     request: AuthHttpRequest, organization_slug: str, issue_id: int
 ):
-    qs = await get_queryset(request.auth.user_id, organization_slug=organization_slug)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     result = await qs.filter(id=issue_id).aupdate(is_deleted=True)
     if not result:
         raise Http404()
@@ -275,7 +275,7 @@ async def update_organization_issue(
     issue_id: int,
     payload: UpdateIssueSchema,
 ):
-    qs = await get_queryset(request.auth.user_id, organization_slug=organization_slug)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     return await update_issue_status(qs, issue_id, payload)
 
 
@@ -357,16 +357,11 @@ async def list_issues(
     filters: Query[IssueFilters],
     sort: sort_options = "-last_seen",
 ):
-    resolved_org_id = scoped_org_id(request)
-    qs = (
-        await get_queryset(
-            request.auth.user_id,
-            organization_slug=organization_slug,
-            org_id=resolved_org_id,
-        )
-    ).filter(is_deleted=False)
+    organization_id = scoped_org_id(request)
+    qs = (await get_queryset(request.auth.user_id, org_id=organization_id)).filter(
+        is_deleted=False
+    )
     event_id: UUID | None = None
-    organization_id: int | None = resolved_org_id
     if filters.query:
         try:
             event_id = UUID(filters.query)
@@ -375,19 +370,6 @@ async def list_issues(
         if event_id is not None:
             request.matching_event_id = event_id
             response["X-Sentry-Direct-Hit"] = "1"
-        if organization_id is None and (event_id is None or not is_uuid7(event_id)):
-            # Both text search (index join) and client-SDK UUIDv4
-            # event-id lookups scan org-partitioned tables. Resolve the
-            # org id so Postgres can prune hash partitions instead of
-            # scanning all of them. A UUIDv7 id already prunes by its
-            # time-range id partition, so it skips this extra lookup.
-            org = (
-                await Organization.objects.filter(slug=organization_slug)
-                .only("id")
-                .afirst()
-            )
-            if org:
-                organization_id = org.id
     return filter_issue_list(qs, filters, sort, event_id, organization_id)
 
 
@@ -400,7 +382,7 @@ async def delete_issues(
     organization_slug: str,
     filters: Query[IssueFilters],
 ):
-    qs = await get_queryset(request.auth.user_id, organization_slug=organization_slug)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     qs = filter_issue_list(qs, filters)
     await qs.aupdate(is_deleted=True)
     issue_ids = [
@@ -422,7 +404,7 @@ async def update_issues(
     payload: UpdateIssueSchema,
 ):
     user_id = request.auth.user_id
-    qs = await get_queryset(user_id, organization_slug=organization_slug)
+    qs = await get_queryset(user_id, org_id=scoped_org_id(request))
     qs = filter_issue_list(qs, filters)
 
     # Freeze the set of issues to update to avoid race conditions with new issues
@@ -446,11 +428,7 @@ async def update_issues(
         "update_params": payload.dict(),
     }
 
-    organization_id = (
-        await Organization.objects.filter(slug=organization_slug)
-        .values_list("id", flat=True)
-        .afirst()
-    )
+    organization_id = scoped_org_id(request)
 
     if payload.status:
         # status lives on the IssueIndex leaf; the partition key prunes
@@ -523,13 +501,13 @@ async def list_project_issues(
     filters: Query[IssueFilters],
     sort: sort_options = "-last_seen",
 ):
+    organization_id = scoped_org_id(request)
     qs = await get_queryset(
         request.auth.user_id,
-        organization_slug=organization_slug,
         project_slug=project_slug,
+        org_id=organization_id,
     )
     event_id: UUID | None = None
-    organization_id: int | None = None
     if filters.query:
         try:
             event_id = UUID(filters.query)
@@ -538,19 +516,6 @@ async def list_project_issues(
         if event_id is not None:
             request.matching_event_id = event_id
             response["X-Sentry-Direct-Hit"] = "1"
-        if event_id is None or not is_uuid7(event_id):
-            # Both text search (index join) and client-SDK UUIDv4
-            # event-id lookups scan org-partitioned tables. Resolve the
-            # org id so Postgres can prune hash partitions instead of
-            # scanning all of them. A UUIDv7 id already prunes by its
-            # time-range id partition, so it skips this extra lookup.
-            org = (
-                await Organization.objects.filter(slug=organization_slug)
-                .only("id")
-                .afirst()
-            )
-            if org:
-                organization_id = org.id
     return filter_issue_list(qs, filters, sort, event_id, organization_id)
 
 
@@ -574,7 +539,6 @@ async def list_issue_tags(
     return await _aggregate_tags(issue, key)
 
 
-
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/tags/",
     response=list[IssueTagSchema],
@@ -587,7 +551,7 @@ async def list_organization_issue_tags(
     issue_id: int,
     key: str | None = None,
 ):
-    qs = await get_queryset(request.auth.user_id, organization_slug)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     try:
         issue = await qs.filter(id=issue_id).aget()
     except Issue.DoesNotExist:
@@ -620,13 +584,7 @@ async def issue_stats(
     This endpoint returns data for the last 24 hours, formatted as a series of
     [timestamp, count] pairs.
     """
-    user_id = request.auth.user_id
     resolved_org_id = scoped_org_id(request)
-    if resolved_org_id is None:
-        organization = await aget_object_or_404(
-            Organization, users=user_id, slug=organization_slug
-        )
-        resolved_org_id = organization.id
     issues_qs = Issue.objects.filter(
         project__organization_id=resolved_org_id, id__in=filters.groups
     ).select_related("index")[:200]  # Sanity limit; leaf for count/last_seen

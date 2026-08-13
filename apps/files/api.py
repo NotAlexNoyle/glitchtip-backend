@@ -10,13 +10,11 @@ from tempfile import SpooledTemporaryFile
 
 from django.conf import settings
 from django.core.files.base import File as FileObj
-from django.shortcuts import aget_object_or_404
 from django.urls import reverse
 from ninja import File, Router
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
 
-from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
 from glitchtip.api.permissions import has_permission
@@ -138,11 +136,8 @@ async def chunk_upload(
     logger = logging.getLogger("glitchtip.files")
     logger.info("chunkupload.start")
 
-    # Membership check; the organization itself is not otherwise needed.
-    await aget_object_or_404(
-        Organization, slug=organization_slug.lower(), users=request.auth.user_id
-    )
-
+    # Membership was already checked by @has_permission, and the organization
+    # itself is not otherwise needed here.
     logger.info("chunkupload.post.files", extra={"len": len(file_gzip)})
 
     if len(file_gzip) > MAX_CHUNKS_PER_REQUEST:

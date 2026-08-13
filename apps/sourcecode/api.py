@@ -1,16 +1,14 @@
 from django.db import IntegrityError
 from django.http import HttpResponse
-from django.shortcuts import aget_object_or_404
 from ninja import Router, Status
 from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from apps.files.models import FileBlob
 from apps.files.tasks import assemble_artifacts_task
-from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .models import Repository
 from .schema import ArtifactBundleAssembleIn, RepositoryIn, RepositorySchema
@@ -47,13 +45,9 @@ async def list_repositories(
 async def create_repository(
     request: AuthHttpRequest, organization_slug: str, payload: RepositoryIn
 ):
-    user_id = request.auth.user_id
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug, users=user_id
-    )
     try:
         repo = await Repository.objects.acreate(
-            organization=organization,
+            organization_id=scoped_org_id(request),
             name=payload.name,
             url=payload.url,
             provider=payload.provider or {},
@@ -71,11 +65,6 @@ async def artifact_bundle_assemble(
     request: AuthHttpRequest, organization_slug: str, payload: ArtifactBundleAssembleIn
 ):
     """Associate files with assembly bundle and optionally release"""
-    user_id = request.auth.user_id
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug, users=user_id
-    )
-
     existing_chunks = [
         checksum
         async for checksum in FileBlob.objects.filter(
@@ -88,7 +77,7 @@ async def artifact_bundle_assemble(
         return {"state": "not_found", "missingChunks": missing_chunks}
 
     await assemble_artifacts_task.aenqueue(
-        organization.id,
+        scoped_org_id(request),
         payload.version,
         payload.checksum,
         payload.chunks,

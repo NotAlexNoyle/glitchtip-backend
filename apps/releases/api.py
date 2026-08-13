@@ -7,13 +7,12 @@ from ninja.pagination import paginate
 
 from apps.files.models import FileBlob
 from apps.files.tasks import assemble_artifacts_task
-from apps.organizations_ext.models import Organization
 from apps.projects.models import Project
 from apps.sourcecode.models import DebugSymbolBundle
 from apps.sourcecode.schema import DebugSymbolBundleSchema
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .models import Deploy, Release
 from .schema import (
@@ -104,22 +103,20 @@ async def create_release(
     request: AuthHttpRequest, organization_slug: str, payload: ReleaseIn
 ):
     user_id = request.auth.user_id
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug, users=user_id
-    )
+    organization_id = scoped_org_id(request)
     data = payload.dict()
     project_slugs = data.pop("projects")
     projects = [
         project_id
         async for project_id in Project.objects.filter(
-            slug__in=project_slugs, organization=organization
+            slug__in=project_slugs, organization_id=organization_id
         ).values_list("id", flat=True)
     ]
     if not projects:
         raise ValidationError([{"projects": "Require at least one valid project"}])
     version = data.pop("version")
     release, _ = await Release.objects.aget_or_create(
-        organization=organization, version=version, defaults=data
+        organization_id=organization_id, version=version, defaults=data
     )
     await release.projects.aadd(*projects)
     return await get_releases_queryset(organization_slug, user_id, id=release.id).aget()
@@ -532,11 +529,6 @@ async def assemble_release(
     version: str,
     payload: AssembleSchema,
 ):
-    user_id = request.auth.user_id
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug, users=user_id
-    )
-
     existing_chunks = [
         checksum
         async for checksum in FileBlob.objects.filter(
@@ -549,7 +541,7 @@ async def assemble_release(
         return {"state": "not_found", "missingChunks": missing_chunks}
 
     await assemble_artifacts_task.aenqueue(
-        organization.id,
+        scoped_org_id(request),
         version,
         payload.checksum,
         payload.chunks,

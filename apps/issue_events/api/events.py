@@ -6,7 +6,6 @@ from django.db.models import OuterRef, Subquery
 from django.http import Http404, HttpResponse
 from ninja.pagination import paginate
 
-from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.permissions import (
     has_issue_permission,
@@ -253,20 +252,13 @@ async def list_organization_issue_event(
     issue_id: int,
     organization_slug: str,
 ):
-    # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering
-    org_id = await (
-        Organization.objects.filter(slug=organization_slug, users=request.auth.user_id)
-        .values_list("id", flat=True)
-        .afirst()
-    )
-    if not org_id:
-        raise Http404()
-    # The Organization lookup above already established membership, so scope the
-    # hot table by organization_id alone - it prunes the hash sub-partitions
-    # without joining issue -> project -> organization.
+    # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering.
+    # The permission decorator already established membership, so scope the hot
+    # table by organization_id alone - it prunes the hash sub-partitions without
+    # joining issue -> project -> organization.
     return (
         get_queryset(request, issue_id=issue_id)
-        .filter(organization_id=org_id)
+        .filter(organization_id=scoped_org_id(request))
         .order_by("-id")
     )
 
@@ -378,29 +370,18 @@ async def get_project_issue_event(
     else:
         # Client-provided sentry SDK event_id (typically UUIDv4).
         # Include organization_id to prune hash sub-partitions.
-        org_id = await (
-            Organization.objects.filter(
-                slug=organization_slug, users=request.auth.user_id
-            )
-            .values_list("id", flat=True)
-            .afirst()
-        )
-        if not org_id:
-            raise Http404()
-        event = await qs.filter(event_id=event_id, organization_id=org_id).afirst()
+        event = await qs.filter(
+            event_id=event_id, organization_id=scoped_org_id(request)
+        ).afirst()
 
     if event:
         event.user_report = await get_user_report(event.id)
         return event
 
     # Fall back to cold storage
-    org = await Organization.objects.filter(
-        slug=organization_slug, users=request.auth.user_id
-    ).afirst()
-    if not org:
-        raise Http404()
-
-    cold_event = await asyncio.to_thread(_get_event_from_cold, event_id, org.id)
+    cold_event = await asyncio.to_thread(
+        _get_event_from_cold, event_id, scoped_org_id(request)
+    )
     if not cold_event:
         raise Http404()
 
@@ -432,16 +413,9 @@ async def get_event_json(
     if is_uuid7(event_id):
         obj = await qs.filter(id=event_id).afirst()
     else:
-        org_id = await (
-            Organization.objects.filter(
-                slug=organization_slug, users=request.auth.user_id
-            )
-            .values_list("id", flat=True)
-            .afirst()
-        )
-        if not org_id:
-            raise Http404()
-        obj = await qs.filter(event_id=event_id, organization_id=org_id).afirst()
+        obj = await qs.filter(
+            event_id=event_id, organization_id=scoped_org_id(request)
+        ).afirst()
 
     if obj:
         return obj

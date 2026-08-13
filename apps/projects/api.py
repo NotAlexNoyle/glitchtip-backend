@@ -7,7 +7,6 @@ from ninja.errors import ValidationError
 from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import OrganizationUserRole
-from apps.organizations_ext.models import Organization
 from apps.shared.types import MeID
 from apps.teams.models import Team
 from apps.teams.schema import ProjectTeamSchema
@@ -192,14 +191,8 @@ async def create_project(
         organization__users=user_id,
         organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
     )
-    organization = await aget_object_or_404(
-        Organization,
-        slug=organization_slug,
-        users=user_id,
-        organization_users__role__gte=OrganizationUserRole.ADMIN,
-    )
     project = await Project.objects.acreate(
-        organization=organization, **payload.dict(exclude_unset=True)
+        organization_id=scoped_org_id(request), **payload.dict(exclude_unset=True)
     )
     await project.teams.aadd(team)
     project = await get_projects_queryset(user_id).aget(id=project.id)

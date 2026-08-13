@@ -18,11 +18,10 @@ from ninja.files import UploadedFile
 from ninja.pagination import paginate
 
 from apps.files.models import File, FileBlob
-from apps.organizations_ext.models import Organization
 from apps.projects.models import Project
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .models import DebugInformationFile
 from .schema import AssemblePayload, DebugFileSchema
@@ -46,11 +45,8 @@ async def difs_assemble_api(
     project_slug: str,
     payload: AssemblePayload,
 ):
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug.lower(), users=request.auth.user_id
-    )
     project = await aget_object_or_404(
-        Project, slug=project_slug.lower(), organization=organization
+        Project, slug=project_slug.lower(), organization_id=scoped_org_id(request)
     )
 
     responses = {}
@@ -214,11 +210,8 @@ async def list_dsyms(
     project_slug: str,
     response: HttpResponse,
 ):
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug.lower(), users=request.auth.user_id
-    )
     project = await aget_object_or_404(
-        Project, slug=project_slug.lower(), organization=organization
+        Project, slug=project_slug.lower(), organization_id=scoped_org_id(request)
     )
 
     return DebugInformationFile.objects.filter(project=project).select_related("file")
@@ -234,12 +227,8 @@ async def dsyms(
     project_slug: str,
     file: UploadedFile = NinjaFile(...),
 ):
-    organization = await aget_object_or_404(
-        Organization, slug=organization_slug.lower(), users=request.auth.user_id
-    )
-    # self.check_object_permissions(request, organization)
     project = await aget_object_or_404(
-        Project, slug=project_slug.lower(), organization=organization
+        Project, slug=project_slug.lower(), organization_id=scoped_org_id(request)
     )
     if file.size > MAX_UPLOAD_BLOB_SIZE:
         raise HttpError(

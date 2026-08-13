@@ -1,16 +1,14 @@
 from uuid import UUID
 
 from django.http import HttpResponse
-from django.shortcuts import aget_object_or_404
 from ninja import Query, Schema, Status
 from ninja.pagination import paginate
 
 from apps.issue_events.models import IssueEvent, IssueHash
 from apps.issue_events.schema import IssueHashSchema
-from apps.organizations_ext.models import Organization
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.pagination import AsyncLinkHeaderPagination
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from . import router
 
@@ -46,11 +44,8 @@ async def list_issue_hashes(
     organization_slug: str,
     issue_id: int,
 ):
-    organization = await aget_object_or_404(
-        Organization, users=request.auth.user_id, slug=organization_slug
-    )
     return IssueHash.objects.filter(
-        issue_id=issue_id, issue__project__organization=organization
+        issue_id=issue_id, issue__project__organization_id=scoped_org_id(request)
     ).order_by("value")
 
 
@@ -69,12 +64,9 @@ async def delete_hash(
     issue_id: int,
     query: Query[IssueHashQuerySchema],
 ):
-    organization = await aget_object_or_404(
-        Organization, users=request.auth.user_id, slug=organization_slug
-    )
     await IssueHash.objects.filter(
         value__in=query.id,
         issue_id=issue_id,
-        issue__project__organization=organization,
+        issue__project__organization_id=scoped_org_id(request),
     ).adelete()
     return Status(202, None)
