@@ -189,7 +189,7 @@ async def get_organization_issue(
 @has_issue_permission(["event:read", "event:write", "event:admin"])
 async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
     """Return commits from the release where this issue first appeared."""
-    qs = await get_queryset(request.auth.user_id)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     try:
         issue = await qs.select_related("first_release").filter(id=issue_id).aget()
     except Issue.DoesNotExist:
@@ -229,7 +229,7 @@ async def update_issue(
     issue_id: int,
     payload: UpdateIssueSchema,
 ):
-    qs = await get_queryset(request.auth.user_id)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     return await update_issue_status(qs, issue_id, payload)
 
 
@@ -239,7 +239,7 @@ async def update_issue(
 )
 @has_issue_permission(["event:write", "event:admin"])
 async def delete_issue(request: AuthHttpRequest, issue_id: int):
-    qs = await get_queryset(request.auth.user_id)
+    qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     result = await qs.filter(id=issue_id).aupdate(is_deleted=True)
     if not result:
         raise Http404()

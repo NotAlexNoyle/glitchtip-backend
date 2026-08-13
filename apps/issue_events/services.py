@@ -110,6 +110,7 @@ async def get_queryset(
             # Internal/System usage without user_id
             qs = qs.filter(project__organization__slug=organization_slug)
     elif user_id:
+        # Un-guarded callers (MCP) only: this filter is the authorization.
         qs = qs.filter(project__organization__users=user_id)
 
     if project_slug:

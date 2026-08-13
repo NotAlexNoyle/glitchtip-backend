@@ -7,7 +7,7 @@ from ninja.pagination import paginate
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.projects.models import Project
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .constants import RecipientType
 from .models import AlertRecipient, ProjectAlert
@@ -33,10 +33,9 @@ def _prepare_recipient_data(recipient: dict) -> dict:
     return cleaned
 
 
-def get_project_alert_queryset(user_id: int, organization_slug: str, project_slug: str):
+def get_project_alert_queryset(org_id: int, project_slug: str):
     return ProjectAlert.objects.filter(
-        project__organization__users=user_id,
-        project__organization__slug=organization_slug,
+        project__organization_id=org_id,
         project__slug=project_slug,
     ).prefetch_related("alertrecipient_set")
 
@@ -54,9 +53,7 @@ async def list_project_alerts(
     organization_slug: str,
     project_slug: str,
 ):
-    return get_project_alert_queryset(
-        request.auth.user_id, organization_slug, project_slug
-    )
+    return get_project_alert_queryset(scoped_org_id(request), project_slug)
 
 
 @router.post(
@@ -72,15 +69,20 @@ async def create_project_alert(
     payload: ProjectAlertIn,
 ):
     user_id = request.auth.user_id
+    # Org ADMIN or a member of one of the project's teams. That is a stricter
+    # rule than the project:write scope this route requires, so it stays -- but
+    # the two membership conditions now sit on one join (previously they could
+    # be satisfied by two different members), and the organization comes from
+    # the decorator rather than the slug.
     project = await aget_object_or_404(
         Project.objects.filter(
             Q(
-                organization__users=user_id,
+                organization__organization_users__user_id=user_id,
                 organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
             )
             | Q(teams__members__user=user_id)
         ).distinct(),
-        organization__slug=organization_slug,
+        organization_id=scoped_org_id(request),
         slug=project_slug,
     )
     data = payload.dict(exclude_unset=True)
@@ -92,9 +94,9 @@ async def create_project_alert(
             for recipient in recipients
         ]
     )
-    return await get_project_alert_queryset(
-        user_id, organization_slug, project_slug
-    ).aget(id=project_alert.id)
+    return await get_project_alert_queryset(scoped_org_id(request), project_slug).aget(
+        id=project_alert.id
+    )
 
 
 @router.put(
@@ -110,9 +112,8 @@ async def update_project_alert(
     alert_id: int,
     payload: ProjectAlertIn,
 ):
-    user_id = request.auth.user_id
     alert = await aget_object_or_404(
-        get_project_alert_queryset(user_id, organization_slug, project_slug),
+        get_project_alert_queryset(scoped_org_id(request), project_slug),
         id=alert_id,
     )
 
@@ -141,9 +142,9 @@ async def update_project_alert(
     if delete_recipient_ids:
         await alert.alertrecipient_set.filter(pk__in=delete_recipient_ids).adelete()
 
-    return await get_project_alert_queryset(
-        user_id, organization_slug, project_slug
-    ).aget(id=alert.id)
+    return await get_project_alert_queryset(scoped_org_id(request), project_slug).aget(
+        id=alert.id
+    )
 
 
 @router.delete(
@@ -156,10 +157,12 @@ async def delete_project_alert(
 ):
     user_id = request.auth.user_id
     result, _ = (
-        await get_project_alert_queryset(user_id, organization_slug, project_slug)
+        await get_project_alert_queryset(scoped_org_id(request), project_slug)
         .filter(id=alert_id)
+        # The ADMIN floor is stricter than the project:admin scope this route
+        # requires, so it stays -- but on one join, so it is this user's role.
         .filter(
-            project__organization__users=user_id,
+            project__organization__organization_users__user_id=user_id,
             project__organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
         )
         .adelete()
@@ -183,9 +186,9 @@ async def test_project_alert(
     recipient_id: int | None = None,
 ):
     alert = await aget_object_or_404(
-        get_project_alert_queryset(
-            request.auth.user_id, organization_slug, project_slug
-        ).select_related("project__organization"),
+        get_project_alert_queryset(scoped_org_id(request), project_slug).select_related(
+            "project__organization"
+        ),
         id=alert_id,
     )
     recipients = alert.alertrecipient_set.all()

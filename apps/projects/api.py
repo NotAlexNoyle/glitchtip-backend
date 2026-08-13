@@ -73,11 +73,10 @@ def get_user_projects_queryset(user_id: int):
 
 
 def get_project_keys_queryset(
-    user_id: int, organization_slug: str, project_slug: str, key_id: UUID | None = None
+    org_id: int, project_slug: str, key_id: UUID | None = None
 ):
     qs = ProjectKey.objects.filter(
-        project__organization__users=user_id,
-        project__organization__slug=organization_slug,
+        project__organization_id=org_id,
         project__slug=project_slug,
     )
     if key_id:
@@ -189,11 +188,14 @@ async def create_project(
 ):
     """Create a new project given a team and organization"""
     user_id = request.auth.user_id
+    # The ADMIN floor is stricter than the project:write scope this route
+    # requires, so it stays -- but both conditions now sit on one join, and
+    # the organization comes from the decorator rather than the slug.
     team = await aget_object_or_404(
         Team,
         slug=team_slug,
-        organization__slug=organization_slug,
-        organization__users=user_id,
+        organization_id=scoped_org_id(request),
+        organization__organization_users__user_id=user_id,
         organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
     )
     project = await Project.objects.acreate(
@@ -258,9 +260,7 @@ async def list_project_keys(
     status: str | None = None,
 ):
     """List all DSN keys for a given project"""
-    return get_project_keys_queryset(
-        request.auth.user_id, organization_slug, project_slug
-    )
+    return get_project_keys_queryset(scoped_org_id(request), project_slug)
 
 
 @router.get(
@@ -276,9 +276,7 @@ async def get_project_key(
     key_id: UUID,
 ):
     return await aget_object_or_404(
-        get_project_keys_queryset(
-            request.auth.user_id, organization_slug, project_slug, key_id=key_id
-        )
+        get_project_keys_queryset(scoped_org_id(request), project_slug, key_id=key_id)
     )
 
 
@@ -296,9 +294,7 @@ async def update_project_key(
     payload: ProjectKeyIn,
 ):
     return await aget_object_or_404(
-        get_project_keys_queryset(
-            request.auth.user_id, organization_slug, project_slug, key_id=key_id
-        )
+        get_project_keys_queryset(scoped_org_id(request), project_slug, key_id=key_id)
     )
 
 
@@ -340,7 +336,7 @@ async def delete_project_key(
 ):
     result, _ = (
         await get_project_keys_queryset(
-            request.auth.user_id, organization_slug, project_slug, key_id=key_id
+            scoped_org_id(request), project_slug, key_id=key_id
         )
         .filter(
             project__organization__organization_users__user_id=request.auth.user_id,

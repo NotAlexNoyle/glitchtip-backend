@@ -66,6 +66,7 @@ class StatusPagePagination(AsyncLinkHeaderPagination):
 
 def get_monitor_queryset(user_id: int, organization_slug: str):
     """Get monitors with annotations but WITHOUT checks prefetch."""
+    # No scope guard on these routes: this filter is the authorization.
     return (
         Monitor.objects.with_check_annotations()
         .filter(organization__users=user_id, organization__slug=organization_slug)

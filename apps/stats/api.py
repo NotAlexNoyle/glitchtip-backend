@@ -7,7 +7,7 @@ from ninja import Query, Router
 
 from apps.projects.models import Project
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .schema import StatsV2Schema
 
@@ -72,7 +72,7 @@ async def stats_v2(
     # Intentionally separate SQL call to simplify raw SQL
     projects = Project.objects.filter(
         organization__slug=organization_slug,
-        organization__users=request.auth.user_id,
+        organization_id=scoped_org_id(request),
     )
     if filters.project:
         projects = projects.filter(pk__in=filters.project)

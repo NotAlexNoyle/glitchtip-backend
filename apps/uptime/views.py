@@ -15,6 +15,7 @@ async def status_page_detail(request, organization, slug):
     )
     user = await request.auser()
     if user.is_authenticated:
+        # Plain Django view, no decorator: this filter is the authorization.
         qs = qs.filter(Q(is_public=True) | Q(organization__users=user))
     else:
         qs = qs.filter(is_public=True)

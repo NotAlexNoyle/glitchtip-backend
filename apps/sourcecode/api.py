@@ -16,11 +16,8 @@ from .schema import ArtifactBundleAssembleIn, RepositoryIn, RepositorySchema
 router = Router()
 
 
-def get_repositories_queryset(organization_slug: str, user_id: int):
-    return Repository.objects.filter(
-        organization__slug=organization_slug,
-        organization__users=user_id,
-    ).order_by("-created")
+def get_repositories_queryset(org_id: int):
+    return Repository.objects.filter(organization_id=org_id).order_by("-created")
 
 
 @router.get(
@@ -33,7 +30,7 @@ def get_repositories_queryset(organization_slug: str, user_id: int):
 async def list_repositories(
     request: AuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
-    return get_repositories_queryset(organization_slug, request.auth.user_id)
+    return get_repositories_queryset(scoped_org_id(request))
 
 
 @router.post(

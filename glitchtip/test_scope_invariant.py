@@ -228,7 +228,25 @@ class ScopedQueryCountTestCase(GlitchTestCase):
         "list_teams": (3, 1, 2),
         "list_organization_members": (3, 1, 1),
         "get_project": (2, 1, 1),
-        "list_project_keys": (2, 1, 1),
+        "list_project_keys": (2, 1, 0),
+        # Measured before the port, same classifier, for comparison:
+        #   get_organization_issue         3 queries (2 auth lookups), 1 join
+        #   list_organization_issue_event  3 queries (2 auth lookups), 0 joins
+        #   list_project_issues            3 queries (2 auth lookups), 1 join
+        #   list_organization_user_reports 2 queries (1 auth lookup),  1 join
+        #   list_project_keys              2 queries (1 auth lookup),  1 join
+        #   get_team                       3 queries (1 auth lookup),  2 joins
+        #   get_organization_member        4 queries (1 auth lookup),  1 join
+        # The first three each dropped a whole round trip; the next two dropped
+        # a membership join. get_team and get_organization_member are unchanged
+        # on purpose -- their joins are the team member list and the member rows
+        # themselves, which are the response body.
+        "get_organization_issue": (2, 1, 1),
+        "list_organization_issue_event": (2, 1, 0),
+        "list_project_issues": (2, 1, 1),
+        "list_organization_user_reports": (2, 1, 0),
+        "get_team": (3, 1, 2),
+        "get_organization_member": (4, 1, 1),
     }
 
     @classmethod
@@ -274,6 +292,29 @@ class ScopedQueryCountTestCase(GlitchTestCase):
             "list_project_keys": reverse(
                 "api:list_project_keys",
                 args=[self.organization.slug, self.project.slug],
+            ),
+            "get_organization_issue": reverse(
+                "api:get_organization_issue",
+                args=[self.organization.slug, self.issue.id],
+            ),
+            "list_organization_issue_event": reverse(
+                "api:list_organization_issue_event",
+                args=[self.organization.slug, self.issue.id],
+            ),
+            "list_project_issues": reverse(
+                "api:list_project_issues",
+                args=[self.organization.slug, self.project.slug],
+            ),
+            "list_organization_user_reports": reverse(
+                "api:list_organization_user_reports",
+                args=[self.organization.slug, self.issue.id],
+            ),
+            "get_team": reverse(
+                "api:get_team", args=[self.organization.slug, self.team.slug]
+            ),
+            "get_organization_member": reverse(
+                "api:get_organization_member",
+                args=[self.organization.slug, self.org_user.pk],
             ),
         }
         for label, url in urls.items():

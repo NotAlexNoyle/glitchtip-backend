@@ -302,8 +302,8 @@ async def add_team_to_project(
     project = await aget_object_or_404(
         Project,
         slug=project_slug,
-        organization__slug=organization_slug,
-        organization__users=user_id,
+        organization_id=scoped_org_id(request),
+        organization__organization_users__user_id=user_id,
         organization__organization_users__role__gte=OrganizationUserRole.MANAGER,
     )
     team = await aget_object_or_404(
@@ -337,8 +337,8 @@ async def delete_team_from_project(
     project = await aget_object_or_404(
         Project,
         slug=project_slug,
-        organization__slug=organization_slug,
-        organization__users=user_id,
+        organization_id=scoped_org_id(request),
+        organization__organization_users__user_id=user_id,
         organization__organization_users__role__gte=OrganizationUserRole.MANAGER,
     )
     await project.teams.aremove(team)

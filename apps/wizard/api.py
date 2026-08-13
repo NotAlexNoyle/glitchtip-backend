@@ -95,6 +95,7 @@ async def setup_wizard_set_token(request: AuthHttpRequest, payload: SetupWizardS
         raise HttpError(400, "Token not found")
 
     user_id = request.auth.user_id
+    # No organization in the path: this filter is the authorization.
     projects = [
         project
         async for project in Project.annotate_is_member(

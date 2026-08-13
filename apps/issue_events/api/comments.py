@@ -17,23 +17,17 @@ from ..schema import CommentSchema
 from . import router
 
 
-def get_queryset(
-    request: AuthHttpRequest, issue_id: int, organization_slug: str | None = None
-):
-    user_id = request.auth.user_id
+def get_queryset(request: AuthHttpRequest, issue_id: int):
     org_id = scoped_org_id(request)
-    if org_id is not None:
-        # Membership already verified by the permission decorator.
-        return Comment.objects.select_related("user").filter(
-            issue__project__organization_id=org_id, issue__id=issue_id
-        )
-    qs = Comment.objects.select_related("user").filter(
-        issue__project__organization__users=user_id,
-        issue__id=issue_id,
+    if org_id is None:
+        # Both decorators refuse a caller who is not a member of the issue's
+        # organization, so the only way through with no resolved org is that
+        # the issue does not exist. Nothing to return, and the caller gets the
+        # 404 they would have got from a membership-filtered queryset.
+        return Comment.objects.none()
+    return Comment.objects.select_related("user").filter(
+        issue__project__organization_id=org_id, issue__id=issue_id
     )
-    if organization_slug:
-        qs = qs.filter(issue__project__organization__slug=organization_slug)
-    return qs
 
 
 class PostCommentSchema(Schema):
@@ -68,7 +62,7 @@ async def list_organization_comments(
     issue_id: int,
     organization_slug: str,
 ):
-    return get_queryset(request, issue_id, organization_slug)
+    return get_queryset(request, issue_id)
 
 
 @router.post(
@@ -84,8 +78,7 @@ async def add_comment(
 ):
     try:
         issue = await Issue.objects.aget(
-            id=issue_id,
-            project__organization__users=request.auth.user_id,
+            id=issue_id, project__organization_id=scoped_org_id(request)
         )
     except Issue.DoesNotExist:
         raise HttpError(400, "Issue does not exist")
@@ -114,9 +107,7 @@ async def add_organization_comment(
 ):
     try:
         issue = await Issue.objects.aget(
-            id=issue_id,
-            project__organization__slug=organization_slug,
-            project__organization__users=request.auth.user_id,
+            id=issue_id, project__organization_id=scoped_org_id(request)
         )
     except Issue.DoesNotExist:
         raise Http404()
@@ -168,9 +159,7 @@ async def update_organization_comment(
     payload: PostCommentSchema,
 ):
     try:
-        comment = await get_queryset(request, issue_id, organization_slug).aget(
-            id=comment_id
-        )
+        comment = await get_queryset(request, issue_id).aget(id=comment_id)
     except Comment.DoesNotExist:
         raise Http404()
 
@@ -200,7 +189,6 @@ async def delete_comment(
     return Status(204, None)
 
 
-
 @router.delete(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/{int:comment_id}/",
     response={204: None},
@@ -214,9 +202,7 @@ async def delete_organization_comment(
     comment_id: int,
 ):
     try:
-        comment = await get_queryset(request, issue_id, organization_slug).aget(
-            id=comment_id
-        )
+        comment = await get_queryset(request, issue_id).aget(id=comment_id)
     except Comment.DoesNotExist:
         raise Http404()
     await comment.adelete()

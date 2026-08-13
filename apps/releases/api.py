@@ -55,15 +55,12 @@ DELETE /projects/{organization_slug}/{project_slug}/releases/{version}/files/{fi
 
 
 def get_releases_queryset(
-    organization_slug: str,
-    user_id: int,
+    org_id: int,
     id: int | None = None,
     version: str | None = None,
     project_slug: str | None = None,
 ):
-    qs = Release.objects.filter(
-        organization__slug=organization_slug, organization__users=user_id
-    )
+    qs = Release.objects.filter(organization_id=org_id)
     if id:
         qs = qs.filter(id=id)
     if version:
@@ -74,16 +71,12 @@ def get_releases_queryset(
 
 
 def get_release_files_queryset(
-    organization_slug: str,
-    user_id: int,
+    org_id: int,
     version: str | None = None,
     project_slug: str | None = None,
     id: int | None = None,
 ):
-    qs = DebugSymbolBundle.objects.filter(
-        release__organization__slug=organization_slug,
-        release__organization__users=user_id,
-    )
+    qs = DebugSymbolBundle.objects.filter(release__organization_id=org_id)
     if id:
         qs = qs.filter(id=id)
     if version:
@@ -102,7 +95,6 @@ def get_release_files_queryset(
 async def create_release(
     request: AuthHttpRequest, organization_slug: str, payload: ReleaseIn
 ):
-    user_id = request.auth.user_id
     organization_id = scoped_org_id(request)
     data = payload.dict()
     project_slugs = data.pop("projects")
@@ -119,7 +111,7 @@ async def create_release(
         organization_id=organization_id, version=version, defaults=data
     )
     await release.projects.aadd(*projects)
-    return await get_releases_queryset(organization_slug, user_id, id=release.id).aget()
+    return await get_releases_queryset(scoped_org_id(request), id=release.id).aget()
 
 
 @router.post(
@@ -131,12 +123,10 @@ async def create_release(
 async def create_project_release(
     request: AuthHttpRequest, organization_slug: str, project_slug, payload: ReleaseBase
 ):
-    user_id = request.auth.user_id
     project = await aget_object_or_404(
         Project.objects.select_related("organization"),
         slug=project_slug,
-        organization__slug=organization_slug,
-        organization__users=user_id,
+        organization_id=scoped_org_id(request),
     )
     data = payload.dict()
     version = data.pop("version")
@@ -144,7 +134,7 @@ async def create_project_release(
         organization=project.organization, version=version, defaults=data
     )
     await release.projects.aadd(project)
-    return await get_releases_queryset(organization_slug, user_id, id=release.id).aget()
+    return await get_releases_queryset(scoped_org_id(request), id=release.id).aget()
 
 
 @router.get(
@@ -157,7 +147,7 @@ async def create_project_release(
 async def list_releases(
     request: AuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
-    return get_releases_queryset(organization_slug, request.auth.user_id)
+    return get_releases_queryset(scoped_org_id(request))
 
 
 @router.get(
@@ -168,7 +158,7 @@ async def list_releases(
 @has_permission(["project:releases"])
 async def get_release(request: AuthHttpRequest, organization_slug: str, version: str):
     return await aget_object_or_404(
-        get_releases_queryset(organization_slug, request.auth.user_id, version=version)
+        get_releases_queryset(scoped_org_id(request), version=version)
     )
 
 
@@ -184,14 +174,13 @@ async def update_release(
     version: str,
     payload: ReleaseUpdate,
 ):
-    user_id = request.auth.user_id
     release = await aget_object_or_404(
-        get_releases_queryset(organization_slug, user_id, version=version)
+        get_releases_queryset(scoped_org_id(request), version=version)
     )
     for attr, value in payload.dict().items():
         setattr(release, attr, value)
     await release.asave()
-    return await get_releases_queryset(organization_slug, user_id, id=release.id).aget()
+    return await get_releases_queryset(scoped_org_id(request), id=release.id).aget()
 
 
 @router.delete(
@@ -203,7 +192,7 @@ async def delete_organization_release(
     request: AuthHttpRequest, organization_slug: str, version: str
 ):
     result, _ = await get_releases_queryset(
-        organization_slug, request.auth.user_id, version=version
+        scoped_org_id(request), version=version
     ).adelete()
     if not result:
         raise Http404
@@ -224,8 +213,7 @@ async def list_release_files(
     version: str,
 ):
     return get_release_files_queryset(
-        organization_slug,
-        request.auth.user_id,
+        scoped_org_id(request),
         version=version,
     )
 
@@ -245,8 +233,7 @@ async def get_organization_release_file(
 ):
     return await aget_object_or_404(
         get_release_files_queryset(
-            organization_slug,
-            request.auth.user_id,
+            scoped_org_id(request),
             project_slug=project_slug,
             version=version,
             id=file_id,
@@ -263,7 +250,7 @@ async def delete_organization_release_file(
     request: AuthHttpRequest, organization_slug: str, version: str, file_id: int
 ):
     result, _ = await get_release_files_queryset(
-        organization_slug, request.auth.user_id, version=version, id=file_id
+        scoped_org_id(request), version=version, id=file_id
     ).adelete()
     if not result:
         raise Http404
@@ -283,9 +270,7 @@ async def list_project_releases(
     organization_slug: str,
     project_slug: str,
 ):
-    return get_releases_queryset(
-        organization_slug, request.auth.user_id, project_slug=project_slug
-    )
+    return get_releases_queryset(scoped_org_id(request), project_slug=project_slug)
 
 
 @router.get(
@@ -299,8 +284,7 @@ async def get_project_release(
 ):
     return await aget_object_or_404(
         get_releases_queryset(
-            organization_slug,
-            request.auth.user_id,
+            scoped_org_id(request),
             project_slug=project_slug,
             version=version,
         )
@@ -320,17 +304,16 @@ async def update_project_release(
     version: str,
     payload: ReleaseUpdate,
 ):
-    user_id = request.auth.user_id
     release = await aget_object_or_404(
         get_releases_queryset(
-            organization_slug, user_id, version=version, project_slug=project_slug
+            scoped_org_id(request), version=version, project_slug=project_slug
         )
     )
     for attr, value in payload.dict().items():
         setattr(release, attr, value)
     await release.asave()
     return await get_releases_queryset(
-        organization_slug, user_id, id=release.id, project_slug=project_slug
+        scoped_org_id(request), id=release.id, project_slug=project_slug
     ).aget()
 
 
@@ -343,8 +326,7 @@ async def delete_project_release(
     request: AuthHttpRequest, organization_slug: str, project_slug: str, version: str
 ):
     result, _ = await get_releases_queryset(
-        organization_slug,
-        request.auth.user_id,
+        scoped_org_id(request),
         version=version,
         project_slug=project_slug,
     ).adelete()
@@ -368,8 +350,7 @@ async def list_project_release_files(
     version: str,
 ):
     return get_release_files_queryset(
-        organization_slug,
-        request.auth.user_id,
+        scoped_org_id(request),
         project_slug=project_slug,
         version=version,
     )
@@ -388,8 +369,7 @@ async def delete_project_release_file(
     file_id: int,
 ):
     result, _ = await get_release_files_queryset(
-        organization_slug,
-        request.auth.user_id,
+        scoped_org_id(request),
         version=version,
         id=file_id,
         project_slug=project_slug,
@@ -414,8 +394,7 @@ async def get_project_release_file(
 ):
     return await aget_object_or_404(
         get_release_files_queryset(
-            organization_slug,
-            request.auth.user_id,
+            scoped_org_id(request),
             project_slug=project_slug,
             version=version,
             id=file_id,
@@ -437,9 +416,8 @@ async def create_deploy(
     version: str,
     payload: DeployIn,
 ):
-    user_id = request.auth.user_id
     release = await aget_object_or_404(
-        get_releases_queryset(organization_slug, user_id, version=version)
+        get_releases_queryset(scoped_org_id(request), version=version)
     )
     deploy = await Deploy.objects.acreate(
         release=release,
@@ -468,7 +446,7 @@ async def list_deploys(
     version: str,
 ):
     release = await aget_object_or_404(
-        get_releases_queryset(organization_slug, request.auth.user_id, version=version)
+        get_releases_queryset(scoped_org_id(request), version=version)
     )
     return [deploy async for deploy in Deploy.objects.filter(release=release)]
 
@@ -487,15 +465,14 @@ async def create_commits(
     version: str,
     payload: list[CommitIn],
 ):
-    user_id = request.auth.user_id
     release = await aget_object_or_404(
-        get_releases_queryset(organization_slug, user_id, version=version)
+        get_releases_queryset(scoped_org_id(request), version=version)
     )
     commits = [commit.dict(by_alias=True) for commit in payload]
     release.commit_count = len(commits)
     release.data["commits"] = commits[:1000]
     await release.asave(update_fields=["commit_count", "data"])
-    return await get_releases_queryset(organization_slug, user_id, id=release.id).aget()
+    return await get_releases_queryset(scoped_org_id(request), id=release.id).aget()
 
 
 @optional_slash(
@@ -512,7 +489,7 @@ async def list_commits(
     version: str,
 ):
     release = await aget_object_or_404(
-        get_releases_queryset(organization_slug, request.auth.user_id, version=version)
+        get_releases_queryset(scoped_org_id(request), version=version)
     )
     return release.data.get("commits", [])
 

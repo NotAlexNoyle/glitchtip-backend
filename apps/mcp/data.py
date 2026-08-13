@@ -4,7 +4,6 @@ from uuid import UUID
 from asgiref.sync import sync_to_async
 from django.db.models import QuerySet
 
-from apps.alerts.api import get_project_alert_queryset
 from apps.alerts.models import ProjectAlert
 from apps.issue_events.constants import EventStatus
 from apps.issue_events.models import Issue, IssueEvent, IssueIndex
@@ -221,13 +220,14 @@ async def get_alerts(
     organization_slug: str,
     project_slug: str | None = None,
 ) -> list[ProjectAlert]:
+    # No permission decorator runs for MCP, so the membership filter here IS
+    # the authorization. Do not swap this for get_project_alert_queryset.
+    qs = ProjectAlert.objects.filter(
+        project__organization__users=user_id,
+        project__organization__slug=organization_slug,
+    ).prefetch_related("alertrecipient_set")
     if project_slug:
-        qs = get_project_alert_queryset(user_id, organization_slug, project_slug)
-    else:
-        qs = ProjectAlert.objects.filter(
-            project__organization__users=user_id,
-            project__organization__slug=organization_slug,
-        ).prefetch_related("alertrecipient_set")
+        qs = qs.filter(project__slug=project_slug)
     qs = _apply_compliance_filter(qs)
     return [a async for a in qs]
 

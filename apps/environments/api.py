@@ -6,7 +6,7 @@ from ninja import Router
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .models import Environment, EnvironmentProject
 from .schema import EnvironmentProjectIn, EnvironmentProjectSchema, EnvironmentSchema
@@ -36,10 +36,7 @@ async def list_environments(
     organization_slug: str,
     visibility: Visibility = "visible",
 ):
-    qs = Environment.objects.filter(
-        organization__users=request.auth.user_id,
-        organization__slug=organization_slug,
-    )
+    qs = Environment.objects.filter(organization_id=scoped_org_id(request))
     if visibility == "hidden":
         qs = qs.filter(environmentproject__is_hidden=True)
     if visibility == "visible":
@@ -62,8 +59,7 @@ async def list_environment_projects(
     visibility: Visibility = "visible",
 ):
     qs = EnvironmentProject.objects.filter(
-        environment__organization__users=request.auth.user_id,
-        environment__organization__slug=organization_slug,
+        environment__organization_id=scoped_org_id(request),
         project__slug=project_slug,
     )
     if visibility == "hidden":
@@ -88,8 +84,7 @@ async def update_environment_project(
 ):
     environment = await aget_object_or_404(
         EnvironmentProject,
-        environment__organization__users=request.auth.user_id,
-        environment__organization__slug=organization_slug,
+        environment__organization_id=scoped_org_id(request),
         project__slug=project_slug,
         environment__name=name,
     )

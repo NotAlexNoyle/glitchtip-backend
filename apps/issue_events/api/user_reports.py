@@ -2,7 +2,11 @@ from django.http import HttpResponse
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_issue_permission, has_permission
+from glitchtip.api.permissions import (
+    has_issue_permission,
+    has_permission,
+    scoped_org_id,
+)
 
 from ..models import UserReport
 from ..schema import UserReportSchema
@@ -21,9 +25,8 @@ async def list_user_reports(
     response: HttpResponse,
     issue_id: int,
 ):
-    user_id = request.auth.user_id
     return UserReport.objects.filter(
-        project__organization__users=user_id,
+        project__organization_id=scoped_org_id(request),
         issue__id=issue_id,
     )
 
@@ -41,9 +44,7 @@ async def list_organization_user_reports(
     organization_slug: str,
     issue_id: int,
 ):
-    user_id = request.auth.user_id
     return UserReport.objects.filter(
-        project__organization__users=user_id,
-        project__organization__slug=organization_slug,
+        project__organization_id=scoped_org_id(request),
         issue__id=issue_id,
     )

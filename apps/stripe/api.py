@@ -211,6 +211,7 @@ async def list_stripe_products(request: AuthHttpRequest):
     by_alias=True,
 )
 async def get_stripe_subscription(request: AuthHttpRequest, organization_slug: str):
+    # No scope guard on this route: this filter is the authorization.
     return await (
         StripeSubscription.objects.filter(
             organization__users=request.auth.user_id,
