@@ -1443,10 +1443,10 @@ class BareIssueRouteAuthzTestCase(GlitchTestCase):
     - issue does not exist anywhere -> 404 (nothing to authorize against, so
       ``has_issue_permission`` defers to the view rather than leaking a 403)
 
-    A token carries its own scopes independent of any org, so its visibility of
-    a foreign issue stays where it has always been decided -- the view's
-    membership-scoped queryset, which 404s. The scope side of the token path is
-    exercised by ``IssueEventAPIPermissionTestCase`` (issues) and
+    A token is answered the same way: it carries its own scopes, but those are
+    capped by its owner's role in the issue's organization, and a non-member is
+    refused by the decorator rather than by the view. The scope side of the
+    token path is exercised by ``IssueEventAPIPermissionTestCase`` (issues) and
     ``CommentsAPIPermissionTests`` (comments).
     """
 
@@ -1476,9 +1476,14 @@ class BareIssueRouteAuthzTestCase(GlitchTestCase):
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 404)
 
-    async def test_token_on_foreign_issue_is_not_found(self):
-        """A token's foreign-issue visibility is decided by the view, not the
-        decorator, so it 404s where a session user is told 403."""
+    async def test_token_on_foreign_issue_is_forbidden(self):
+        """A token gets the same answer a session user does.
+
+        This used to 404, because the decorator deferred non-member tokens to
+        the view and the view's membership filter decided the outcome. The
+        decorator now refuses them itself, so the two auth types agree and the
+        view's filter is free to be dropped by the scoping port.
+        """
         token = await baker.amake("api_tokens.APIToken", user=self.user)
         await sync_to_async(token.add_permissions)(["event:read"])
         other_issue = await baker.amake("issue_events.Issue")
@@ -1486,7 +1491,7 @@ class BareIssueRouteAuthzTestCase(GlitchTestCase):
         res = await self.async_client.get(
             url, headers={"authorization": f"Bearer {token.token}"}
         )
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 403)
 
 
 class IssueEventAPIPermissionTestCase(APIPermissionTestCase):

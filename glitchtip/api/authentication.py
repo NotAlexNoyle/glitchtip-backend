@@ -95,13 +95,19 @@ class Auth:
             self._org_id, self.actor_role, self.scope = None, None, set()
             return
         self._org_id = row["organization_id"]
+        self.actor_role = row["role"]
+        role_scopes = set(OrganizationUserRole.get_role(row["role"])["scopes"])
         if self.auth_type == "token":
-            # Membership gates *visibility*; the token still supplies scope.
-            self.actor_role = row["role"]
-            self.scope = set(self.data.get_scopes())
+            # A token is self-issued with whatever scopes its owner asks for,
+            # so its scopes alone say nothing about what that user may do here.
+            # Intersecting with the role caps the token at its owner's actual
+            # authority in *this* organization: a member cannot mint an
+            # org:admin token and delete the organization out from under it.
+            # The role is already in hand from the membership row, so this
+            # costs no extra query.
+            self.scope = set(self.data.get_scopes()) & role_scopes
         else:
-            self.actor_role = row["role"]
-            self.scope = set(OrganizationUserRole.get_role(row["role"])["scopes"])
+            self.scope = role_scopes
 
 
 class AuthHttpRequest(HttpRequest):

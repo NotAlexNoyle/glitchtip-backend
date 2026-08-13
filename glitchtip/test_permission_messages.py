@@ -1,10 +1,12 @@
 """The 403 bodies produced by ``has_permission``.
 
-A denial should name the thing the caller actually lacks. There are three
+A denial should name the thing the caller actually lacks. There are four
 distinct reasons a scoped route says no, and each gets its own message:
 
 - no membership in the organization at all (scope never entered into it)
 - a token that is a member but is missing a scope (name the scopes)
+- a token that holds the scope but whose owner's role does not (say so --
+  adding scopes to the token would not help)
 - a session user whose role is too low (name the role they need)
 """
 
@@ -109,6 +111,24 @@ class Permission403MessageTestCase(TestCase):
         res = self.get(url, token)
         self.assertEqual(res.status_code, 403)
         self.assertEqual(self.detail(res), NOT_A_MEMBER)
+        self.assertNotIn("[]", self.detail(res))
+
+    def test_token_capped_by_role_is_told_about_the_role_not_the_scope(self):
+        """The token holds org:admin; its owner is only a MEMBER.
+
+        Listing missing scopes here would name an empty list, and inviting the
+        caller to add scopes would be a dead end -- the cap is the role.
+        """
+        token = self.make_token(["org:admin"])
+        res = self.client.delete(
+            self.delete_url, HTTP_AUTHORIZATION=f"Bearer {token.token}"
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(
+            self.detail(res),
+            "Permission denied. A token cannot exceed your role in the "
+            "organization, and you are a MEMBER",
+        )
         self.assertNotIn("[]", self.detail(res))
 
     def test_a_missing_org_is_indistinguishable_from_one_you_cannot_see(self):

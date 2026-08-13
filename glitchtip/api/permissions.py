@@ -94,8 +94,19 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
     if user_auth.actor_role is None:
         return "Permission denied. You are not a member of this organization"
 
+    actor_role_name = OrganizationUserRole(user_auth.actor_role).label
+
     if user_auth.auth_type == "token":
         missing = set(permissions).difference(set(user_auth.data.get_scopes()))
+        if not missing:
+            # The token was granted a scope the route accepts, but its owner's
+            # role in this organization is not, so the token was capped to the
+            # role. Naming the scopes would be wrong twice over: none are
+            # missing, and adding scopes to the token would not help.
+            return (
+                "Permission denied. A token cannot exceed your role in the "
+                f"organization, and you are a {actor_role_name.upper()}"
+            )
         # Sorted, not just listed: set iteration order for strings shifts with
         # per-process hash randomization, so an unsorted message would vary
         # between servers for the same denial.
@@ -104,7 +115,6 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
             f"{sorted(missing)}"
         )
 
-    actor_role_name = OrganizationUserRole(user_auth.actor_role).label
     # Stepping up through the roles, find the minimum role needed to perform
     # the operation.
     for role in ROLES:
@@ -150,9 +160,9 @@ def has_issue_permission(permissions: list[str]):
     organization that owns the issue being accessed (issue -> project ->
     organization) and scope against that.
 
-    A token carries its own scopes independent of any organization, but the
-    views still need the resolved organization id, so membership is resolved
-    either way.
+    A token is resolved the same way and against the same organization: its
+    scopes are capped by its owner's role there, and a non-member is refused
+    regardless of what the token carries.
     """
 
     def decorator(f):
@@ -180,12 +190,11 @@ def has_issue_permission(permissions: list[str]):
                 return await f(request, *args, **kwargs)
             if auth._org_id is None:
                 # The issue exists but the actor is not a member of its
-                # organization. Tell a session user they are forbidden rather
-                # than pretending the issue is missing; a token's visibility is
-                # still decided by the view's membership-scoped queryset, which
-                # is where it has always been decided.
-                if auth.auth_type == "token":
-                    return await f(request, *args, **kwargs)
+                # organization. Tokens are refused here rather than deferred to
+                # the view: a session user in this position is already told 403,
+                # and routing tokens down a different path made the view's
+                # membership filter -- not the decorator -- the thing deciding
+                # the outcome, which is exactly what the scoping port removes.
                 raise HttpError(403, "Permission denied")
             if not any(s in permissions for s in scopes):
                 raise HttpError(403, "Permission denied")

@@ -1,7 +1,9 @@
+from asgiref.sync import sync_to_async
 from django.test import TestCase
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
+from apps.organizations_ext.scopes import SCOPES
 from glitchtip.api.authentication import Auth, ScopeNotResolved
 
 
@@ -72,3 +74,59 @@ class ResolveScopeTestCase(TestCase):
         """A view that forgot its permission decorator must fail loudly."""
         with self.assertRaises(ScopeNotResolved):
             _ = Auth(self.user.id, "session").org_id
+
+
+class TokenRoleCeilingTestCase(TestCase):
+    """A token may not exceed its owner's role in the organization.
+
+    Tokens are self-issued with arbitrary scopes, so without this a member
+    could mint an org:admin token and act as an owner.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.org = baker.make("organizations_ext.Organization")
+        # The first user added to an organization becomes its owner.
+        cls.org.add_user(baker.make("users.user"), OrganizationUserRole.OWNER)
+        cls.user = baker.make("users.user")
+        cls.org_user = cls.org.add_user(cls.user, OrganizationUserRole.MEMBER)
+
+    async def make_token(self, scopes):
+        token = await baker.amake("api_tokens.APIToken", user=self.user)
+        await sync_to_async(token.add_permissions)(scopes)
+        return token
+
+    async def test_scope_above_role_is_dropped(self):
+        token = await self.make_token(["org:read", "org:admin"])
+        auth = Auth(self.user.id, "token", data=token)
+        scope = await auth.resolve_scope(self.org.slug)
+        self.assertIn("org:read", scope)
+        self.assertNotIn("org:admin", scope, "a MEMBER token kept org:admin")
+
+    async def test_scope_within_role_is_kept(self):
+        token = await self.make_token(["event:write"])
+        auth = Auth(self.user.id, "token", data=token)
+        self.assertEqual(await auth.resolve_scope(self.org.slug), {"event:write"})
+
+    async def test_ceiling_rises_with_the_role(self):
+        """The cap is the role, not a fixed list, so a promotion lifts it."""
+        token = await self.make_token(["org:admin"])
+        self.org_user.role = OrganizationUserRole.OWNER
+        await self.org_user.asave()
+        auth = Auth(self.user.id, "token", data=token)
+        self.assertIn("org:admin", await auth.resolve_scope(self.org.slug))
+
+    async def test_owner_token_loses_nothing(self):
+        """The OWNER role holds every scope, so the intersection is a no-op."""
+        self.org_user.role = OrganizationUserRole.OWNER
+        await self.org_user.asave()
+        token = await self.make_token(list(SCOPES))
+        auth = Auth(self.user.id, "token", data=token)
+        self.assertEqual(await auth.resolve_scope(self.org.slug), set(SCOPES))
+
+    async def test_non_member_token_gets_no_scope(self):
+        stranger = await baker.amake("users.user")
+        token = await baker.amake("api_tokens.APIToken", user=stranger)
+        await sync_to_async(token.add_permissions)(["org:admin"])
+        auth = Auth(stranger.id, "token", data=token)
+        self.assertEqual(await auth.resolve_scope(self.org.slug), set())
