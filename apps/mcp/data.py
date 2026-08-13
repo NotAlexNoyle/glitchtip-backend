@@ -15,10 +15,10 @@ from apps.logs.constants import parse_level_filters
 from apps.organizations_ext.models import Organization
 from apps.organizations_ext.queryset_utils import (
     get_organization_for_user,
-    get_organizations_queryset,
+    get_user_organizations_queryset,
 )
 from apps.performance.models import TransactionGroup
-from apps.projects.api import get_projects_queryset
+from apps.projects.api import get_user_projects_queryset
 from apps.projects.models import Project
 from apps.releases.models import Release
 from apps.uptime.api import get_monitor_queryset
@@ -33,13 +33,15 @@ def _apply_compliance_filter(qs: QuerySet) -> QuerySet:
 
 
 async def get_organizations(user_id: int) -> list[Organization]:
-    qs = get_organizations_queryset(user_id)
+    qs = get_user_organizations_queryset(user_id)
     qs = _apply_compliance_filter(qs)
     return [org async for org in qs]
 
 
 async def get_projects(user_id: int, organization_slug: str) -> list[Project]:
-    qs = get_projects_queryset(user_id, organization_slug=organization_slug)
+    qs = get_user_projects_queryset(user_id).filter(
+        organization__slug=organization_slug
+    )
     qs = qs.select_related("organization")
     qs = _apply_compliance_filter(qs)
     return [p async for p in qs.order_by("name")]

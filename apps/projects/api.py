@@ -41,30 +41,35 @@ GET /api/0/organizations/{organization_slug}/projects/
 """
 
 
-def get_projects_queryset(
-    user_id: int,
-    organization_slug: str | None = None,
-    team_slug: str | None = None,
-    org_id: int | None = None,
-):
-    if org_id is not None:
-        # The permission decorator resolved this org and verified membership,
-        # so the organization join and membership M2M join both go away. The
-        # is_member annotation stays -- it is per-team data, not membership.
-        qs = Project.annotate_is_member(
-            Project.undeleted_objects.filter(organization_id=org_id), user_id
-        )
-        if team_slug:
-            qs = qs.filter(teams__slug=team_slug)
-        return qs
+def get_projects_queryset(org_id: int, user_id: int, team_slug: str | None = None):
+    """Projects in one organization the caller is already known to belong to.
+
+    Callers are behind ``@has_permission``, so ``org_id`` comes from
+    ``scoped_org_id`` and scoping by it is the whole check -- no organization
+    join for the slug, no membership M2M join. The is_member annotation stays:
+    it is per-project payload, not authorization.
+
+    For the org-less ``GET /projects/`` route, see
+    :func:`get_user_projects_queryset`.
+    """
     qs = Project.annotate_is_member(
-        Project.undeleted_objects.filter(organization__users=user_id), user_id
+        Project.undeleted_objects.filter(organization_id=org_id), user_id
     )
-    if organization_slug:
-        qs = qs.filter(organization__slug=organization_slug)
     if team_slug:
         qs = qs.filter(teams__slug=team_slug)
     return qs
+
+
+def get_user_projects_queryset(user_id: int):
+    """Every project the user can see, across all their organizations.
+
+    For routes with no organization in the path, where there is no resolved
+    org to scope by. The membership filter here IS the authorization -- do not
+    "finish the port" by removing it.
+    """
+    return Project.annotate_is_member(
+        Project.undeleted_objects.filter(organization__users=user_id), user_id
+    )
 
 
 def get_project_keys_queryset(
@@ -89,7 +94,7 @@ def get_project_keys_queryset(
 async def list_projects(request: AuthHttpRequest, response: HttpResponse):
     """List all projects that a user has access to"""
     return (
-        get_projects_queryset(request.auth.user_id)
+        get_user_projects_queryset(request.auth.user_id)
         .select_related("organization")
         .order_by("name")
     )
@@ -105,9 +110,9 @@ async def get_project(
     request: AuthHttpRequest, organization_slug: str, project_slug: str
 ):
     return await aget_object_or_404(
-        get_projects_queryset(request.auth.user_id, organization_slug).select_related(
-            "organization"
-        ),
+        get_projects_queryset(
+            scoped_org_id(request), request.auth.user_id
+        ).select_related("organization"),
         slug=project_slug,
     )
 
@@ -125,9 +130,9 @@ async def update_project(
     payload: ProjectIn,
 ):
     project = await aget_object_or_404(
-        get_projects_queryset(request.auth.user_id, organization_slug).select_related(
-            "organization"
-        ),
+        get_projects_queryset(
+            scoped_org_id(request), request.auth.user_id
+        ).select_related("organization"),
         slug=project_slug,
     )
     for attr, value in payload.dict(exclude_unset=True).items():
@@ -145,7 +150,7 @@ async def delete_project(
     request: AuthHttpRequest, organization_slug: str, project_slug: str
 ):
     project = await aget_object_or_404(
-        get_projects_queryset(request.auth.user_id, organization_slug),
+        get_projects_queryset(scoped_org_id(request), request.auth.user_id),
         slug=project_slug,
         organization__organization_users__user_id=request.auth.user_id,
         organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
@@ -169,7 +174,7 @@ async def list_team_projects(
 ):
     """List all projects for a given team"""
     return get_projects_queryset(
-        request.auth.user_id, organization_slug=organization_slug, team_slug=team_slug
+        scoped_org_id(request), request.auth.user_id, team_slug=team_slug
     ).order_by("name")
 
 
@@ -195,7 +200,9 @@ async def create_project(
         organization_id=scoped_org_id(request), **payload.dict(exclude_unset=True)
     )
     await project.teams.aadd(team)
-    project = await get_projects_queryset(user_id).aget(id=project.id)
+    project = await get_projects_queryset(scoped_org_id(request), user_id).aget(
+        id=project.id
+    )
     return Status(201, project)
 
 
@@ -218,11 +225,7 @@ async def list_organization_projects(
     query: Filter on team, ex: ?query=!team:burke-software
     """
     queryset = (
-        get_projects_queryset(
-            request.auth.user_id,
-            organization_slug=organization_slug,
-            org_id=scoped_org_id(request),
-        )
+        get_projects_queryset(scoped_org_id(request), request.auth.user_id)
         .prefetch_related("teams")
         .order_by("name")
     )
@@ -313,7 +316,7 @@ async def create_project_key(
 ):
     """Create new key for project. Rate limiting not implemented."""
     project = await aget_object_or_404(
-        get_projects_queryset(request.auth.user_id, organization_slug),
+        get_projects_queryset(scoped_org_id(request), request.auth.user_id),
         slug=project_slug,
     )
     return Status(

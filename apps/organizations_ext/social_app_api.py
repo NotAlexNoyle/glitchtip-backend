@@ -21,7 +21,7 @@ from ninja import Router, Status
 from ninja.errors import HttpError
 
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .constants import OrganizationUserRole
 from .models import Organization, OrganizationSocialApp
@@ -86,9 +86,10 @@ async def get_organization_for_manager(
 ) -> Organization:
     organization = await aget_object_or_404(
         get_organizations_queryset(
+            scoped_org_id(request),
             request.auth.user_id,
             role_required=True,
-            organization_slug=organization_slug,
+            actor_role=request.auth.actor_role,
         )
     )
     if organization.actor_role < OrganizationUserRole.MANAGER:

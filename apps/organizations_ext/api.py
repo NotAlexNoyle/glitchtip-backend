@@ -20,7 +20,11 @@ from glitchtip.api.permissions import has_permission, scoped_org_id
 from .constants import OrganizationUserRole
 from .invitation_backend import InvitationTokenGenerator
 from .models import Organization, OrganizationOwner, OrganizationUser
-from .queryset_utils import get_organization_users_queryset, get_organizations_queryset
+from .queryset_utils import (
+    get_organization_users_queryset,
+    get_organizations_queryset,
+    get_user_organizations_queryset,
+)
 from .schema import (
     AcceptInviteIn,
     AcceptInviteSchema,
@@ -60,7 +64,7 @@ async def list_organizations(
     sortBy: str | None = None,
 ):
     """Return list of all organizations the user has access to."""
-    return get_organizations_queryset(request.auth.user_id).order_by("name")
+    return get_user_organizations_queryset(request.auth.user_id).order_by("name")
 
 
 @router.get(
@@ -73,10 +77,9 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
     """Return Organization with project and team details."""
     return await aget_object_or_404(
         get_organizations_queryset(
+            scoped_org_id(request),
             request.auth.user_id,
             add_details=True,
-            organization_slug=organization_slug,
-            org_id=scoped_org_id(request),
             actor_role=request.auth.actor_role,
         )
     )
@@ -98,7 +101,7 @@ async def create_organization(request: AuthHttpRequest, payload: OrganizationInS
 
     return Status(
         201,
-        await get_organizations_queryset(user.id, add_details=True).aget(
+        await get_user_organizations_queryset(user.id, add_details=True).aget(
             id=organization.id
         ),
     )
@@ -116,10 +119,11 @@ async def update_organization(
     """Update an organization."""
     organization = await aget_object_or_404(
         get_organizations_queryset(
+            scoped_org_id(request),
             request.auth.user_id,
             role_required=True,
             add_details=True,
-            organization_slug=organization_slug,
+            actor_role=request.auth.actor_role,
         ),
     )
     for attr, value in payload.dict(exclude_unset=True).items():
@@ -136,9 +140,10 @@ async def update_organization(
 async def delete_organization(request: AuthHttpRequest, organization_slug: str):
     organization = await aget_object_or_404(
         get_organizations_queryset(
+            scoped_org_id(request),
             request.auth.user_id,
             role_required=True,
-            organization_slug=organization_slug,
+            actor_role=request.auth.actor_role,
         )
     )
     await organization.adelete()
@@ -155,9 +160,7 @@ async def delete_organization(request: AuthHttpRequest, organization_slug: str):
 async def list_organization_members(
     request: AuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
-    return get_organization_users_queryset(
-        request.auth.user_id, organization_slug, org_id=scoped_org_id(request)
-    )
+    return get_organization_users_queryset(scoped_org_id(request), request.auth.user_id)
 
 
 @router.get(
@@ -174,7 +177,7 @@ async def list_team_organization_members(
     team_slug: str,
 ):
     return get_organization_users_queryset(
-        request.auth.user_id, organization_slug, team_slug=team_slug
+        scoped_org_id(request), request.auth.user_id, team_slug=team_slug
     )
 
 
@@ -189,7 +192,9 @@ async def get_organization_member(
 ):
     user_id = request.auth.user_id
     return await aget_object_or_404(
-        get_organization_users_queryset(user_id, organization_slug, add_details=True),
+        get_organization_users_queryset(
+            scoped_org_id(request), user_id, add_details=True
+        ),
         pk=member_id,
     )
 
@@ -217,7 +222,10 @@ async def create_organization_member(
 
     organization = await aget_object_or_404(
         get_organizations_queryset(
-            user.id, role_required=True, organization_slug=organization_slug
+            scoped_org_id(request),
+            user.id,
+            role_required=True,
+            actor_role=request.auth.actor_role,
         )
         .filter(organization_users__user=user)
         .prefetch_related("organization_users"),
@@ -267,9 +275,9 @@ async def create_organization_member(
         await member.teams.aadd(*teams)
 
     await sync_to_async(invitation_backend().send_invitation)(member)
-    member = await get_organization_users_queryset(user.id, organization_slug).aget(
-        id=member.id
-    )
+    member = await get_organization_users_queryset(
+        scoped_org_id(request), user.id
+    ).aget(id=member.id)
     return Status(201, member)
 
 
@@ -290,7 +298,7 @@ async def delete_organization_member(
     ).aexists():
         raise HttpError(400, "User is organization owner. Transfer ownership first.")
     org_user = await aget_object_or_404(
-        get_organization_users_queryset(user_id, organization_slug),
+        get_organization_users_queryset(scoped_org_id(request), user_id),
         id=member_id,
     )
     # Members may always remove themselves; removing anyone else requires the
@@ -330,10 +338,11 @@ async def update_organization_member(
     """Update member role within organization"""
     member = await aget_object_or_404(
         get_organization_users_queryset(
+            scoped_org_id(request),
             request.auth.user_id,
-            organization_slug,
             role_required=True,
             add_details=True,
+            actor_role=request.auth.actor_role,
         ).select_related("organization"),
         id=member_id,
     )
@@ -369,7 +378,7 @@ async def set_organization_owner(
     user_id = request.auth.user_id
     new_owner = await aget_object_or_404(
         get_organization_users_queryset(
-            user_id, organization_slug, add_details=True
+            scoped_org_id(request), user_id, add_details=True
         ).select_related("organization__owner__organization_user"),
         id=member_id,
     )

@@ -37,21 +37,23 @@ DELETE /api/0/projects/{organization_slug}/{project_slug}/teams/{team_slug}/
 
 
 def get_team_queryset(
-    organization_slug: str,
+    org_id: int,
     team_slug: str | None = None,
     project_slug: str | None = None,
     user_id: int | None = None,
     id: int | None = None,
     add_details=False,
     add_projects=False,
-    org_id: int | None = None,
 ):
-    if org_id is not None:
-        # Decorator-resolved org: drops the organization join for the slug and
-        # the membership M2M join below.
-        qs = Team.objects.filter(organization_id=org_id)
-    else:
-        qs = Team.objects.filter(organization__slug=organization_slug)
+    """Teams in one organization, which the caller is already known to belong to.
+
+    Every caller is behind ``@has_permission``, so ``org_id`` comes from
+    ``scoped_org_id`` and the membership was proved before the view ran. That
+    is why there is no membership filter here: scoping by organization id is
+    the whole check. ``user_id`` is only for the is_member/member_count
+    annotations, which are per-team payload rather than authorization.
+    """
+    qs = Team.objects.filter(organization_id=org_id)
     if team_slug:
         qs = qs.filter(slug=team_slug)
     if project_slug:
@@ -59,8 +61,6 @@ def get_team_queryset(
     if id:
         qs = qs.filter(id=id)
     if user_id:
-        if org_id is None:
-            qs = qs.filter(organization__users=user_id)
         if add_details:
             qs = qs.annotate(
                 is_member=Exists(
@@ -96,7 +96,7 @@ async def get_team(request: AuthHttpRequest, organization_slug: str, team_slug: 
     user_id = request.auth.user_id
     return await aget_object_or_404(
         get_team_queryset(
-            organization_slug,
+            scoped_org_id(request),
             user_id=user_id,
             team_slug=team_slug,
             add_details=True,
@@ -117,7 +117,7 @@ async def update_team(
     user_id = request.auth.user_id
     team = await aget_object_or_404(
         get_team_queryset(
-            organization_slug,
+            scoped_org_id(request),
             user_id=user_id,
             team_slug=team_slug,
             add_details=True,
@@ -132,16 +132,9 @@ async def update_team(
 @router.delete("teams/{slug:organization_slug}/{slug:team_slug}/", response={204: None})
 @has_permission(["team:admin"])
 async def delete_team(request: AuthHttpRequest, organization_slug: str, team_slug: str):
-    result, _ = (
-        await get_team_queryset(
-            organization_slug, team_slug=team_slug, user_id=request.auth.user_id
-        )
-        .filter(
-            organization__organization_users__user_id=request.auth.user_id,
-            organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
-        )
-        .adelete()
-    )
+    result, _ = await get_team_queryset(
+        scoped_org_id(request), team_slug=team_slug
+    ).adelete()
     if not result:
         raise Http404
     return Status(204, None)
@@ -160,11 +153,10 @@ async def list_teams(
     request: AuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     return get_team_queryset(
-        organization_slug,
+        scoped_org_id(request),
         user_id=request.auth.user_id,
         add_details=True,
         add_projects=True,
-        org_id=scoped_org_id(request),
     )
 
 
@@ -187,7 +179,7 @@ async def create_team(
     ).afirst()
     await team.members.aadd(org_user)
     return await get_team_queryset(
-        organization_slug,
+        organization_id,
         user_id=user_id,
         id=team.id,
         add_details=True,
@@ -196,7 +188,7 @@ async def create_team(
 
 
 async def modify_member_for_team(
-    organization_slug: str,
+    org_id: int,
     member_id: MeID,
     team_slug: str,
     user_id: int,
@@ -204,7 +196,7 @@ async def modify_member_for_team(
 ):
     team = await aget_object_or_404(
         get_team_queryset(
-            organization_slug,
+            org_id,
             user_id=user_id,
             team_slug=team_slug,
             add_details=True,
@@ -212,7 +204,7 @@ async def modify_member_for_team(
         )
     )
     org_user_qs = OrganizationUser.objects.filter(
-        organization__slug=organization_slug
+        organization_id=org_id
     ).select_related("organization")
     if member_id == "me":
         org_user = await org_user_qs.aget(user_id=user_id)
@@ -254,7 +246,7 @@ async def add_member_to_team(
     return Status(
         201,
         await modify_member_for_team(
-            organization_slug, member_id, team_slug, request.auth.user_id, True
+            scoped_org_id(request), member_id, team_slug, request.auth.user_id, True
         ),
     )
 
@@ -269,7 +261,7 @@ async def delete_member_from_team(
     request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):
     return await modify_member_for_team(
-        organization_slug, member_id, team_slug, request.auth.user_id, False
+        scoped_org_id(request), member_id, team_slug, request.auth.user_id, False
     )
 
 
@@ -289,7 +281,7 @@ async def list_project_teams(
     project_slug: str,
 ):
     return get_team_queryset(
-        organization_slug,
+        scoped_org_id(request),
         user_id=request.auth.user_id,
         project_slug=project_slug,
         add_details=True,
@@ -315,7 +307,7 @@ async def add_team_to_project(
         organization__organization_users__role__gte=OrganizationUserRole.MANAGER,
     )
     team = await aget_object_or_404(
-        get_team_queryset(organization_slug, team_slug=team_slug)
+        get_team_queryset(scoped_org_id(request), team_slug=team_slug)
     )
     await project.teams.aadd(team)
     project = await (
@@ -339,7 +331,7 @@ async def delete_team_from_project(
     user_id = request.auth.user_id
     team = await aget_object_or_404(
         get_team_queryset(
-            organization_slug, project_slug=project_slug, team_slug=team_slug
+            scoped_org_id(request), project_slug=project_slug, team_slug=team_slug
         )
     )
     project = await aget_object_or_404(
