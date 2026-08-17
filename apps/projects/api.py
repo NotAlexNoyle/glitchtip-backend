@@ -10,7 +10,12 @@ from apps.organizations_ext.constants import OrganizationUserRole
 from apps.shared.types import MeID
 from apps.teams.models import Team
 from apps.teams.schema import ProjectTeamSchema
-from glitchtip.api.permissions import AuthHttpRequest, has_permission, scoped_org_id, public_route
+from glitchtip.api.permissions import (
+    AuthHttpRequest,
+    has_permission,
+    public_route,
+    scoped_org_id,
+)
 
 from .models import Project, ProjectKey, UserProjectAlert
 from .schema import (
