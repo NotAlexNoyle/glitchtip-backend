@@ -70,10 +70,7 @@ async def create_project_alert(
 ):
     user_id = request.auth.user_id
     # Org ADMIN or a member of one of the project's teams. That is a stricter
-    # rule than the project:write scope this route requires, so it stays -- but
-    # the two membership conditions now sit on one join (previously they could
-    # be satisfied by two different members), and the organization comes from
-    # the decorator rather than the slug.
+    # rule than the project:write scope this route requires.
     project = await aget_object_or_404(
         Project.objects.filter(
             Q(

@@ -14,10 +14,16 @@ the boundary itself:
   the actor is a member of it.
 - ``ScopedQueryCountTestCase`` locks in the query counts the port is for, so a
   later change cannot quietly reintroduce a round trip.
+- ``TokenCeilingEndToEndTestCase`` and ``ForeignIssueRefusalTestCase`` are the
+  HTTP-level versions of the two token fixes the port depended on, kept
+  separately from the Auth-level tests in
+  ``apps/organizations_ext/tests/test_scope_resolution.py`` because it is the
+  status code a caller receives that matters here.
 """
 
 import re
 
+from asgiref.sync import sync_to_async
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -53,16 +59,15 @@ def make_org_fixture(role=OrganizationUserRole.ADMIN):
         "environments.EnvironmentProject", environment=environment, project=project
     )
     baker.make("alerts.ProjectAlert", project=project)
-    return dict(
-        org=org,
-        user=user,
-        org_user=org_user,
-        project=project,
-        team=team,
-        issue=issue,
-        release=release,
-        environment=environment,
-    )
+    return {
+        'org': org,
+        'user': user,
+        'org_user': org_user,
+        'project': project,
+        'team': team,
+        'issue': issue,
+        'release': release,
+        'environment': environment }
 
 
 class CrossOrgIsolationTestCase(GlitchTestCase):
@@ -330,3 +335,83 @@ class ScopedQueryCountTestCase(GlitchTestCase):
         url = reverse("api:list_issues", args=[self.organization.slug])
         _, auth_lookups, _ = self.measure(url)
         self.assertEqual(auth_lookups, 1)
+
+
+class TokenCeilingEndToEndTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.org = baker.make("organizations_ext.Organization")
+        cls.owner = baker.make("users.user")
+        cls.org.add_user(cls.owner, OrganizationUserRole.OWNER)
+        cls.member = baker.make("users.user")
+        cls.member_ou = cls.org.add_user(cls.member, OrganizationUserRole.MEMBER)
+
+    def member_token(self, scopes):
+        token = baker.make("api_tokens.APIToken", user=self.member)
+        token.add_permissions(scopes)
+        return token
+
+    def test_member_session_cannot_delete_organization(self):
+        self.client.force_login(self.member)
+        url = reverse("api:delete_organization", args=[self.org.slug])
+        self.assertEqual(self.client.delete(url).status_code, 403)
+
+    def test_member_token_cannot_delete_organization(self):
+        """The regression: this used to return 204."""
+        token = self.member_token(["org:admin", "org:write", "org:read"])
+        url = reverse("api:delete_organization", args=[self.org.slug])
+        res = self.client.delete(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
+        self.assertEqual(res.status_code, 403, "a MEMBER token deleted the org")
+
+    def test_member_token_cannot_remove_the_owner(self):
+        """The other half: used to return 204."""
+        token = self.member_token(["member:admin", "member:write", "member:read"])
+        owner_ou = self.org.organization_users.get(user=self.owner)
+        url = reverse(
+            "api:delete_organization_member", args=[self.org.slug, owner_ou.pk]
+        )
+        res = self.client.delete(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
+        self.assertEqual(res.status_code, 403, "a MEMBER token removed the OWNER")
+
+    def test_owner_token_still_works(self):
+        """The ceiling must not break the legitimate case."""
+        token = baker.make("api_tokens.APIToken", user=self.owner)
+        token.add_permissions(["org:admin", "org:write", "org:read"])
+        url = reverse("api:delete_organization", args=[self.org.slug])
+        res = self.client.delete(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
+        self.assertEqual(res.status_code, 204)
+
+    def test_member_token_keeps_scopes_within_its_role(self):
+        """The ceiling caps, it does not revoke."""
+        token = self.member_token(["event:read", "org:admin"])
+        url = reverse("api:list_issues", args=[self.org.slug])
+        res = self.client.get(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
+        self.assertEqual(res.status_code, 200)
+
+
+class ForeignIssueRefusalTestCase(TestCase):
+    """A non-member token on someone else's issue is refused by the decorator."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.stranger = baker.make("users.user")
+        cls.their_issue = baker.make("issue_events.Issue")
+
+    async def test_non_member_token_is_forbidden_not_notfound(self):
+        token = await baker.amake("api_tokens.APIToken", user=self.stranger)
+        await sync_to_async(token.add_permissions)(["event:read"])
+        url = reverse("api:get_issue", kwargs={"issue_id": self.their_issue.id})
+        res = await self.async_client.get(
+            url, headers={"authorization": f"Bearer {token.token}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_comments_on_a_foreign_issue_are_refused(self):
+        """The route whose queryset filter this port removed."""
+        token = await baker.amake("api_tokens.APIToken", user=self.stranger)
+        await sync_to_async(token.add_permissions)(["event:read", "event:admin"])
+        url = reverse("api:list_comments", kwargs={"issue_id": self.their_issue.id})
+        res = await self.async_client.get(
+            url, headers={"authorization": f"Bearer {token.token}"}
+        )
+        self.assertEqual(res.status_code, 403)

@@ -15,7 +15,7 @@ from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import has_permission, public_route, scoped_org_id
 
 from .constants import OrganizationUserRole
 from .invitation_backend import InvitationTokenGenerator
@@ -56,6 +56,7 @@ GET /api/0/teams/{organization_slug}/{team_slug}/members/ (Not documented in sen
 
 @router.get("organizations/", response=list[OrganizationSchema], by_alias=True)
 @paginate
+@public_route
 async def list_organizations(
     request: AuthHttpRequest,
     response: HttpResponse,
@@ -86,12 +87,14 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
 
 
 @router.post("organizations/", response={201: OrganizationDetailSchema}, by_alias=True)
+@has_permission(["org:write", "org:admin"], session_bypass=True)
 async def create_organization(request: AuthHttpRequest, payload: OrganizationInSchema):
     """
     Create new organization
     The first organization on a server is always allowed to be created.
     Afterwards, ENABLE_OPEN_USER_REGISTRATION is checked.
     Superusers are always allowed to create organizations.
+    Session users are also always allowed to create organizations
     """
     user = await aget_object_or_404(User, id=request.auth.user_id)
     if not await is_organization_creation_open() and not user.is_superuser:

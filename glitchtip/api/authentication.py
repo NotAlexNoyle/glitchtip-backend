@@ -58,11 +58,6 @@ class Auth:
         Pulls the source of permissions - scope - up into its own field in the
         Auth class. Depending on the type of Auth this generates the related
         scope.
-
-        There is no cross-request cache: the membership row is read in the same
-        request that authorizes against it, so there is nothing to invalidate
-        and a role change takes effect on the next request. The memo is
-        per-Auth-instance, and Auth lives exactly one request.
         """
         if self._resolved and self._resolved_for == organization_slug:
             return self.scope
@@ -98,13 +93,9 @@ class Auth:
         self.actor_role = row["role"]
         role_scopes = set(OrganizationUserRole.get_role(row["role"])["scopes"])
         if self.auth_type == "token":
-            # A token is self-issued with whatever scopes its owner asks for,
-            # so its scopes alone say nothing about what that user may do here.
-            # Intersecting with the role caps the token at its owner's actual
-            # authority in *this* organization: a member cannot mint an
-            # org:admin token and delete the organization out from under it.
-            # The role is already in hand from the membership row, so this
-            # costs no extra query.
+            # takes the intersection of user's role's scopes and
+            # selected scopes for the token to prevent priv.
+            # escalation
             self.scope = set(self.data.get_scopes()) & role_scopes
         else:
             self.scope = role_scopes

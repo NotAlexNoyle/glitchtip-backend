@@ -16,17 +16,13 @@ def get_org_slug(kwargs: dict) -> str | None:
 def scoped_org_id(request: AuthHttpRequest) -> int | None:
     """The organization id the permission decorator already resolved.
 
-    Views filter by this instead of re-deriving membership in their own
-    querysets, which drops a membership join (and sometimes a whole organization
-    lookup) per request. Reading it raises ScopeNotResolved if no permission
-    decorator ran, so a route that forgets its decorator fails loudly rather
-    than serving an unfiltered queryset.
+    Views can filter on this instead if re-deriving membership on their own.
+    Raises ScopeNotResolved if no permission decorator ran, should fail loudly.
     """
     if request.auth._resolved and request.auth._org_id is None:
         # The check ran and found no membership. The route deliberately defers
         # to the view so its own membership-scoped queryset raises 404 (rather
-        # than confirming the object exists), so hand back None and let that
-        # queryset do the filtering.
+        # than confirming the object exists).
         return None
     return request.auth.org_id
 
@@ -40,10 +36,7 @@ async def resolve_scope_for_issue(auth: Auth, issue_id: int) -> set:
 
     Membership is annotated rather than filtered on, which keeps "the issue does
     not exist" (no row) distinguishable from "the issue exists but you are not a
-    member" (a row with a null role). Collapsing the two would turn every
-    non-member 403 into a 404 and cost the caller any explanation of why they
-    were denied. ``Auth._org_id`` is still only populated for an actual member,
-    so a non-member can never widen a scope-filtered queryset.
+    member" (a row with a null role).
     """
     if auth._resolved and auth._resolved_for == issue_id:
         return auth.scope
@@ -78,19 +71,16 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
     Provides informative 403 Messages.
 
     When the actor has no membership in the organization at all, say that.
-    Scope never entered into the decision, and naming a scope shortfall would
-    be wrong: a token holding every scope it was asked for still lands here,
-    and would otherwise be told it is missing an empty list of scopes. The
-    same message covers an organization that does not exist, so the two stay
-    indistinguishable.
 
     When a token 403s, tell the user exactly what scope they are lacking
     (example: 'org:write'). When a user in a session 403s, tell the user what
     role they need to perform the action (example: need Admin, but are Member).
-
-    The acting role came back with the scope resolution, so this costs no
-    additional query.
     """
+
+    if user_auth._resolved_for is None and user_auth.auth_type == "token":
+        missing = set(permissions).difference(set(user_auth.data.get_scopes()))
+        return f"Permission denied. Token must have one or more of these scopes: {sorted(missing)}"
+
     if user_auth.actor_role is None:
         return "Permission denied. You are not a member of this organization"
 
@@ -101,15 +91,13 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
         if not missing:
             # The token was granted a scope the route accepts, but its owner's
             # role in this organization is not, so the token was capped to the
-            # role. Naming the scopes would be wrong twice over: none are
-            # missing, and adding scopes to the token would not help.
+            # role.
             return (
                 "Permission denied. A token cannot exceed your role in the "
                 f"organization, and you are a {actor_role_name.upper()}"
             )
         # Sorted, not just listed: set iteration order for strings shifts with
-        # per-process hash randomization, so an unsorted message would vary
-        # between servers for the same denial.
+        # per-process hash randomization.
         return (
             "Permission denied. Token must have one or more of these scopes: "
             f"{sorted(missing)}"
@@ -126,19 +114,30 @@ async def resolve_403_message(user_auth: Auth, permissions: list[str]):
     return "Permission denied"
 
 
-def has_permission(permissions: list[str]):
+def has_permission(permissions: list[str], session_bypass: bool = False):
     """
     Check scoped permissions.
 
     Example: @has_permission(["event:write", "event:admin"])
 
     The decorated function requires at least one of the specified permissions.
+
+    session_bypass: for routes in which sessions can always perform the action
+    (and there is no organization to check for scope against) and tokens should
+    be checked. Currently just create_organization.
     """
 
     def decorator(f):
         @wraps(f)
         async def decorated_function(request: AuthHttpRequest, *args, **kwargs):
-            scopes = await request.auth.resolve_scope(get_org_slug(kwargs))
+            org_slug = get_org_slug(kwargs)
+            scopes = await request.auth.resolve_scope(org_slug)
+            if (
+                session_bypass
+                and org_slug is None
+                and request.auth.auth_type == "session"
+            ):
+                return await f(request, *args, **kwargs)
             if not any(s in permissions for s in scopes):
                 raise HttpError(
                     403, await resolve_403_message(request.auth, permissions)
@@ -191,10 +190,7 @@ def has_issue_permission(permissions: list[str]):
             if auth._org_id is None:
                 # The issue exists but the actor is not a member of its
                 # organization. Tokens are refused here rather than deferred to
-                # the view: a session user in this position is already told 403,
-                # and routing tokens down a different path made the view's
-                # membership filter -- not the decorator -- the thing deciding
-                # the outcome, which is exactly what the scoping port removes.
+                # the view: a session user in this position is already told 403
                 raise HttpError(403, "Permission denied")
             if not any(s in permissions for s in scopes):
                 raise HttpError(403, "Permission denied")
@@ -203,3 +199,20 @@ def has_issue_permission(permissions: list[str]):
         return decorated_function
 
     return decorator
+
+
+def public_route(f):
+    """
+    There are two public actions in GT currently, list_organizations and list_projects
+
+    All tokens and users regardless of scopes granted in these organizations/projects
+    should be able to access these endpoints, because they already check for membership.
+    """
+
+    @wraps(f)
+    async def decorated_function(request: AuthHttpRequest, *args, **kwargs):
+        await request.auth.resolve_scope(None)
+        return await f(request, *args, **kwargs)
+
+    decorated_function._gt_public_route = True
+    return decorated_function
