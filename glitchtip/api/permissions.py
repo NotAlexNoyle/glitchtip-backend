@@ -199,20 +199,3 @@ def has_issue_permission(permissions: list[str]):
         return decorated_function
 
     return decorator
-
-
-def public_route(f):
-    """
-    There are two public actions in GT currently, list_organizations and list_projects
-
-    All tokens and users regardless of scopes granted in these organizations/projects
-    should be able to access these endpoints, because they already check for membership.
-    """
-
-    @wraps(f)
-    async def decorated_function(request: AuthHttpRequest, *args, **kwargs):
-        await request.auth.resolve_scope(None)
-        return await f(request, *args, **kwargs)
-
-    decorated_function._gt_public_route = True
-    return decorated_function

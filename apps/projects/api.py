@@ -13,7 +13,6 @@ from apps.teams.schema import ProjectTeamSchema
 from glitchtip.api.permissions import (
     AuthHttpRequest,
     has_permission,
-    public_route,
     scoped_org_id,
 )
 
@@ -93,9 +92,9 @@ def get_project_keys_queryset(
     "projects/",
     response=list[ProjectOrganizationSchema],
     by_alias=True,
+    auth=None, # public route, defer to route for authorization
 )
 @paginate
-@public_route
 async def list_projects(request: AuthHttpRequest, response: HttpResponse):
     """List all projects that a user has access to"""
     return (

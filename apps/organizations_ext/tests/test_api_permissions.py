@@ -12,13 +12,26 @@ class OrganizationAPIPermissionTests(APIPermissionTestCase):
         self.list_url = reverse("api:list_organizations")
         self.detail_url = reverse("api:get_organization", args=[self.organization.slug])
 
-    # test_list and test_retrieve should always work, no matter the user's scope.
     def test_list(self):
+        # Not scope-gated: returns only the caller's own organizations.
+        self.assertGetReqStatusCode(self.list_url, 200)
+
+        self.auth_token.add_permission("org:read")
         self.assertGetReqStatusCode(self.list_url, 200)
 
     def test_create(self):
+        self.auth_token.add_permission("org:read")
         data = {"name": "new org"}
+        self.assertPostReqStatusCode(self.list_url, data, 403)
+        self.auth_token.add_permission("org:write")
         self.assertPostReqStatusCode(self.list_url, data, 201)
+
+    def test_user_create(self):
+        # No organization exists yet to resolve a role against, so any role may.
+        self.set_client_credentials(None)
+        self.client.force_login(self.user)
+        self.set_user_role(OrganizationUserRole.MEMBER)
+        self.assertPostReqStatusCode(self.list_url, {"name": "session org"}, 201)
 
     def test_retrieve(self):
         self.assertGetReqStatusCode(self.detail_url, 403)

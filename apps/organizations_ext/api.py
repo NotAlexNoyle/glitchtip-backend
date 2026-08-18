@@ -15,7 +15,7 @@ from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, public_route, scoped_org_id
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .constants import OrganizationUserRole
 from .invitation_backend import InvitationTokenGenerator
@@ -54,9 +54,12 @@ GET /api/0/teams/{organization_slug}/{team_slug}/members/ (Not documented in sen
 """
 
 
-@router.get("organizations/", response=list[OrganizationSchema], by_alias=True)
+@router.get("organizations/",
+    response=list[OrganizationSchema], 
+    by_alias=True, 
+    auth=None # public route, defer to route for authorization
+)
 @paginate
-@public_route
 async def list_organizations(
     request: AuthHttpRequest,
     response: HttpResponse,
