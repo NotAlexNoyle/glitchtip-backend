@@ -4,7 +4,7 @@ import os
 from django.conf import settings
 from django.db import models
 
-from apps.organizations_ext.scopes import SCOPES
+from glitchtip.api.scopes import SCOPES
 from bitfield import BitField
 from glitchtip.base_models import CreatedModel
 

@@ -90,7 +90,7 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
 
 
 @router.post("organizations/", response={201: OrganizationDetailSchema}, by_alias=True)
-@has_permission(["org:write", "org:admin"], session_bypass=True)
+@has_permission(["org:write", "org:admin"])
 async def create_organization(request: AuthHttpRequest, payload: OrganizationInSchema):
     """
     Create new organization

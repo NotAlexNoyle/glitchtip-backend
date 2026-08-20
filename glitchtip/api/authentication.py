@@ -12,7 +12,8 @@ from ninja.security import SessionAuth as BaseSessionAuth
 from apps.api_tokens.models import APIToken
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.organizations_ext.models import OrganizationUser
-from apps.organizations_ext.scopes import Scopes
+
+from glitchtip.api.scopes import Scopes
 
 
 class ScopeNotResolved(Exception):
@@ -28,6 +29,9 @@ class ScopeNotResolved(Exception):
 class Auth:
     user_id: int
     auth_type: Literal["session", "token"]
+    token: APIToken | None = None
+
+    # these will be cut.
     data: Any = None
     scope: set[Scopes] = field(default_factory=set)
     # Populated by resolve_scope. actor_role is the OrganizationUserRole int of
@@ -148,4 +152,4 @@ class TokenAuth(HttpBearer):
         except APIToken.DoesNotExist:
             return None
 
-        return Auth(token.user_id, "token", data=token)
+        return Auth(token.user_id, "token", token=token)
