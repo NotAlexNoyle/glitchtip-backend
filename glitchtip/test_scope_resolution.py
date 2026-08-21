@@ -58,15 +58,27 @@ class ResolveOrgAuthTestCase(TestCase):
         result = await resolve_org_auth(self.session_auth(), ORG_READ, self.org.slug)
         self.assertEqual(result.org_id, self.org.id)
 
-    async def test_authorized_result_carries_the_role(self):
+    async def test_authorized_result_carries_the_role_definition(self):
+        """``role_details`` is the ``ROLES`` entry, which is what the scope
+        arithmetic and the 403 messages read."""
         result = await resolve_org_auth(self.session_auth(), ORG_READ, self.org.slug)
-        self.assertEqual(result.role["name"], "Member")
+        self.assertEqual(result.role_details["name"], "Member")
+        self.assertEqual(
+            result.role_details,
+            OrganizationUserRole.get_role(OrganizationUserRole.MEMBER),
+        )
 
     async def test_authorized_result_carries_the_raw_actor_role(self):
-        """Views annotate this onto querysets, so it stays the raw int rather
-        than the role definition."""
+        """``role`` stays the raw int, because views annotate it onto querysets.
+
+        ``get_organizations_queryset`` puts it through
+        ``Value(actor_role, IntegerField())`` and ``resolve_access`` feeds it
+        back to ``get_role``, so handing over the role definition here is not a
+        cosmetic difference -- it fails at SQL compile time.
+        """
         result = await resolve_org_auth(self.session_auth(), ORG_READ, self.org.slug)
-        self.assertEqual(result.role['name'], 'Member')
+        self.assertEqual(result.role, OrganizationUserRole.MEMBER)
+        self.assertNotIsInstance(result.role, dict)
 
     async def test_authorized_result_carries_the_auth_it_resolved_from(self):
         auth = self.session_auth()
@@ -126,7 +138,7 @@ class ResolveOrgAuthTestCase(TestCase):
         result = await resolve_org_auth(self.session_auth(), ORG_ADMIN, self.org.slug)
         self.assertIsInstance(result, OrgAuthError)
         self.assertTrue(result.membership)
-        self.assertEqual(result.user_role['name'], "Member")
+        self.assertEqual(result.role_details["name"], "Member")
         self.assertIn("org:read", result.user_scope)
 
     async def test_no_org_slug_is_refused(self):
@@ -256,7 +268,7 @@ class Resolve403MessageTestCase(TestCase):
         """The token holds org:admin; its owner is only a MEMBER. Inviting the
         caller to add scopes would be a dead end -- the cap is the role."""
         err = OrgAuthError(
-            self.token_auth(["org:admin"]), "some-org", True, set(), "Member"
+            self.token_auth(["org:admin"]), "some-org", True, set(), {"name": "Member"}
         )
         message = resolve_403_message(err, ORG_ADMIN)
         self.assertEqual(
@@ -269,7 +281,11 @@ class Resolve403MessageTestCase(TestCase):
     def test_session_user_is_told_the_role_the_operation_needs(self):
         """Only OWNER holds org:admin, so that is the role to name."""
         err = OrgAuthError(
-            Auth(self.user.id, "session"), "some-org", True, {"org:read"}, "Member"
+            Auth(self.user.id, "session"),
+            "some-org",
+            True,
+            {"org:read"},
+            {"name": "Member"},
         )
         self.assertEqual(
             resolve_403_message(err, ORG_ADMIN),
@@ -281,7 +297,7 @@ class Resolve403MessageTestCase(TestCase):
         """ROLES is walked from least to most privileged, so a member-level
         scope names MEMBER rather than the first role that happens to hold it."""
         err = OrgAuthError(
-            Auth(self.user.id, "session"), "some-org", True, set(), "Member"
+            Auth(self.user.id, "session"), "some-org", True, set(), {"name": "Member"}
         )
         self.assertIn(
             "Operation requires MEMBER",

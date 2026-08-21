@@ -2,8 +2,7 @@ from typing import TypedDict
 
 from django.db import models
 
-from .scopes import Scopes
-
+from glitchtip.api.scopes import Scopes
 
 class Role(TypedDict, total=False):
     id: str

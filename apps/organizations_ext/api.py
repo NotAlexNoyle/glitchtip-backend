@@ -84,7 +84,7 @@ async def get_organization(request: AuthHttpRequest, organization_slug: str):
             scoped_org_id(request),
             request.auth.user_id,
             add_details=True,
-            actor_role=request.auth.actor_role,
+            actor_role=request.org_auth.role,
         )
     )
 
@@ -129,7 +129,7 @@ async def update_organization(
             request.auth.user_id,
             role_required=True,
             add_details=True,
-            actor_role=request.auth.actor_role,
+            actor_role=request.org_auth.role,
         ),
     )
     for attr, value in payload.dict(exclude_unset=True).items():
@@ -149,7 +149,7 @@ async def delete_organization(request: AuthHttpRequest, organization_slug: str):
             scoped_org_id(request),
             request.auth.user_id,
             role_required=True,
-            actor_role=request.auth.actor_role,
+            actor_role=request.org_auth.role,
         )
     )
     await organization.adelete()
@@ -231,7 +231,7 @@ async def create_organization_member(
             scoped_org_id(request),
             user.id,
             role_required=True,
-            actor_role=request.auth.actor_role,
+            actor_role=request.org_auth.role,
         )
         .filter(organization_users__user=user)
         .prefetch_related("organization_users"),
@@ -311,9 +311,7 @@ async def delete_organization_member(
     # member:admin scope. The read-tier decorator above only gates that the
     # caller has *some* member access to the org.
     is_self = bool(org_user.user and org_user.user_id == user_id)
-    if not is_self and "member:admin" not in await request.auth.resolve_scope(
-        organization_slug
-    ):
+    if not is_self and "member:admin" not in request.org_auth.scope:
         raise HttpError(403, "Forbidden")
     try:
         await org_user.adelete()
@@ -348,7 +346,7 @@ async def update_organization_member(
             request.auth.user_id,
             role_required=True,
             add_details=True,
-            actor_role=request.auth.actor_role,
+            actor_role=request.org_auth.role,
         ).select_related("organization"),
         id=member_id,
     )

@@ -89,7 +89,7 @@ async def get_organization_for_manager(
             scoped_org_id(request),
             request.auth.user_id,
             role_required=True,
-            actor_role=request.auth.actor_role,
+            actor_role=request.org_auth.role,
         )
     )
     if organization.actor_role < OrganizationUserRole.MANAGER:

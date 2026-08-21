@@ -30,7 +30,7 @@ class Auth:
     user_id: int
     auth_type: Literal["session", "token"]
     token: APIToken | None = None
-    
+
 
 class AuthHttpRequest(HttpRequest):
     """Django HttpRequest that is known to be authenticated by a user"""
