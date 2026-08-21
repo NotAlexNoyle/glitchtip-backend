@@ -91,7 +91,7 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
         if err.auth.auth_type == 'token': # report scopes missing
             # two cases:
             # the token have the scopes necessary, but the user role doesn't allow it.
-            missing = set(required).difference(set(err.auth.data.get_scopes()))
+            missing = set(required).difference(set(err.auth.token.get_scopes()))
             if not missing:
                 return f"Permission denied. A token cannot exceed your role in the organization, and you are a {err.user_role.upper()}"
 
@@ -100,7 +100,7 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
             return f"Permission denied. Token must have one or more of these scopes: {sorted(missing)}"
         else:
             for role in ROLES:
-                if err.user_scope & role["scopes"]:
+                if required & role["scopes"]: 
                     return (
                         f"Permission denied. Operation requires {role['name'].upper()}, "
                         f"you are a {err.user_role.upper()}"
