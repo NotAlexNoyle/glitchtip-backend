@@ -8,7 +8,6 @@ from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.permissions import (
-    has_issue_permission,
     has_permission,
     scoped_org_id,
 )
@@ -216,22 +215,6 @@ async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uui
     cold_event.user_report = await get_user_report(cold_event.id)
     return cold_event
 
-
-@router.get(
-    "/issues/{int:issue_id}/events/",
-    response=list[IssueEventSchema],
-)
-@paginate
-@has_issue_permission(["event:read", "event:write", "event:admin"])
-async def list_issue_event(
-    request: AuthHttpRequest,
-    response: HttpResponse,
-    issue_id: int,
-):
-    # Order by -id (UUIDv7) for partition pruning; equivalent to -received ordering
-    return get_queryset(request, issue_id=issue_id).order_by("-id")
-
-
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/events/",
     response=list[IssueEventSchema],
@@ -254,19 +237,6 @@ async def list_organization_issue_event(
         .order_by("-id")
     )
 
-
-@router.get(
-    "/issues/{int:issue_id}/events/latest/",
-    response=IssueEventDetailSchema,
-    by_alias=True,
-)
-@has_issue_permission(["event:read", "event:write", "event:admin"])
-async def get_latest_issue_event(request: AuthHttpRequest, issue_id: int):
-    # Resolve issue first to get organization_id for hash partition pruning
-    issue = await _resolve_issue(request, issue_id)
-    return await _get_latest_event_for_issue(request, issue, issue_id)
-
-
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/events/latest/",
     response=IssueEventDetailSchema,
@@ -279,18 +249,6 @@ async def get_organization_latest_issue_event(
     # Resolve issue first to get organization_id for hash partition pruning
     issue = await _resolve_issue(request, issue_id)
     return await _get_latest_event_for_issue(request, issue, issue_id)
-
-
-@router.get(
-    "/issues/{int:issue_id}/events/{event_id}/",
-    response=IssueEventDetailSchema,
-    by_alias=True,
-)
-@has_issue_permission(["event:read", "event:write", "event:admin"])
-async def get_issue_event(request: AuthHttpRequest, issue_id: int, event_id: uuid.UUID):
-    issue = await _resolve_issue(request, issue_id)
-    return await _get_issue_event(request, issue, event_id)
-
 
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/events/{event_id}/",
