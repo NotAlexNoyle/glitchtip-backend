@@ -15,7 +15,7 @@ from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import has_permission, scoped_org_id, scoped_user_role
 
 from .constants import OrganizationUserRole
 from .invitation_backend import InvitationTokenGenerator
@@ -388,9 +388,7 @@ async def set_organization_owner(
     old_owner = organization.owner.organization_user
     if not (
         old_owner.user_id == user_id
-        or await organization.organization_users.filter(
-            user=user_id, role=OrganizationUserRole.OWNER
-        ).aexists()
+        or scoped_user_role == OrganizationUserRole.OWNER
     ):
         raise HttpError(403, "Only owner may set organization owner.")
 

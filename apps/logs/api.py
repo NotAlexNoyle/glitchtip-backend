@@ -13,11 +13,10 @@ from django.http import Http404, HttpResponse
 from django.shortcuts import aget_object_or_404
 from ninja import Query, Router
 
-from apps.organizations_ext.queryset_utils import get_organization_for_user
 from apps.projects.models import LogProjectHourlyStatistic
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.pagination import set_pagination_headers
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 from glitchtip.cold_storage import parse_json_field
 from glitchtip.partition_manager import UUID7Helper
 
@@ -701,9 +700,7 @@ async def list_logs(
     - cursor: Pagination cursor for "load more"
     - limit: Results per page (1-200, default 100)
     """
-    organization = await aget_object_or_404(
-        get_organization_for_user(request.auth.user_id, organization_slug)
-    )
+    organization = scoped_org_id(request)
 
     # Determine time range (default to last 7 days)
     now = datetime.now(UTC)
@@ -775,7 +772,7 @@ async def get_log(
 ):
     """Get a single log event by ID (searches both hot and cold storage)."""
     organization = await aget_object_or_404(
-        get_organization_for_user(request.auth.user_id, organization_slug)
+        scoped_org_id(request)
     )
 
     log_event = await get_log_by_id(organization.id, log_id)
@@ -876,7 +873,7 @@ async def get_log_stats(
     Time range defaults to last 7 days, max 90 days.
     """
     organization = await aget_object_or_404(
-        get_organization_for_user(request.auth.user_id, organization_slug)
+        scoped_org_id(request)
     )
 
     # Determine time range (default to last 7 days, max 90 days)
@@ -933,7 +930,7 @@ async def list_log_resources(
     Used to populate filter dropdowns in the UI.
     """
     organization = await aget_object_or_404(
-        get_organization_for_user(request.auth.user_id, organization_slug)
+        scoped_org_id(request)
     )
 
     qs = LogResource.objects.filter(organization=organization)

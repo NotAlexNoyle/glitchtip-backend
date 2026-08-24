@@ -8,10 +8,9 @@ from django.utils import timezone
 from ninja import Query, Router, Schema
 from ninja.pagination import paginate
 
-from apps.organizations_ext.queryset_utils import get_organization_for_user
 from apps.shared.schema.fields import RelativeDateTime
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import has_permission, scoped_org_id
 
 from .cold_storage import (
     query_n_plus_one_patterns,
@@ -88,9 +87,7 @@ async def list_transaction_groups(
     filters: Query[TransactionGroupFilters],
     organization_slug: str,
 ):
-    organization = await get_organization_for_user(
-        request.auth.user_id, organization_slug
-    ).afirst()
+    organization = scoped_org_id(request)
     if not organization:
         return TransactionGroup.objects.none()
 
@@ -117,9 +114,7 @@ async def list_transaction_groups(
 async def get_transaction_group(
     request: AuthHttpRequest, organization_slug: str, id: int
 ):
-    organization = await get_organization_for_user(
-        request.auth.user_id, organization_slug
-    ).afirst()
+    organization = scoped_org_id(request)
     return await aget_object_or_404(TransactionGroup, id=id, organization=organization)
 
 
@@ -135,9 +130,7 @@ async def list_transaction_spans(
     id: int,
     filters: Query[SpanGroupFilters],
 ):
-    organization = await get_organization_for_user(
-        request.auth.user_id, organization_slug
-    ).afirst()
+    organization = scoped_org_id(request)
     if not organization:
         return []
 
@@ -171,9 +164,7 @@ async def list_span_groups(
     organization_slug: str,
     filters: Query[OrgSpanGroupFilters],
 ):
-    organization = await get_organization_for_user(
-        request.auth.user_id, organization_slug
-    ).afirst()
+    organization = scoped_org_id(request)
     if not organization:
         return []
 
@@ -204,9 +195,7 @@ async def list_n_plus_one_patterns(
     organization_slug: str,
     filters: Query[NPlusOneFilters],
 ):
-    organization = await get_organization_for_user(
-        request.auth.user_id, organization_slug
-    ).afirst()
+    organization = scoped_org_id(request)
     if not organization:
         return []
 
@@ -238,9 +227,7 @@ async def get_transaction_trend(
     id: int,
     filters: Query[SpanGroupFilters],
 ):
-    organization = await get_organization_for_user(
-        request.auth.user_id, organization_slug
-    ).afirst()
+    organization = scoped_org_id(request)
     if not organization:
         return []
 

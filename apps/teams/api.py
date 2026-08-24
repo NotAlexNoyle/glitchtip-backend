@@ -10,7 +10,7 @@ from apps.organizations_ext.models import OrganizationUser
 from apps.projects.models import Project
 from apps.shared.types import MeID
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import has_permission, scoped_org_id, scoped_user_role
 
 from .models import Team
 from .schema import ProjectTeamSchema, TeamIn, TeamProjectSchema, TeamSchema
@@ -189,6 +189,7 @@ async def create_team(
 
 async def modify_member_for_team(
     org_id: int,
+    user_role: int,
     member_id: MeID,
     team_slug: str,
     user_id: int,
@@ -221,9 +222,7 @@ async def modify_member_for_team(
         else:
             required_role = OrganizationUserRole.MANAGER
 
-        if not await OrganizationUser.objects.filter(
-            user_id=user_id, organization=org_user.organization, role__gte=required_role
-        ).aexists():
+        if user_role < required_role:
             raise HttpError(403, "Must be admin to modify teams")
 
     if add_member:
@@ -246,7 +245,7 @@ async def add_member_to_team(
     return Status(
         201,
         await modify_member_for_team(
-            scoped_org_id(request), member_id, team_slug, request.auth.user_id, True
+            scoped_org_id(request), scoped_user_role(request), member_id, team_slug, request.auth.user_id, True
         ),
     )
 
@@ -261,7 +260,7 @@ async def delete_member_from_team(
     request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):
     return await modify_member_for_team(
-        scoped_org_id(request), member_id, team_slug, request.auth.user_id, False
+        scoped_org_id(request), scoped_user_role(request), member_id, team_slug, request.auth.user_id, False
     )
 
 
