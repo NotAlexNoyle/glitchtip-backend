@@ -91,7 +91,7 @@ async def list_transaction_groups(
     if not organization:
         return TransactionGroup.objects.none()
 
-    qs = TransactionGroup.objects.filter(organization=organization)
+    qs = TransactionGroup.objects.filter(organization_id=organization)
 
     if filters.project:
         qs = qs.filter(project_id__in=filters.project)
@@ -115,7 +115,7 @@ async def get_transaction_group(
     request: AuthHttpRequest, organization_slug: str, id: int
 ):
     organization = scoped_org_id(request)
-    return await aget_object_or_404(TransactionGroup, id=id, organization=organization)
+    return await aget_object_or_404(TransactionGroup, id=id, organization_id=organization)
 
 
 @router.get(
@@ -136,7 +136,7 @@ async def list_transaction_spans(
 
     # Verify user has access to this transaction group
     group = await TransactionGroup.objects.filter(
-        id=id, organization=organization
+        id=id, organization_id=organization
     ).afirst()
     if not group:
         return []
@@ -146,7 +146,7 @@ async def list_transaction_spans(
     end_dt = filters.end or now
 
     return await sync_to_async(query_span_groups_for_transaction)(
-        org_id=organization.id,
+        org_id=organization,
         transaction_name=group.transaction,
         start_dt=start_dt,
         end_dt=end_dt,
@@ -174,7 +174,7 @@ async def list_span_groups(
     project_ids = filters.project or None
 
     return await sync_to_async(query_span_groups)(
-        org_id=organization.id,
+        org_id=organization,
         project_ids=project_ids,
         start_dt=start_dt,
         end_dt=end_dt,
@@ -205,7 +205,7 @@ async def list_n_plus_one_patterns(
     project_ids = filters.project or None
 
     return await sync_to_async(query_n_plus_one_patterns)(
-        org_id=organization.id,
+        org_id=organization,
         project_ids=project_ids,
         start_dt=start_dt,
         end_dt=end_dt,
@@ -232,7 +232,7 @@ async def get_transaction_trend(
         return []
 
     group = await TransactionGroup.objects.filter(
-        id=id, organization=organization
+        id=id, organization_id=organization
     ).afirst()
     if not group:
         return []
@@ -242,7 +242,7 @@ async def get_transaction_trend(
     end_dt = filters.end or now
 
     return await sync_to_async(query_transaction_trend)(
-        org_id=organization.id,
+        org_id=organization,
         transaction_name=group.transaction,
         start_dt=start_dt,
         end_dt=end_dt,

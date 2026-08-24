@@ -714,7 +714,7 @@ async def list_logs(
     limit = filters.limit
 
     query_kwargs = {
-        "organization_id": organization.id,
+        "organization_id": organization,
         "start_dt": start_dt,
         "end_dt": end_dt,
         "project_ids": filters.project,
@@ -771,11 +771,9 @@ async def get_log(
     log_id: UUID,
 ):
     """Get a single log event by ID (searches both hot and cold storage)."""
-    organization = await aget_object_or_404(
-        scoped_org_id(request)
-    )
+    organization_id = scoped_org_id(request)
 
-    log_event = await get_log_by_id(organization.id, log_id)
+    log_event = await get_log_by_id(organization_id, log_id)
 
     if not log_event:
         raise Http404("Log event not found")
@@ -872,9 +870,7 @@ async def get_log_stats(
     Supports filtering by project and level.
     Time range defaults to last 7 days, max 90 days.
     """
-    organization = await aget_object_or_404(
-        scoped_org_id(request)
-    )
+    organization_id = scoped_org_id(request)
 
     # Determine time range (default to last 7 days, max 90 days)
     now = datetime.now(UTC)
@@ -900,7 +896,7 @@ async def get_log_stats(
 
     # Query stats
     result = await query_log_stats(
-        organization_id=organization.id,
+        organization_id=organization_id,
         start_dt=start_dt,
         end_dt=end_dt,
         project_ids=filters.project,
@@ -929,11 +925,9 @@ async def list_log_resources(
     Returns resources ordered by last_seen (most recent first).
     Used to populate filter dropdowns in the UI.
     """
-    organization = await aget_object_or_404(
-        scoped_org_id(request)
-    )
+    organization_id = scoped_org_id(request)
 
-    qs = LogResource.objects.filter(organization=organization)
+    qs = LogResource.objects.filter(organization_id=organization_id)
     if resource_type:
         qs = qs.filter(type=resource_type)
 

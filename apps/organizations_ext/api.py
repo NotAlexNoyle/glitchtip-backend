@@ -368,7 +368,7 @@ async def update_organization_member(
     response=OrganizationUserDetailSchema,
     by_alias=True,
 )
-@has_permission(["member:admin"])
+@has_permission(["org:admin"])
 async def set_organization_owner(
     request: AuthHttpRequest, organization_slug: str, member_id: int
 ):
@@ -388,7 +388,7 @@ async def set_organization_owner(
     old_owner = organization.owner.organization_user
     if not (
         old_owner.user_id == user_id
-        or scoped_user_role == OrganizationUserRole.OWNER
+        or scoped_user_role(request) == OrganizationUserRole.OWNER
     ):
         raise HttpError(403, "Only owner may set organization owner.")
 
