@@ -119,19 +119,17 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
 
 
 """ 
-OrgAuth, after it exists, holds information that routes can use.
-These getters will expose this information
+OrgAuth and Auth, after they exist, holds information that routes can use.
+These getters will expose this information to save views from re-deriving
+them.
 """
 
 
 def scoped_org_id(request: AuthHttpRequest) -> int | None:
-    """The organization id the permission decorator already resolved.
-
-    Views can filter on this instead if re-deriving membership on their own.
-    """
-    if not request.org_auth:
-        # The check ran and found no membership. The route deliberately defers
-        # to the view so its own membership-scoped queryset raises 404 (rather
-        # than confirming the object exists).
-        return None
     return request.org_auth.org_id
+
+def scoped_user_id(request: AuthHttpRequest) -> int | None:
+    return request.auth.user_id
+
+def scoped_user_role(request: AuthHttpRequest) -> int | None:
+    return request.org_auth.role
