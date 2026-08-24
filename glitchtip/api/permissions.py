@@ -128,8 +128,10 @@ them.
 def scoped_org_id(request: AuthHttpRequest) -> int | None:
     return request.org_auth.org_id
 
+
 def scoped_user_id(request: AuthHttpRequest) -> int | None:
     return request.auth.user_id
+
 
 def scoped_user_role(request: AuthHttpRequest) -> int | None:
     return request.org_auth.role

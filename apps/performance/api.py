@@ -115,7 +115,9 @@ async def get_transaction_group(
     request: AuthHttpRequest, organization_slug: str, id: int
 ):
     organization = scoped_org_id(request)
-    return await aget_object_or_404(TransactionGroup, id=id, organization_id=organization)
+    return await aget_object_or_404(
+        TransactionGroup, id=id, organization_id=organization
+    )
 
 
 @router.get(

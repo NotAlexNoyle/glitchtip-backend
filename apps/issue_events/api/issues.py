@@ -143,6 +143,7 @@ async def _aggregate_tags(issue: Issue, key: str | None):
         for key in keys
     ]
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",
     response=IssueDetailSchema,
@@ -161,6 +162,7 @@ async def get_organization_issue(
     except Issue.DoesNotExist:
         raise Http404()
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/commits/",
     response=list[CommitSchema],
@@ -178,6 +180,7 @@ async def list_organization_issue_commits(
     if not issue.first_release_id:
         return []
     return issue.first_release.data.get("commits", [])
+
 
 @router.delete(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",

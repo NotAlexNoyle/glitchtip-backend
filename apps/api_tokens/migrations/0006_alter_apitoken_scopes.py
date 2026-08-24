@@ -5,15 +5,35 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('api_tokens', '0001_squashed_0005_alter_apitoken_id'),
+        ("api_tokens", "0001_squashed_0005_alter_apitoken_id"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='apitoken',
-            name='scopes',
-            field=bitfield.models.BitField(('project:read', 'project:write', 'project:admin', 'project:releases', 'team:read', 'team:write', 'team:admin', 'event:read', 'event:write', 'event:admin', 'org:read', 'org:write', 'org:admin', 'member:read', 'member:write', 'member:admin', 'org:integrations'), default=None),
+            model_name="apitoken",
+            name="scopes",
+            field=bitfield.models.BitField(
+                (
+                    "project:read",
+                    "project:write",
+                    "project:admin",
+                    "project:releases",
+                    "team:read",
+                    "team:write",
+                    "team:admin",
+                    "event:read",
+                    "event:write",
+                    "event:admin",
+                    "org:read",
+                    "org:write",
+                    "org:admin",
+                    "member:read",
+                    "member:write",
+                    "member:admin",
+                    "org:integrations",
+                ),
+                default=None,
+            ),
         ),
     ]

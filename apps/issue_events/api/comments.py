@@ -32,6 +32,7 @@ def get_queryset(request: AuthHttpRequest, issue_id: int):
 class PostCommentSchema(Schema):
     data: dict[Literal["text"], str]
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/comments/",
     response=list[CommentSchema],

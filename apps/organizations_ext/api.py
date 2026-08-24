@@ -54,10 +54,7 @@ GET /api/0/teams/{organization_slug}/{team_slug}/members/ (Not documented in sen
 """
 
 
-@router.get("organizations/",
-    response=list[OrganizationSchema], 
-    by_alias=True
-)
+@router.get("organizations/", response=list[OrganizationSchema], by_alias=True)
 @paginate
 async def list_organizations(
     request: AuthHttpRequest,

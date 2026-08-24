@@ -215,6 +215,7 @@ async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uui
     cold_event.user_report = await get_user_report(cold_event.id)
     return cold_event
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/events/",
     response=list[IssueEventSchema],
@@ -237,6 +238,7 @@ async def list_organization_issue_event(
         .order_by("-id")
     )
 
+
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/events/latest/",
     response=IssueEventDetailSchema,
@@ -249,6 +251,7 @@ async def get_organization_latest_issue_event(
     # Resolve issue first to get organization_id for hash partition pruning
     issue = await _resolve_issue(request, issue_id)
     return await _get_latest_event_for_issue(request, issue, issue_id)
+
 
 @router.get(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/events/{event_id}/",

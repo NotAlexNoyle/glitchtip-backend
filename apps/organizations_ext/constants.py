@@ -4,12 +4,13 @@ from django.db import models
 
 from glitchtip.api.scopes import Scopes
 
+
 class Role(TypedDict, total=False):
     id: str
     name: str
     desc: str
     scopes: set[Scopes]
-    is_global: bool 
+    is_global: bool
 
 
 # Defines which scopes belong to which role

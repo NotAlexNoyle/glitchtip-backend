@@ -93,6 +93,7 @@ class ScopeBitStabilityTests(SimpleTestCase):
         """
         self.assertEqual(self.decode(1 << 16), {"org:integrations"})
 
+
 class APITokenTests(TestCase):
     def setUp(self):
         self.user = baker.make("users.user")

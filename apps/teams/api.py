@@ -245,7 +245,12 @@ async def add_member_to_team(
     return Status(
         201,
         await modify_member_for_team(
-            scoped_org_id(request), scoped_user_role(request), member_id, team_slug, request.auth.user_id, True
+            scoped_org_id(request),
+            scoped_user_role(request),
+            member_id,
+            team_slug,
+            request.auth.user_id,
+            True,
         ),
     )
 
@@ -260,7 +265,12 @@ async def delete_member_from_team(
     request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):
     return await modify_member_for_team(
-        scoped_org_id(request), scoped_user_role(request), member_id, team_slug, request.auth.user_id, False
+        scoped_org_id(request),
+        scoped_user_role(request),
+        member_id,
+        team_slug,
+        request.auth.user_id,
+        False,
     )
 
 

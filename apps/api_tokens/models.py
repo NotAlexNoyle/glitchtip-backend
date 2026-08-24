@@ -23,9 +23,7 @@ class APIToken(CreatedModel):
     )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     label = models.CharField(max_length=255, blank=True)
-    scopes = BitField(
-        flags=(SCOPES)
-    )
+    scopes = BitField(flags=(SCOPES))
 
     def __str__(self):
         return self.token
