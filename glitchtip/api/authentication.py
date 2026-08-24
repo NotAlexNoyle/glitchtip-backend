@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from asgiref.sync import sync_to_async
@@ -10,10 +10,6 @@ from ninja.security import HttpBearer
 from ninja.security import SessionAuth as BaseSessionAuth
 
 from apps.api_tokens.models import APIToken
-from apps.organizations_ext.constants import OrganizationUserRole
-from apps.organizations_ext.models import OrganizationUser
-
-from glitchtip.api.scopes import Scopes
 
 
 class ScopeNotResolved(Exception):

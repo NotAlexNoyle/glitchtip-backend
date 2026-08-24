@@ -1,5 +1,5 @@
-from functools import wraps
 from dataclasses import dataclass
+from functools import wraps
 
 from ninja.errors import HttpError
 
@@ -7,7 +7,6 @@ from apps.organizations_ext.constants import ROLES, OrganizationUserRole
 from apps.organizations_ext.models import OrganizationUser
 
 from .authentication import Auth, AuthHttpRequest
-
 from .scopes import Scopes
 
 
@@ -115,7 +114,7 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
                         f"you are a {err.role_details['name'].upper()}"
                     )
     else:
-        return f"Permission denied. You are not a member of this organization"
+        return "Permission denied. You are not a member of this organization"
     return "Permission denied"
 
 
