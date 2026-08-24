@@ -91,8 +91,7 @@ def get_project_keys_queryset(
 @router.get(
     "projects/",
     response=list[ProjectOrganizationSchema],
-    by_alias=True,
-    auth=None, # public route, defer to route for authorization
+    by_alias=True
 )
 @paginate
 async def list_projects(request: AuthHttpRequest, response: HttpResponse):
