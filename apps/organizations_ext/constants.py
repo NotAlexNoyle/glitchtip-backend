@@ -10,7 +10,6 @@ class Role(TypedDict, total=False):
     name: str
     desc: str
     scopes: set[Scopes]
-    is_global: bool
 
 
 # Defines which scopes belong to which role
@@ -55,7 +54,6 @@ ROLES: tuple[Role, ...] = (
         "id": "manager",
         "name": "Manager",
         "desc": "Gains admin access on all teams as well as the ability to add and remove members.",
-        "is_global": True,
         "scopes": {
             "event:read",
             "event:write",
@@ -79,7 +77,6 @@ ROLES: tuple[Role, ...] = (
         "id": "owner",
         "name": "Organization Owner",
         "desc": "Unrestricted access to the organization, its data, and its settings. Can add, modify, and delete projects and members, as well as make billing and plan changes.",
-        "is_global": True,
         "scopes": {
             "org:read",
             "org:write",
