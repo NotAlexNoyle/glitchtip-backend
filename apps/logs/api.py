@@ -10,7 +10,6 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import connections
 from django.http import Http404, HttpResponse
-from django.shortcuts import aget_object_or_404
 from ninja import Query, Router
 
 from apps.projects.models import LogProjectHourlyStatistic

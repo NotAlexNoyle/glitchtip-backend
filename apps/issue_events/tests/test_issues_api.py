@@ -4,7 +4,6 @@ import re
 import uuid
 from timeit import default_timer as timer
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.postgres.search import SearchVector
 from django.db.models import Value

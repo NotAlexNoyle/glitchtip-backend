@@ -2,7 +2,6 @@ from typing import Literal
 
 from django.http import Http404, HttpResponse
 from ninja import Schema, Status
-from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
