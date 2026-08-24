@@ -9,8 +9,12 @@ from apps.organizations_ext.constants import OrganizationUserRole
 from apps.organizations_ext.models import OrganizationUser
 from apps.projects.models import Project
 from apps.shared.types import MeID
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id, scoped_user_role
+from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
+    has_permission,
+    scoped_org_id,
+    scoped_user_role,
+)
 
 from .models import Team
 from .schema import ProjectTeamSchema, TeamIn, TeamProjectSchema, TeamSchema
@@ -92,7 +96,7 @@ def get_team_queryset(
     by_alias=True,
 )
 @has_permission(["team:read", "team:write", "team:admin"])
-async def get_team(request: AuthHttpRequest, organization_slug: str, team_slug: str):
+async def get_team(request: OrgAuthHttpRequest, organization_slug: str, team_slug: str):
     user_id = request.auth.user_id
     return await aget_object_or_404(
         get_team_queryset(
@@ -112,7 +116,7 @@ async def get_team(request: AuthHttpRequest, organization_slug: str, team_slug: 
 )
 @has_permission(["team:write", "team:admin"])
 async def update_team(
-    request: AuthHttpRequest, organization_slug: str, team_slug: str, payload: TeamIn
+    request: OrgAuthHttpRequest, organization_slug: str, team_slug: str, payload: TeamIn
 ):
     user_id = request.auth.user_id
     team = await aget_object_or_404(
@@ -131,7 +135,9 @@ async def update_team(
 
 @router.delete("teams/{slug:organization_slug}/{slug:team_slug}/", response={204: None})
 @has_permission(["team:admin"])
-async def delete_team(request: AuthHttpRequest, organization_slug: str, team_slug: str):
+async def delete_team(
+    request: OrgAuthHttpRequest, organization_slug: str, team_slug: str
+):
     result, _ = await get_team_queryset(
         scoped_org_id(request), team_slug=team_slug
     ).adelete()
@@ -150,7 +156,7 @@ async def delete_team(request: AuthHttpRequest, organization_slug: str, team_slu
     ["team:read", "team:write", "team:admin", "org:read", "org:write", "org:admin"]
 )
 async def list_teams(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str
+    request: OrgAuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     return get_team_queryset(
         scoped_org_id(request),
@@ -167,7 +173,7 @@ async def list_teams(
 )
 @has_permission(["team:write", "team:admin", "org:admin", "org:write"])
 async def create_team(
-    request: AuthHttpRequest, organization_slug: str, payload: TeamIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: TeamIn
 ):
     user_id = request.auth.user_id
     organization_id = scoped_org_id(request)
@@ -240,7 +246,7 @@ async def modify_member_for_team(
 )
 @has_permission(["team:read", "team:write", "team:admin"])
 async def add_member_to_team(
-    request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):
     return Status(
         201,
@@ -262,7 +268,7 @@ async def add_member_to_team(
 )
 @has_permission(["team:read", "team:write", "team:admin"])
 async def delete_member_from_team(
-    request: AuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str, member_id: MeID, team_slug: str
 ):
     return await modify_member_for_team(
         scoped_org_id(request),
@@ -284,7 +290,7 @@ async def delete_member_from_team(
     ["team:read", "team:write", "team:admin", "org:read", "org:write", "org:admin"]
 )
 async def list_project_teams(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -304,7 +310,10 @@ async def list_project_teams(
 )
 @has_permission(["project:write", "project:admin"])
 async def add_team_to_project(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str, team_slug: str
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    project_slug: str,
+    team_slug: str,
 ):
     """Add team to project"""
     user_id = request.auth.user_id
@@ -334,7 +343,10 @@ async def add_team_to_project(
 )
 @has_permission(["project:write", "project:admin"])
 async def delete_team_from_project(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str, team_slug: str
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    project_slug: str,
+    team_slug: str,
 ):
     """Remove team from project"""
     user_id = request.auth.user_id

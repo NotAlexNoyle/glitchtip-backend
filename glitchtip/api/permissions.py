@@ -18,6 +18,12 @@ class OrgAuth:
     role_details: dict
 
 
+class OrgAuthHttpRequest(AuthHttpRequest):
+    """A request that has passed @has_permission, so org_auth is resolved."""
+
+    org_auth: OrgAuth
+
+
 @dataclass
 class OrgAuthError:
     auth: Auth
@@ -125,7 +131,7 @@ them.
 """
 
 
-def scoped_org_id(request: AuthHttpRequest) -> int | None:
+def scoped_org_id(request: OrgAuthHttpRequest) -> int | None:
     return request.org_auth.org_id
 
 
@@ -133,5 +139,5 @@ def scoped_user_id(request: AuthHttpRequest) -> int | None:
     return request.auth.user_id
 
 
-def scoped_user_role(request: AuthHttpRequest) -> int | None:
+def scoped_user_role(request: OrgAuthHttpRequest) -> int | None:
     return request.org_auth.role

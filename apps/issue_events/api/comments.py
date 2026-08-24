@@ -4,8 +4,8 @@ from django.http import Http404, HttpResponse
 from ninja import Schema, Status
 from ninja.pagination import paginate
 
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
 )
@@ -15,7 +15,7 @@ from ..schema import CommentSchema
 from . import router
 
 
-def get_queryset(request: AuthHttpRequest, issue_id: int):
+def get_queryset(request: OrgAuthHttpRequest, issue_id: int):
     org_id = scoped_org_id(request)
     if org_id is None:
         # Both decorators refuse a caller who is not a member of the issue's
@@ -40,7 +40,7 @@ class PostCommentSchema(Schema):
 @has_permission(["event:read", "event:admin"])
 @paginate
 async def list_organization_comments(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     issue_id: int,
     organization_slug: str,
@@ -55,7 +55,7 @@ async def list_organization_comments(
 )
 @has_permission(["event:write", "event:admin"])
 async def add_organization_comment(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     issue_id: int,
     payload: PostCommentSchema,
@@ -84,7 +84,7 @@ async def add_organization_comment(
 )
 @has_permission(["event:write", "event:admin"])
 async def update_organization_comment(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     issue_id: int,
     comment_id: int,
@@ -108,7 +108,7 @@ async def update_organization_comment(
 )
 @has_permission(["event:admin"])
 async def delete_organization_comment(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     issue_id: int,
     comment_id: int,

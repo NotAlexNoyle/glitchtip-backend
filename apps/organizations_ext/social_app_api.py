@@ -20,8 +20,7 @@ from django.shortcuts import aget_object_or_404
 from ninja import Router, Status
 from ninja.errors import HttpError
 
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .constants import OrganizationUserRole
 from .models import Organization, OrganizationSocialApp
@@ -82,7 +81,7 @@ def validate_server_url(url: str) -> str:
 
 
 async def get_organization_for_manager(
-    request: AuthHttpRequest, organization_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str
 ) -> Organization:
     organization = await aget_object_or_404(
         get_organizations_queryset(
@@ -161,7 +160,7 @@ def create_linked_social_app(
 )
 @has_permission(["org:read", "org:write", "org:admin"])
 async def list_organization_social_apps(
-    request: AuthHttpRequest, organization_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str
 ):
     organization = await get_organization_for_manager(request, organization_slug)
     return [app async for app in get_social_apps_queryset(organization)]
@@ -174,7 +173,9 @@ async def list_organization_social_apps(
 )
 @has_permission(["org:write", "org:admin"])
 async def create_organization_social_app(
-    request: AuthHttpRequest, organization_slug: str, payload: OrganizationSocialAppIn
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    payload: OrganizationSocialAppIn,
 ):
     organization = await get_organization_for_manager(request, organization_slug)
     if not await organization_can_customize_sso(organization):
@@ -210,7 +211,7 @@ async def create_organization_social_app(
 )
 @has_permission(["org:write", "org:admin"])
 async def update_organization_social_app(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     social_app_id: int,
     payload: OrganizationSocialAppUpdateIn,
@@ -244,7 +245,7 @@ async def update_organization_social_app(
 )
 @has_permission(["org:write", "org:admin"])
 async def delete_organization_social_app(
-    request: AuthHttpRequest, organization_slug: str, social_app_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, social_app_id: int
 ):
     organization = await get_organization_for_manager(request, organization_slug)
     social_app = await aget_object_or_404(

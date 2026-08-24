@@ -1,8 +1,8 @@
 from django.http import HttpResponse
 from ninja.pagination import paginate
 
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
 )
@@ -20,7 +20,7 @@ from . import router
 @paginate
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_organization_user_reports(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     issue_id: int,

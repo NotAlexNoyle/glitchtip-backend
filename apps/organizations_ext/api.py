@@ -15,7 +15,12 @@ from apps.teams.schema import OrganizationDetailSchema
 from apps.users.models import User
 from apps.users.utils import ais_user_registration_open
 from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id, scoped_user_role
+from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
+    has_permission,
+    scoped_org_id,
+    scoped_user_role,
+)
 
 from .constants import OrganizationUserRole
 from .invitation_backend import InvitationTokenGenerator
@@ -73,7 +78,7 @@ async def list_organizations(
     by_alias=True,
 )
 @has_permission(["org:read", "org:write", "org:admin"])
-async def get_organization(request: AuthHttpRequest, organization_slug: str):
+async def get_organization(request: OrgAuthHttpRequest, organization_slug: str):
     """Return Organization with project and team details."""
     return await aget_object_or_404(
         get_organizations_queryset(
@@ -115,7 +120,7 @@ async def create_organization(request: AuthHttpRequest, payload: OrganizationInS
 )
 @has_permission(["org:write", "org:admin"])
 async def update_organization(
-    request: AuthHttpRequest, organization_slug: str, payload: OrganizationInSchema
+    request: OrgAuthHttpRequest, organization_slug: str, payload: OrganizationInSchema
 ):
     """Update an organization."""
     organization = await aget_object_or_404(
@@ -138,7 +143,7 @@ async def update_organization(
     response={204: None},
 )
 @has_permission(["org:admin"])
-async def delete_organization(request: AuthHttpRequest, organization_slug: str):
+async def delete_organization(request: OrgAuthHttpRequest, organization_slug: str):
     organization = await aget_object_or_404(
         get_organizations_queryset(
             scoped_org_id(request),
@@ -159,7 +164,7 @@ async def delete_organization(request: AuthHttpRequest, organization_slug: str):
 @paginate
 @has_permission(["member:read", "member:write", "member:admin"])
 async def list_organization_members(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str
+    request: OrgAuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     return get_organization_users_queryset(scoped_org_id(request), request.auth.user_id)
 
@@ -172,7 +177,7 @@ async def list_organization_members(
 @paginate
 @has_permission(["member:read", "member:write", "member:admin"])
 async def list_team_organization_members(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     team_slug: str,
@@ -189,7 +194,7 @@ async def list_team_organization_members(
 )
 @has_permission(["member:read", "member:write", "member:admin"])
 async def get_organization_member(
-    request: AuthHttpRequest, organization_slug: str, member_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, member_id: int
 ):
     user_id = request.auth.user_id
     return await aget_object_or_404(
@@ -207,7 +212,7 @@ async def get_organization_member(
 )
 @has_permission(["member:write", "member:admin"])
 async def create_organization_member(
-    request: AuthHttpRequest, organization_slug: str, payload: OrganizationUserIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: OrganizationUserIn
 ):
     user = await User.objects.aget(id=request.auth.user_id)
 
@@ -288,7 +293,7 @@ async def create_organization_member(
 )
 @has_permission(["member:read", "member:write", "member:admin"])
 async def delete_organization_member(
-    request: AuthHttpRequest, organization_slug: str, member_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, member_id: int
 ):
     """Remove member (user) from organization"""
     user_id = request.auth.user_id
@@ -329,7 +334,7 @@ async def delete_organization_member(
 )
 @has_permission(["member:write", "member:admin"])
 async def update_organization_member(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     member_id: int,
     payload: OrganizationUserUpdateSchema,
@@ -367,7 +372,7 @@ async def update_organization_member(
 )
 @has_permission(["org:admin"])
 async def set_organization_owner(
-    request: AuthHttpRequest, organization_slug: str, member_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, member_id: int
 ):
     """
     Set this team member as the one and only one Organization owner

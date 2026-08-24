@@ -6,9 +6,8 @@ from ninja.pagination import paginate
 
 from apps.issue_events.models import IssueEvent, IssueHash
 from apps.issue_events.schema import IssueHashSchema
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.pagination import AsyncLinkHeaderPagination
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from . import router
 
@@ -39,7 +38,7 @@ class IssueHashPagination(AsyncLinkHeaderPagination):
 @has_permission(["event:read"])
 @paginate(IssueHashPagination)
 async def list_issue_hashes(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     issue_id: int,
@@ -59,7 +58,7 @@ class IssueHashQuerySchema(Schema):
 )
 @has_permission(["event:admin"])
 async def delete_hash(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     issue_id: int,
     query: Query[IssueHashQuerySchema],

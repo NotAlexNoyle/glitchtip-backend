@@ -10,9 +10,8 @@ from apps.files.tasks import assemble_artifacts_task
 from apps.projects.models import Project
 from apps.sourcecode.models import DebugSymbolBundle
 from apps.sourcecode.schema import DebugSymbolBundleSchema
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .models import Deploy, Release
 from .schema import (
@@ -93,7 +92,7 @@ def get_release_files_queryset(
 )
 @has_permission(["project:releases"])
 async def create_release(
-    request: AuthHttpRequest, organization_slug: str, payload: ReleaseIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: ReleaseIn
 ):
     organization_id = scoped_org_id(request)
     data = payload.dict()
@@ -121,7 +120,10 @@ async def create_release(
 )
 @has_permission(["project:releases"])
 async def create_project_release(
-    request: AuthHttpRequest, organization_slug: str, project_slug, payload: ReleaseBase
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    project_slug,
+    payload: ReleaseBase,
 ):
     project = await aget_object_or_404(
         Project.objects.select_related("organization"),
@@ -145,7 +147,7 @@ async def create_project_release(
 @paginate
 @has_permission(["project:releases"])
 async def list_releases(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str
+    request: OrgAuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     return get_releases_queryset(scoped_org_id(request))
 
@@ -156,7 +158,9 @@ async def list_releases(
     by_alias=True,
 )
 @has_permission(["project:releases"])
-async def get_release(request: AuthHttpRequest, organization_slug: str, version: str):
+async def get_release(
+    request: OrgAuthHttpRequest, organization_slug: str, version: str
+):
     return await aget_object_or_404(
         get_releases_queryset(scoped_org_id(request), version=version)
     )
@@ -169,7 +173,7 @@ async def get_release(request: AuthHttpRequest, organization_slug: str, version:
 )
 @has_permission(["project:releases"])
 async def update_release(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     version: str,
     payload: ReleaseUpdate,
@@ -189,7 +193,7 @@ async def update_release(
 )
 @has_permission(["project:releases"])
 async def delete_organization_release(
-    request: AuthHttpRequest, organization_slug: str, version: str
+    request: OrgAuthHttpRequest, organization_slug: str, version: str
 ):
     result, _ = await get_releases_queryset(
         scoped_org_id(request), version=version
@@ -207,7 +211,7 @@ async def delete_organization_release(
 @paginate
 @has_permission(["project:releases"])
 async def list_release_files(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     version: str,
@@ -225,7 +229,7 @@ async def list_release_files(
 )
 @has_permission(["project:releases"])
 async def get_organization_release_file(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     version: str,
@@ -247,7 +251,7 @@ async def get_organization_release_file(
 )
 @has_permission(["project:releases"])
 async def delete_organization_release_file(
-    request: AuthHttpRequest, organization_slug: str, version: str, file_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, version: str, file_id: int
 ):
     result, _ = await get_release_files_queryset(
         scoped_org_id(request), version=version, id=file_id
@@ -265,7 +269,7 @@ async def delete_organization_release_file(
 @paginate
 @has_permission(["project:releases"])
 async def list_project_releases(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -280,7 +284,7 @@ async def list_project_releases(
 )
 @has_permission(["project:releases"])
 async def get_project_release(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str, version: str
+    request: OrgAuthHttpRequest, organization_slug: str, project_slug: str, version: str
 ):
     return await aget_object_or_404(
         get_releases_queryset(
@@ -298,7 +302,7 @@ async def get_project_release(
 )
 @has_permission(["project:releases"])
 async def update_project_release(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     version: str,
@@ -323,7 +327,7 @@ async def update_project_release(
 )
 @has_permission(["project:releases"])
 async def delete_project_release(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str, version: str
+    request: OrgAuthHttpRequest, organization_slug: str, project_slug: str, version: str
 ):
     result, _ = await get_releases_queryset(
         scoped_org_id(request),
@@ -343,7 +347,7 @@ async def delete_project_release(
 @paginate
 @has_permission(["project:releases"])
 async def list_project_release_files(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -362,7 +366,7 @@ async def list_project_release_files(
 )
 @has_permission(["project:releases"])
 async def delete_project_release_file(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     version: str,
@@ -386,7 +390,7 @@ async def delete_project_release_file(
 )
 @has_permission(["project:releases"])
 async def get_project_release_file(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     version: str,
@@ -411,7 +415,7 @@ async def get_project_release_file(
 )
 @has_permission(["project:releases", "project:write", "project:admin"])
 async def create_deploy(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     version: str,
     payload: DeployIn,
@@ -441,7 +445,7 @@ async def create_deploy(
 )
 @has_permission(["project:releases", "project:write", "project:admin"])
 async def list_deploys(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     version: str,
 ):
@@ -460,7 +464,7 @@ async def list_deploys(
 )
 @has_permission(["project:releases", "project:write", "project:admin"])
 async def create_commits(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     version: str,
     payload: list[CommitIn],
@@ -484,7 +488,7 @@ async def create_commits(
 )
 @has_permission(["project:releases", "project:write", "project:admin"])
 async def list_commits(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     version: str,
 ):
@@ -501,7 +505,7 @@ async def list_commits(
 )
 @has_permission(["project:releases", "project:write", "project:admin"])
 async def assemble_release(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     version: str,
     payload: AssembleSchema,

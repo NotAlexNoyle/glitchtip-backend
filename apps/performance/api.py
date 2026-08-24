@@ -9,8 +9,7 @@ from ninja import Query, Router, Schema
 from ninja.pagination import paginate
 
 from apps.shared.schema.fields import RelativeDateTime
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .cold_storage import (
     query_n_plus_one_patterns,
@@ -82,7 +81,7 @@ class NPlusOneFilters(Schema):
 @paginate
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_transaction_groups(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     filters: Query[TransactionGroupFilters],
     organization_slug: str,
@@ -112,7 +111,7 @@ async def list_transaction_groups(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_transaction_group(
-    request: AuthHttpRequest, organization_slug: str, id: int
+    request: OrgAuthHttpRequest, organization_slug: str, id: int
 ):
     organization = scoped_org_id(request)
     return await aget_object_or_404(
@@ -127,7 +126,7 @@ async def get_transaction_group(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_transaction_spans(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     id: int,
     filters: Query[SpanGroupFilters],
@@ -162,7 +161,7 @@ async def list_transaction_spans(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_span_groups(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     filters: Query[OrgSpanGroupFilters],
 ):
@@ -193,7 +192,7 @@ async def list_span_groups(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_n_plus_one_patterns(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     filters: Query[NPlusOneFilters],
 ):
@@ -224,7 +223,7 @@ async def list_n_plus_one_patterns(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_transaction_trend(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     id: int,
     filters: Query[SpanGroupFilters],

@@ -19,9 +19,8 @@ from ninja.pagination import paginate
 
 from apps.files.models import File, FileBlob
 from apps.projects.models import Project
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .models import DebugInformationFile
 from .schema import AssemblePayload, DebugFileSchema
@@ -40,7 +39,7 @@ router = Router()
 )
 @has_permission(["project:write", "project:admin", "project:releases"])
 async def difs_assemble_api(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     payload: AssemblePayload,
@@ -101,7 +100,7 @@ async def difs_assemble_api(
 )
 @has_permission(["project:write", "project:admin", "project:releases"])
 async def project_reprocessing(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
 ):
@@ -205,7 +204,7 @@ async def create_dif_from_read_only_file(proguard_file, project, proguard_id, fi
 @paginate
 @has_permission(["project:read", "project:write", "project:admin"])
 async def list_dsyms(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     response: HttpResponse,
@@ -222,7 +221,7 @@ async def list_dsyms(
 )
 @has_permission(["project:write", "project:admin", "project:releases"])
 async def dsyms(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     file: UploadedFile = NinjaFile(...),

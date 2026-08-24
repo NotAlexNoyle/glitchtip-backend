@@ -12,6 +12,7 @@ from apps.teams.models import Team
 from apps.teams.schema import ProjectTeamSchema
 from glitchtip.api.permissions import (
     AuthHttpRequest,
+    OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
 )
@@ -106,7 +107,7 @@ async def list_projects(request: AuthHttpRequest, response: HttpResponse):
 )
 @has_permission(["project:read", "project:write", "project:admin"])
 async def get_project(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str, project_slug: str
 ):
     return await aget_object_or_404(
         get_projects_queryset(
@@ -123,7 +124,7 @@ async def get_project(
 )
 @has_permission(["project:write", "project:admin"])
 async def update_project(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     payload: ProjectIn,
@@ -146,7 +147,7 @@ async def update_project(
 )
 @has_permission(["project:admin"])
 async def delete_project(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str, project_slug: str
 ):
     project = await aget_object_or_404(
         get_projects_queryset(scoped_org_id(request), request.auth.user_id),
@@ -166,7 +167,7 @@ async def delete_project(
 @paginate
 @has_permission(["project:read"])
 async def list_team_projects(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     team_slug: str,
@@ -184,7 +185,10 @@ async def list_team_projects(
 )
 @has_permission(["project:write", "project:admin"])
 async def create_project(
-    request: AuthHttpRequest, organization_slug: str, team_slug: str, payload: ProjectIn
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    team_slug: str,
+    payload: ProjectIn,
 ):
     """Create a new project given a team and organization"""
     user_id = request.auth.user_id
@@ -216,7 +220,7 @@ async def create_project(
 @paginate
 @has_permission(["project:read"])
 async def list_organization_projects(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     query: str | None = None,
@@ -253,7 +257,7 @@ async def list_organization_projects(
 @paginate
 @has_permission(["project:read", "project:write", "project:admin"])
 async def list_project_keys(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -270,7 +274,7 @@ async def list_project_keys(
 )
 @has_permission(["project:read", "project:write", "project:admin"])
 async def get_project_key(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     key_id: UUID,
@@ -287,7 +291,7 @@ async def get_project_key(
 )
 @has_permission(["project:write", "project:admin"])
 async def update_project_key(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     key_id: UUID,
@@ -305,7 +309,7 @@ async def update_project_key(
 )
 @has_permission(["project:write", "project:admin"])
 async def create_project_key(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     payload: ProjectKeyIn,
@@ -332,7 +336,7 @@ async def create_project_key(
 )
 @has_permission(["project:admin"])
 async def delete_project_key(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str, key_id: UUID
+    request: OrgAuthHttpRequest, organization_slug: str, project_slug: str, key_id: UUID
 ):
     result, _ = (
         await get_project_keys_queryset(

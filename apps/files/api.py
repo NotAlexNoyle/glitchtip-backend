@@ -17,7 +17,7 @@ from ninja.files import UploadedFile
 
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission
 
 from .models import FileBlob
 
@@ -128,7 +128,7 @@ async def get_chunk_upload_info(request: AuthHttpRequest, organization_slug: str
 @optional_slash(router, "post", "organizations/{slug:organization_slug}/chunk-upload/")
 @has_permission(["project:write", "project:admin", "project:releases"])
 async def chunk_upload(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     file_gzip: list[UploadedFile] = File(...),
 ):

@@ -17,8 +17,8 @@ from apps.organizations_ext.models import OrganizationUser
 from apps.releases.models import Release
 from apps.releases.schema import CommitSchema
 from apps.teams.models import Team
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
 )
@@ -151,7 +151,7 @@ async def _aggregate_tags(issue: Issue, key: str | None):
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_organization_issue(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, issue_id: int
 ):
     qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     qs = qs.annotate(
@@ -170,7 +170,7 @@ async def get_organization_issue(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_organization_issue_commits(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, issue_id: int
 ):
     qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     try:
@@ -188,7 +188,7 @@ async def list_organization_issue_commits(
 )
 @has_permission(["event:write", "event:admin"])
 async def delete_organization_issue(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, issue_id: int
 ):
     qs = await get_queryset(request.auth.user_id, org_id=scoped_org_id(request))
     result = await qs.filter(id=issue_id).aupdate(is_deleted=True)
@@ -205,7 +205,7 @@ async def delete_organization_issue(
 )
 @has_permission(["event:write", "event:admin"])
 async def update_organization_issue(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     issue_id: int,
     payload: UpdateIssueSchema,
@@ -286,7 +286,7 @@ async def update_issue_status(qs: QuerySet, issue_id: int, payload: UpdateIssueS
 @has_permission(["event:read", "event:write", "event:admin"])
 @paginate
 async def list_issues(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     filters: Query[IssueFilters],
@@ -313,7 +313,7 @@ async def list_issues(
 )
 @has_permission(["event:write", "event:admin"])
 async def delete_issues(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     filters: Query[IssueFilters],
 ):
@@ -333,7 +333,7 @@ async def delete_issues(
 )
 @has_permission(["event:write", "event:admin"])
 async def update_issues(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     filters: Query[IssueFilters],
     payload: UpdateIssueSchema,
@@ -429,7 +429,7 @@ async def update_issues(
 @has_permission(["event:read", "event:write", "event:admin"])
 @paginate
 async def list_project_issues(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -461,7 +461,7 @@ async def list_project_issues(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_organization_issue_tags(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     issue_id: int,
     key: str | None = None,
@@ -491,7 +491,9 @@ class IssueStatsFilters(Schema):
 # no event scope could read it.
 @has_permission(["event:read", "event:write", "event:admin"])
 async def issue_stats(
-    request: AuthHttpRequest, organization_slug: str, filters: Query[IssueStatsFilters]
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    filters: Query[IssueStatsFilters],
 ):
     """
     Retrieves aggregated statistics for a given list of issue groups.

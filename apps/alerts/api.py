@@ -6,8 +6,7 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.projects.models import Project
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .constants import RecipientType
 from .models import AlertRecipient, ProjectAlert
@@ -48,7 +47,7 @@ def get_project_alert_queryset(org_id: int, project_slug: str):
 @has_permission(["project:read", "project:write", "project:admin"])
 @paginate
 async def list_project_alerts(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -63,7 +62,7 @@ async def list_project_alerts(
 )
 @has_permission(["project:write", "project:admin"])
 async def create_project_alert(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     payload: ProjectAlertIn,
@@ -103,7 +102,7 @@ async def create_project_alert(
 )
 @has_permission(["project:write", "project:admin"])
 async def update_project_alert(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     alert_id: int,
@@ -150,7 +149,10 @@ async def update_project_alert(
 )
 @has_permission(["project:admin"])
 async def delete_project_alert(
-    request: AuthHttpRequest, organization_slug: str, project_slug: str, alert_id: int
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    project_slug: str,
+    alert_id: int,
 ):
     user_id = request.auth.user_id
     result, _ = (
@@ -176,7 +178,7 @@ async def delete_project_alert(
 )
 @has_permission(["project:write", "project:admin"])
 async def test_project_alert(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     alert_id: int,

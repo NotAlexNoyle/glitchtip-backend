@@ -6,8 +6,7 @@ from django.http import Http404
 from ninja import Query, Router
 
 from apps.projects.models import Project
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .schema import StatsV2Schema
 
@@ -52,7 +51,7 @@ def get_timeseries(category, start, end, interval, project_ids):
 @router.get("organizations/{slug:organization_slug}/stats_v2/")
 @has_permission(["org:read", "org:write", "org:admin"])
 async def stats_v2(
-    request: AuthHttpRequest, organization_slug: str, filters: Query[StatsV2Schema]
+    request: OrgAuthHttpRequest, organization_slug: str, filters: Query[StatsV2Schema]
 ):
     """
     Reverse engineered stats v2 endpoint. Endpoint in sentry not documented.

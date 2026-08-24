@@ -5,8 +5,7 @@ from django.shortcuts import aget_object_or_404
 from ninja import Router
 from ninja.pagination import paginate
 
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .models import Environment, EnvironmentProject
 from .schema import EnvironmentProjectIn, EnvironmentProjectSchema, EnvironmentSchema
@@ -31,7 +30,7 @@ Visibility = Literal["all", "hidden", "visible"]
 @paginate
 @has_permission(["org:read", "org:write", "org:admin"])
 async def list_environments(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     visibility: Visibility = "visible",
@@ -52,7 +51,7 @@ async def list_environments(
 @paginate
 @has_permission(["project:read", "project:write", "project:admin"])
 async def list_environment_projects(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -76,7 +75,7 @@ async def list_environment_projects(
 )
 @has_permission(["project:write", "project:admin"])
 async def update_environment_project(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     name: str,

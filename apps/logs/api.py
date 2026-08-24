@@ -13,9 +13,8 @@ from django.http import Http404, HttpResponse
 from ninja import Query, Router
 
 from apps.projects.models import LogProjectHourlyStatistic
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.pagination import set_pagination_headers
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 from glitchtip.cold_storage import parse_json_field
 from glitchtip.partition_manager import UUID7Helper
 
@@ -676,7 +675,7 @@ async def get_log_by_id(organization_id: int, log_id: UUID) -> LogEventRow | Non
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_logs(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     filters: Query[LogFilterSchema],
@@ -765,7 +764,7 @@ async def list_logs(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_log(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     log_id: UUID,
 ):
@@ -857,7 +856,7 @@ async def query_log_stats(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_log_stats(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     filters: Query[LogStatsFilterSchema],
@@ -914,7 +913,7 @@ async def get_log_stats(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_log_resources(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     resource_type: str | None = None,
 ):

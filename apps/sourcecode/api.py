@@ -6,9 +6,8 @@ from ninja.pagination import paginate
 
 from apps.files.models import FileBlob
 from apps.files.tasks import assemble_artifacts_task
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
-from glitchtip.api.permissions import has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
 from .models import Repository
 from .schema import ArtifactBundleAssembleIn, RepositoryIn, RepositorySchema
@@ -28,7 +27,7 @@ def get_repositories_queryset(org_id: int):
 @paginate
 @has_permission(["org:read", "org:write", "org:admin"])
 async def list_repositories(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str
+    request: OrgAuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     return get_repositories_queryset(scoped_org_id(request))
 
@@ -40,7 +39,7 @@ async def list_repositories(
 )
 @has_permission(["org:write", "org:admin"])
 async def create_repository(
-    request: AuthHttpRequest, organization_slug: str, payload: RepositoryIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: RepositoryIn
 ):
     try:
         repo = await Repository.objects.acreate(
@@ -59,7 +58,9 @@ async def create_repository(
 )
 @has_permission(["project:write", "project:admin", "project:releases"])
 async def artifact_bundle_assemble(
-    request: AuthHttpRequest, organization_slug: str, payload: ArtifactBundleAssembleIn
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    payload: ArtifactBundleAssembleIn,
 ):
     """Associate files with assembly bundle and optionally release"""
     existing_chunks = [

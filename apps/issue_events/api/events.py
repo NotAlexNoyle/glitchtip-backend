@@ -8,6 +8,7 @@ from ninja.pagination import paginate
 
 from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
 )
@@ -20,7 +21,7 @@ from . import router
 
 
 def get_queryset(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     issue_id: int | None = None,
     project_slug: str | None = None,
 ):
@@ -44,7 +45,7 @@ async def get_user_report(event_id: uuid.UUID) -> UserReport | None:
     return await UserReport.objects.filter(event_id=event_id).afirst()
 
 
-async def _resolve_issue(request: AuthHttpRequest, issue_id: int) -> Issue:
+async def _resolve_issue(request: OrgAuthHttpRequest, issue_id: int) -> Issue:
     """Resolve an issue in the decorator-resolved organization, or 404.
 
     Scoping by the resolved organization id is what makes the
@@ -223,7 +224,7 @@ async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uui
 @paginate
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_organization_issue_event(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     issue_id: int,
     organization_slug: str,
@@ -246,7 +247,7 @@ async def list_organization_issue_event(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_organization_latest_issue_event(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, issue_id: int
 ):
     # Resolve issue first to get organization_id for hash partition pruning
     issue = await _resolve_issue(request, issue_id)
@@ -260,7 +261,10 @@ async def get_organization_latest_issue_event(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_organization_issue_event(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int, event_id: uuid.UUID
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    issue_id: int,
+    event_id: uuid.UUID,
 ):
     issue = await _resolve_issue(request, issue_id)
     return await _get_issue_event(request, issue, event_id)
@@ -274,7 +278,7 @@ async def get_organization_issue_event(
 @paginate
 @has_permission(["event:read", "event:write", "event:admin"])
 async def list_project_issue_event(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
@@ -290,7 +294,7 @@ async def list_project_issue_event(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_project_issue_event(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     project_slug: str,
     event_id: uuid.UUID,
@@ -345,7 +349,10 @@ async def get_project_issue_event(
 )
 @has_permission(["event:read", "event:write", "event:admin"])
 async def get_event_json(
-    request: AuthHttpRequest, organization_slug: str, issue_id: int, event_id: uuid.UUID
+    request: OrgAuthHttpRequest,
+    organization_slug: str,
+    issue_id: int,
+    event_id: uuid.UUID,
 ):
     qs = get_queryset(request, issue_id=issue_id)
 
