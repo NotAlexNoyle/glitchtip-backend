@@ -691,8 +691,11 @@ class IssueEventIngestTestCase(EventIngestTestCase):
         )
         issue = Issue.objects.get()
         url = reverse(
-            "api:get_latest_issue_event",
-            kwargs={"issue_id": issue.id},
+            "api:get_organization_latest_issue_event",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": issue.id,
+            },
         )
         res = self.client.get(url)
         self.assertEqual(res.status_code, 200)

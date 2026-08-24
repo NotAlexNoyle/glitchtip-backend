@@ -7,60 +7,42 @@ from glitchtip.test_utils.test_case import GlitchTipTestCase
 from ..models import Comment, Issue
 
 
-# Create your tests here.
 class CommentsApiTestCase(GlitchTipTestCase):
-    """Coverage for the bare ``/issues/{id}/comments/`` routes.
-
-    On a bare route the owning organization is resolved from the issue
-    itself, so an issue in an organization the user does not belong to is
-    invisible: the request is rejected with 403 rather than silently
-    returning an empty result (as the org-scoped twin does).
-    """
-
     def setUp(self):
         self.create_user_and_project()
         self.async_client.force_login(self.user)
         self.issue = baker.make("issue_events.Issue", project=self.project)
         self.url = reverse(
-            "api:list_comments",
-            kwargs={"issue_id": self.issue.id},
+            "api:list_organization_comments",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+            },
+        )
+
+    async def organization_slug_for(self, issue) -> str:
+        return await (
+            Issue.objects.filter(pk=issue.pk)
+            .values_list("project__organization__slug", flat=True)
+            .afirst()
         )
 
     async def test_comment_creation(self):
         data = {"data": {"text": "Test"}}
         not_my_issue = await baker.amake("issue_events.Issue")
-
         res = await self.async_client.post(
             self.url, data, content_type="application/json"
         )
 
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.json()["data"]["text"], "Test")
-
-        url = reverse(
-            "api:add_comment",
-            kwargs={"issue_id": not_my_issue.id},
-        )
-        res = await self.async_client.post(url, data, content_type="application/json")
-        self.assertEqual(res.status_code, 403)
-
-    async def test_org_comment_creation(self):
-        data = {"data": {"text": "Test"}}
-        not_my_issue = await baker.amake("issue_events.Issue")
-        res = await self.async_client.post(
-            self.url, data, content_type="application/json"
-        )
-
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.json()["data"]["text"], "Test")
-
-        org_slug = await Issue.objects.filter(pk=not_my_issue.pk).values_list(
-            "project__organization__slug", flat=True
-        ).afirst()
 
         url = reverse(
             "api:add_organization_comment",
-            kwargs={"issue_id": not_my_issue.id, "organization_slug": org_slug},
+            kwargs={
+                "issue_id": not_my_issue.id,
+                "organization_slug": await self.organization_slug_for(not_my_issue),
+            },
         )
         res = await self.async_client.post(url, data, content_type="application/json")
         self.assertEqual(res.status_code, 403)
@@ -81,8 +63,11 @@ class CommentsApiTestCase(GlitchTipTestCase):
         self.assertContains(res, comments[2].text)
 
         url = reverse(
-            "api:list_comments",
-            kwargs={"issue_id": not_my_issue.id},
+            "api:list_organization_comments",
+            kwargs={
+                "issue_id": not_my_issue.id,
+                "organization_slug": await self.organization_slug_for(not_my_issue),
+            },
         )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 403)
@@ -99,43 +84,6 @@ class CommentsApiTestCase(GlitchTipTestCase):
         await user2.adelete()
         res = await self.async_client.get(self.url)
         self.assertContains(res, comment.text)
-
-    async def test_comment_update(self):
-        comment = await baker.amake(
-            "issue_events.Comment",
-            issue=self.issue,
-            user=self.user,
-            _fill_optional=["text"],
-        )
-        url = reverse(
-            "api:update_comment",
-            kwargs={
-                "issue_id": self.issue.id,
-                "comment_id": comment.id,
-            },
-        )
-        data = {"data": {"text": "Test"}}
-
-        res = await self.async_client.put(url, data, content_type="application/json")
-        self.assertEqual(res.json()["data"]["text"], "Test")
-
-    async def test_comment_delete(self):
-        comment = await baker.amake(
-            "issue_events.Comment",
-            issue=self.issue,
-            user=self.user,
-            _fill_optional=["text"],
-        )
-        url = reverse(
-            "api:delete_comment",
-            kwargs={
-                "issue_id": self.issue.id,
-                "comment_id": comment.id,
-            },
-        )
-        await self.async_client.delete(url)
-        res = await self.async_client.get(self.url)
-        self.assertEqual(len(res.json()), 0)
 
 
 class OrganizationScopedCommentsApiTestCase(GlitchTipTestCase):

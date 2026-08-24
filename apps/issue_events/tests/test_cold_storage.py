@@ -673,8 +673,11 @@ class MultiDateColdStorageTestCase(GlitchTipTestCaseMixin, TransactionTestCase):
             newest_ids = all_ids[self.dates[-1].strftime("%Y%m%d")]
 
             url = reverse(
-                "api:get_latest_issue_event",
-                kwargs={"issue_id": issue.id},
+                "api:get_organization_latest_issue_event",
+                kwargs={
+                    "organization_slug": self.organization.slug,
+                    "issue_id": issue.id,
+                },
             )
             res = self.client.get(url)
             self.assertEqual(res.status_code, 200)

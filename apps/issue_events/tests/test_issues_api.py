@@ -1353,14 +1353,20 @@ class IssueCommitsAPITestCase(GlitchTestCase):
         self.client.force_login(self.user)
         self.async_client.force_login(self.user)
 
+    def get_url(self, issue_id: int) -> str:
+        return reverse(
+            "api:list_organization_issue_commits",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": issue_id,
+            },
+        )
+
     async def test_list_issue_commits_no_release(self):
         issue = await baker.amake(
             "issue_events.Issue", project=self.project, short_id=1
         )
-        url = reverse(
-            "api:list_issue_commits",
-            kwargs={"issue_id": issue.id},
-        )
+        url = self.get_url(issue.id)
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
@@ -1375,10 +1381,7 @@ class IssueCommitsAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse(
-            "api:list_issue_commits",
-            kwargs={"issue_id": issue.id},
-        )
+        url = self.get_url(issue.id)
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
@@ -1409,10 +1412,7 @@ class IssueCommitsAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse(
-            "api:list_issue_commits",
-            kwargs={"issue_id": issue.id},
-        )
+        url = self.get_url(issue.id)
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -1423,12 +1423,10 @@ class IssueCommitsAPITestCase(GlitchTestCase):
         self.assertEqual(data[1]["id"], "def456")
 
     async def test_list_issue_commits_not_found(self):
-        url = reverse(
-            "api:list_issue_commits",
-            kwargs={"issue_id": 99999},
-        )
+        url = self.get_url(99999)
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 404)
+
 
 class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
     def setUp(self):
@@ -1457,8 +1455,11 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
 
     def get_url(self, issue_id: int) -> str:
         return reverse(
-            "api:list_issue_tags",
-            kwargs={"issue_id": issue_id},
+            "api:list_organization_issue_tags",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": issue_id,
+            },
         )
 
     async def test_issue_tags(self):
@@ -1608,9 +1609,8 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
         )
 
         url = self.get_url(issue.id)
-        with self.assertNumQueries(
-            3
-        ):  # +1 org-membership lookup from org-scoped path; many auth related queries
+        # Membership lookup, the scoped issue fetch, and the tag aggregation.
+        with self.assertNumQueries(3):
             start = timer()
             self.client.get(url)
             end = timer()
@@ -1618,9 +1618,9 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
 
 
 class OrganizationScopedIssueAPITestCase(GlitchTestCase):
-    """Org-scoped twins of the bare ``/issues/{id}/`` routes.
+    """Scoping coverage for the ``/issues/{id}/`` routes.
 
-    Each twin must scope on the slug in the path, not merely on membership.
+    Each route must scope on the slug in the path, not merely on membership.
     ``other_organization`` is one the user *is* a member of, so a result
     leaking through it proves the slug is being ignored rather than merely
     proving that membership filtering works.

@@ -8,19 +8,12 @@ from glitchtip.test_utils.test_case import APIPermissionTestCase, GlitchTipTestC
 
 def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) -> str:
     return reverse(
-        "api:get_issue_event",
+        "api:get_organization_issue_event",
         kwargs={
+            "organization_slug": organization_slug,
             "issue_id": issue_id,
             "event_id": event_id,
         },
-    )
-
-
-def list_user_reports_url(organization_slug: str, issue_id: int) -> str:
-    # Bare route: organization_slug accepted for call-site symmetry but unused.
-    return reverse(
-        "api:list_user_reports",
-        kwargs={"issue_id": issue_id},
     )
 
 
@@ -70,14 +63,16 @@ class IssuesUserReportTestCase(GlitchTipTestCaseMixin, TestCase):
             issue=event2.issue,
             event_id=event2.id.hex,
         )
-        url = list_user_reports_url(self.organization.slug, self.event.issue.id)
+        url = list_organization_user_reports_url(
+            self.organization.slug, self.event.issue.id
+        )
         res = await self.async_client.get(url)
         self.assertContains(res, self.user_report.email)
         self.assertNotContains(res, user_report2.email)
 
 
 class OrganizationScopedUserReportTestCase(GlitchTipTestCaseMixin, TestCase):
-    """Org-scoped twin of the bare ``/issues/{id}/user-reports/`` route.
+    """Scoping coverage for the ``/issues/{id}/user-reports/`` route.
 
     ``other_organization`` is one the user *is* a member of, so a report
     reachable through it proves the slug is being ignored rather than merely
@@ -134,14 +129,11 @@ class UserReportAPIPermissionTests(APIPermissionTestCase):
         self.user_report = baker.make(
             "issue_events.UserReport", project=self.project, issue=self.issue
         )
-        self.list_url = list_user_reports_url(self.organization.slug, self.issue.id)
-        self.org_list_url = list_organization_user_reports_url(
+        self.list_url = list_organization_user_reports_url(
             self.organization.slug, self.issue.id
         )
 
     def test_list(self):
         self.assertGetReqStatusCode(self.list_url, 403)
-        self.assertGetReqStatusCode(self.org_list_url, 403)
         self.auth_token.add_permission("event:read")
         self.assertGetReqStatusCode(self.list_url, 200)
-        self.assertGetReqStatusCode(self.org_list_url, 200)

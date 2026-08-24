@@ -13,18 +13,17 @@ from glitchtip.test_utils.test_case import APIPermissionTestCase, GlitchTipTestC
 
 
 def get_list_issue_event_url(organization_slug: str, issue_id: int) -> str:
-    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
-        "api:list_issue_event",
-        kwargs={"issue_id": issue_id},
+        "api:list_organization_issue_event",
+        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
     )
 
 
 def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) -> str:
-    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
-        "api:get_issue_event",
+        "api:get_organization_issue_event",
         kwargs={
+            "organization_slug": organization_slug,
             "issue_id": issue_id,
             "event_id": event_id,
         },
@@ -32,10 +31,9 @@ def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) ->
 
 
 def get_latest_issue_event_url(organization_slug: str, issue_id: int) -> str:
-    # Bare route: organization_slug accepted for call-site symmetry but unused.
     return reverse(
-        "api:get_latest_issue_event",
-        kwargs={"issue_id": issue_id},
+        "api:get_organization_latest_issue_event",
+        kwargs={"organization_slug": organization_slug, "issue_id": issue_id},
     )
 
 
@@ -65,24 +63,26 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
         first_event = baker.make(
             "issue_events.IssueEvent",
             issue__project=self.project,
+            organization=self.organization,
             id=UUID7Helper.from_datetime(now - timedelta(seconds=1)),
         )
         baker.make(
             "issue_events.IssueEvent",
             issue__project=self.project,
+            organization=self.organization,
             issue_id=first_event.issue_id,
             _quantity=50,
         )
         last_event = baker.make(
             "issue_events.IssueEvent",
             issue__project=self.project,
+            organization=self.organization,
             issue_id=first_event.issue_id,
             id=UUID7Helper.from_datetime(now + timedelta(seconds=1)),
         )
         url = get_list_issue_event_url(self.organization.slug, first_event.issue_id)
 
-        # +1 authz query from the bare route's has_issue_permission, which
-        # resolves the owning organization and the actor's role in it together.
+        # Membership lookup, the page itself, and the count a second page needs.
         with self.assertNumQueries(3):
             res = self.client.get(url)
 
@@ -109,16 +109,20 @@ class IssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
         """
         Single page query should not hit DB for count
         """
-        first_event = baker.make("issue_events.IssueEvent", issue__project=self.project)
+        first_event = baker.make(
+            "issue_events.IssueEvent",
+            issue__project=self.project,
+            organization=self.organization,
+        )
         last_event = baker.make(
             "issue_events.IssueEvent",
             issue__project=self.project,
+            organization=self.organization,
             issue_id=first_event.issue_id,
         )
         url = get_list_issue_event_url(self.organization.slug, first_event.issue_id)
 
-        # +1 authz query from the bare route's has_issue_permission, which
-        # resolves the owning organization and the actor's role in it together.
+        # Membership lookup and the page itself; no count on a single page.
         with self.assertNumQueries(2):
             res = self.client.get(url)
 
@@ -236,18 +240,12 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
             organization=self.organization,
         )
 
-        self.list_url = get_list_issue_event_url(
-            self.organization.slug, self.event.issue_id
-        )
         self.project_list_url = reverse(
             "api:list_project_issue_event",
             kwargs={
                 "organization_slug": self.organization.slug,
                 "project_slug": self.project.slug,
             },
-        )
-        self.detail_url = get_issue_event_url(
-            self.organization.slug, self.event.issue_id, self.event.id
         )
         self.project_detail_url = reverse(
             "api:get_project_issue_event",
@@ -256,9 +254,6 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
                 "project_slug": self.project.slug,
                 "event_id": self.event.id.hex,
             },
-        )
-        self.latest_detail_url = get_latest_issue_event_url(
-            self.organization.slug, self.event.issue_id
         )
         self.event_json_url = get_event_json_url(
             self.organization.slug, self.event.issue_id, self.event.id
@@ -287,24 +282,18 @@ class IssueEventAPIPermissionTestCase(APIPermissionTestCase):
         )
 
     def test_list(self):
-        self.assertGetReqStatusCode(self.list_url, 403)
         self.assertGetReqStatusCode(self.project_list_url, 403)
         self.assertGetReqStatusCode(self.org_list_url, 403)
         self.auth_token.add_permission("event:read")
-        self.assertGetReqStatusCode(self.list_url, 200)
         self.assertGetReqStatusCode(self.project_list_url, 200)
         self.assertGetReqStatusCode(self.org_list_url, 200)
 
     def test_retrieve(self):
-        self.assertGetReqStatusCode(self.detail_url, 403)
         self.assertGetReqStatusCode(self.project_detail_url, 403)
-        self.assertGetReqStatusCode(self.latest_detail_url, 403)
         self.assertGetReqStatusCode(self.org_detail_url, 403)
         self.assertGetReqStatusCode(self.org_latest_url, 403)
         self.auth_token.add_permission("event:read")
-        self.assertGetReqStatusCode(self.detail_url, 200)
         self.assertGetReqStatusCode(self.project_detail_url, 200)
-        self.assertGetReqStatusCode(self.latest_detail_url, 200)
         self.assertGetReqStatusCode(self.org_detail_url, 200)
         self.assertGetReqStatusCode(self.org_latest_url, 200)
 
@@ -326,8 +315,11 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         )
 
         self.list_url = reverse(
-            "api:list_comments",
-            kwargs={"issue_id": self.issue.id},
+            "api:list_organization_comments",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+            },
         )
 
     def test_list(self):
@@ -340,8 +332,11 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         self.auth_token.add_permission("event:read")
         data = {"data": {"text": "Test"}}
         url = reverse(
-            "api:add_comment",
-            kwargs={"issue_id": self.issue.id},
+            "api:add_organization_comment",
+            kwargs={
+                "organization_slug": self.organization.slug,
+                "issue_id": self.issue.id,
+            },
         )
         self.assertPostReqStatusCode(url, data, 403)
 
@@ -351,8 +346,9 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
     def test_destroy(self):
         self.auth_token.add_permissions(["event:read", "event:write"])
         url = reverse(
-            "api:delete_comment",
+            "api:delete_organization_comment",
             kwargs={
+                "organization_slug": self.organization.slug,
                 "issue_id": self.issue.id,
                 "comment_id": self.comment.id,
             },
@@ -366,8 +362,9 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
         self.auth_token.add_permission("event:read")
         data = {"data": {"text": "Test"}}
         url = reverse(
-            "api:update_comment",
+            "api:update_organization_comment",
             kwargs={
+                "organization_slug": self.organization.slug,
                 "issue_id": self.issue.id,
                 "comment_id": self.comment.id,
             },
@@ -379,7 +376,7 @@ class CommentsAPIPermissionTests(APIPermissionTestCase):
 
 
 class OrganizationScopedIssueEventAPITestCase(GlitchTipTestCaseMixin, TestCase):
-    """Org-scoped twins of the bare ``/issues/{id}/events/`` routes.
+    """Scoping coverage for the ``/issues/{id}/events/`` routes.
 
     ``other_organization`` is one the user *is* a member of, so an event
     reachable through it proves the slug is being ignored rather than merely
