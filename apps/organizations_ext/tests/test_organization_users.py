@@ -504,7 +504,7 @@ class OrganizationUsersTestCase(TestCase):
         other_user = await baker.amake("users.user")
         other_org_user = await self.organization.aadd_user(other_user)
         await self.organization.achange_owner(other_org_user)
-        other_org_user.role = OrganizationUserRole.MANAGER
+        other_org_user.role = OrganizationUserRole.OWNER
         await other_org_user.asave()
         await self.async_client.aforce_login(other_user)
 

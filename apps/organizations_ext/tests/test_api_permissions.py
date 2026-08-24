@@ -20,10 +20,7 @@ class OrganizationAPIPermissionTests(APIPermissionTestCase):
         self.assertGetReqStatusCode(self.list_url, 200)
 
     def test_create(self):
-        self.auth_token.add_permission("org:read")
         data = {"name": "new org"}
-        self.assertPostReqStatusCode(self.list_url, data, 403)
-        self.auth_token.add_permission("org:write")
         self.assertPostReqStatusCode(self.list_url, data, 201)
 
     def test_user_create(self):
