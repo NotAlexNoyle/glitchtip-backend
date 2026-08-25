@@ -308,8 +308,7 @@ async def delete_organization_member(
         id=member_id,
     )
     # Members may always remove themselves; removing anyone else requires the
-    # member:admin scope. The read-tier decorator above only gates that the
-    # caller has *some* member access to the org.
+    # member:admin scope.
     is_self = bool(org_user.user and org_user.user_id == user_id)
     if not is_self and "member:admin" not in request.org_auth.scope:
         raise HttpError(403, "Forbidden")
@@ -387,12 +386,6 @@ async def set_organization_owner(
         id=member_id,
     )
     organization = new_owner.organization
-    old_owner = organization.owner.organization_user
-    if not (
-        old_owner.user_id == user_id
-        or scoped_user_role(request) == OrganizationUserRole.OWNER
-    ):
-        raise HttpError(403, "Only owner may set organization owner.")
 
     await organization.achange_owner(new_owner)
     # achange_owner saves a freshly loaded owner row; sync the cached

@@ -91,8 +91,6 @@ async def get_organization_for_manager(
             actor_role=request.org_auth.role,
         )
     )
-    if organization.actor_role < OrganizationUserRole.MANAGER:
-        raise HttpError(403, "forbidden")
     return organization
 
 
@@ -158,7 +156,7 @@ def create_linked_social_app(
     response=list[OrganizationSocialAppSchema],
     by_alias=True,
 )
-@has_permission(["org:read", "org:write", "org:admin"])
+@has_permission(["org:write", "org:admin"])
 async def list_organization_social_apps(
     request: OrgAuthHttpRequest, organization_slug: str
 ):

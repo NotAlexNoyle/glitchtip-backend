@@ -153,7 +153,6 @@ async def delete_project(
         get_projects_queryset(scoped_org_id(request), request.auth.user_id),
         slug=project_slug,
         organization__organization_users__user_id=request.auth.user_id,
-        organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
     )
     await project.adelete()
     return Status(204, None)

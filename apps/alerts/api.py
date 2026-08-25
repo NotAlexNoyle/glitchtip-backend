@@ -68,8 +68,6 @@ async def create_project_alert(
     payload: ProjectAlertIn,
 ):
     user_id = request.auth.user_id
-    # Org ADMIN or a member of one of the project's teams. That is a stricter
-    # rule than the project:write scope this route requires.
     project = await aget_object_or_404(
         Project.objects.filter(
             Q(
@@ -158,11 +156,8 @@ async def delete_project_alert(
     result, _ = (
         await get_project_alert_queryset(scoped_org_id(request), project_slug)
         .filter(id=alert_id)
-        # The ADMIN floor is stricter than the project:admin scope this route
-        # requires, so it stays -- but on one join, so it is this user's role.
         .filter(
             project__organization__organization_users__user_id=user_id,
-            project__organization__organization_users__role__gte=OrganizationUserRole.ADMIN,
         )
         .adelete()
     )

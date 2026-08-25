@@ -308,7 +308,7 @@ async def list_project_teams(
     response={201: ProjectTeamSchema},
     by_alias=True,
 )
-@has_permission(["project:write", "project:admin"])
+@has_permission(["org:write"])
 async def add_team_to_project(
     request: OrgAuthHttpRequest,
     organization_slug: str,
@@ -341,7 +341,7 @@ async def add_team_to_project(
     response=ProjectTeamSchema,
     by_alias=True,
 )
-@has_permission(["project:write", "project:admin"])
+@has_permission(["org:write"])
 async def delete_team_from_project(
     request: OrgAuthHttpRequest,
     organization_slug: str,
@@ -360,7 +360,6 @@ async def delete_team_from_project(
         slug=project_slug,
         organization_id=scoped_org_id(request),
         organization__organization_users__user_id=user_id,
-        organization__organization_users__role__gte=OrganizationUserRole.MANAGER,
     )
     await project.teams.aremove(team)
     return await (
