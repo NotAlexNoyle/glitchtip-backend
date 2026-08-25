@@ -389,15 +389,7 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         this test is for.
         """
         expected_ungated = {
-            "apps/uptime/api.py::create_monitor",
-            "apps/uptime/api.py::create_status_page",
-            "apps/uptime/api.py::delete_monitor",
-            "apps/uptime/api.py::get_monitor",
             "apps/uptime/api.py::heartbeat_check",
-            "apps/uptime/api.py::list_monitor_checks",
-            "apps/uptime/api.py::list_monitors",
-            "apps/uptime/api.py::list_status_pages",
-            "apps/uptime/api.py::update_monitor",
         }
         ungated = {
             f"{path}::{name}"
