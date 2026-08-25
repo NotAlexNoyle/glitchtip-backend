@@ -11,8 +11,8 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.models import Organization
 from apps.projects.models import Project
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.pagination import AsyncLinkHeaderPagination
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission
 
 from .models import Monitor, MonitorCheck, StatusPage
 from .schema import (
@@ -250,8 +250,9 @@ async def heartbeat_check(
     by_alias=True,
 )
 @paginate(MonitorPagination)
+@has_permission(["org:read"])
 async def list_monitors(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str
+    request: OrgAuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     return get_monitor_queryset(request.auth.user_id, organization_slug)
 
@@ -261,8 +262,9 @@ async def list_monitors(
     response=MonitorDetailSchema,
     by_alias=True,
 )
+@has_permission(["org:read"])
 async def get_monitor(
-    request: AuthHttpRequest, organization_slug: str, monitor_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, monitor_id: int
 ):
     monitor = await aget_object_or_404(
         get_monitor_queryset(request.auth.user_id, organization_slug),
@@ -277,12 +279,13 @@ async def get_monitor(
     response={201: MonitorSchema},
     by_alias=True,
 )
+@has_permission(["org:write"])
 async def create_monitor(
-    request: AuthHttpRequest, organization_slug: str, payload: MonitorIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: MonitorIn
 ):
     user_id = request.auth.user_id
     organization = await aget_object_or_404(
-        Organization, slug=organization_slug, users=user_id
+        Organization.objects, id=request.org_auth.org_id
     )
     data = payload.dict(exclude_defaults=True)
     if project_id := data.pop("project", None):
@@ -298,8 +301,9 @@ async def create_monitor(
     response=MonitorSchema,
     by_alias=True,
 )
+@has_permission(["org:write"])
 async def update_monitor(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     monitor_id: int,
     payload: MonitorIn,
@@ -329,8 +333,9 @@ async def update_monitor(
     by_alias=True,
 )
 @paginate
+@has_permission(["org:write"])
 async def list_monitor_checks(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     monitor_id: int,
@@ -363,8 +368,9 @@ async def list_monitor_checks(
     by_alias=True,
 )
 @paginate(StatusPagePagination)
+@has_permission(["org:read"])
 async def list_status_pages(
-    request: AuthHttpRequest, response: HttpResponse, organization_slug: str
+    request: OrgAuthHttpRequest, response: HttpResponse, organization_slug: str
 ):
     """List status pages, used for showing the current status of an uptime monitor"""
     return StatusPage.objects.filter(
@@ -387,11 +393,12 @@ async def list_status_pages(
     response={201: StatusPageSchema},
     by_alias=True,
 )
+@has_permission(['org:write'])
 async def create_status_page(
-    request: AuthHttpRequest, organization_slug: str, payload: StatusPageIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: StatusPageIn
 ):
     organization = await aget_object_or_404(
-        Organization, slug=organization_slug, users=request.auth.user_id
+        Organization.objects, id=request.org_auth.org_id
     )
     data = payload.dict()
     status_page = await StatusPage.objects.acreate(organization=organization, **data)
@@ -405,8 +412,9 @@ async def create_status_page(
     "organizations/{slug:organization_slug}/monitors/{int:monitor_id}/",
     response={204: None},
 )
+@has_permission(['org:write'])
 async def delete_monitor(
-    request: AuthHttpRequest, organization_slug: str, monitor_id: int
+    request: OrgAuthHttpRequest, organization_slug: str, monitor_id: int
 ):
     result, _ = (
         await get_monitor_queryset(request.auth.user_id, organization_slug)

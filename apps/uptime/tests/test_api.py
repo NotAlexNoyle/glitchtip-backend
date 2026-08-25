@@ -450,7 +450,9 @@ class UptimeAPITestCase(GlitchTestCase):
 
         url = reverse("api:delete_monitor", args=[another_org.slug, another_monitor.pk])
         res = await self.async_client.delete(url)
-        self.assertEqual(res.status_code, 404)
+        # 403, not 404: @has_permission rejects a non-member of another_org before
+        # the queryset (which used to hide the monitor) is ever evaluated.
+        self.assertEqual(res.status_code, 403)
 
     @mock.patch("apps.uptime.tasks.perform_checks")
     async def test_list_isolation(self, _):

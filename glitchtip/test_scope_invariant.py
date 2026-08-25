@@ -397,15 +397,10 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
             "apps/stripe/api.py::stripe_billing_portal_session",
             "apps/stripe/api.py::subscription_events_count_daily",
             "apps/stripe/api.py::subscription_events_count_for_period",
-            "apps/uptime/api.py::create_monitor",
-            "apps/uptime/api.py::create_status_page",
-            "apps/uptime/api.py::delete_monitor",
-            "apps/uptime/api.py::get_monitor",
+            # auth=None -- an external monitor POSTs this with a secret in the
+            # URL, so there is no session or token to resolve scopes from. This
+            # one can never be gated.
             "apps/uptime/api.py::heartbeat_check",
-            "apps/uptime/api.py::list_monitor_checks",
-            "apps/uptime/api.py::list_monitors",
-            "apps/uptime/api.py::list_status_pages",
-            "apps/uptime/api.py::update_monitor",
         }
         ungated = {
             f"{path}::{name}"
