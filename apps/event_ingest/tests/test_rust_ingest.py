@@ -11,13 +11,17 @@ import gzip
 import importlib
 import json
 import uuid
+from unittest import mock
 
+import sentry_sdk
 from django.core.cache import cache
 from django.tasks import task_backends
+from django.test import SimpleTestCase
 
 from apps.issue_events.models import IssueEvent, UserReport
 from apps.logs.models import LogEvent
 from apps.performance.models import TransactionGroup
+from glitchtip.rust_ingest import _MAX_REPORTED_ANOMALIES, _report_anomalies
 
 from .utils import (
     CLIENT_IP,
@@ -351,3 +355,70 @@ class RustIngestTestCase(AsgiIngestTestMixin, EventIngestTestCase):
         from django.urls import reverse
 
         return reverse("event_envelope", args=[self.project.id]) + self.params
+
+
+class RustIngestAnomalyReportingTestCase(SimpleTestCase):
+    """A malformed envelope is a property of the sending SDK, not of the
+    project it was sent to, so every project hitting the same bug has to land
+    in one issue. Drives ``_report_anomalies`` directly — the captures are all
+    it does, and they need no database."""
+
+    def _captures(self, anomalies: list[dict], path: str) -> list[dict]:
+        """Every ``capture_message`` ``_report_anomalies`` makes for these
+        anomalies, as ``{message, fingerprint}``."""
+        captures = []
+
+        def record(message, _level):
+            scope = sentry_sdk.get_current_scope()
+            captures.append(
+                {"message": message, "fingerprint": list(scope._fingerprint or [])}
+            )
+
+        with mock.patch(
+            "glitchtip.rust_ingest.sentry_sdk.capture_message", side_effect=record
+        ):
+            _report_anomalies(anomalies, path)
+        return captures
+
+    def test_captures_are_identical_across_projects(self):
+        # Over the per-request cap, so this covers the flood summary too.
+        anomalies = [
+            {"kind": "invalid-envelope-header", "message": "bad event_id"},
+            *({"kind": "payload-invalid", "item_type": "event"} for _ in range(7)),
+        ]
+        first = self._captures(anomalies, "/api/25893/envelope/")
+        second = self._captures(anomalies, "/api/11962/envelope/")
+
+        self.assertEqual(len(first), _MAX_REPORTED_ANOMALIES + 1)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [capture["fingerprint"] for capture in first],
+            [
+                ["envelope-anomaly", "invalid-envelope-header"],
+                *[["envelope-anomaly", "payload-invalid"]] * 4,
+                ["envelope-anomaly-flood"],
+            ],
+        )
+        # Spelled out rather than interpolated from the constant under test,
+        # which would pass for a route that still named a project.
+        self.assertEqual(
+            [capture["message"] for capture in first[:1] + first[-1:]],
+            [
+                "Envelope ingest anomaly (invalid-envelope-header) on "
+                "/api/{project_id}/envelope/",
+                "Envelope ingest reported further anomalies on "
+                "/api/{project_id}/envelope/",
+            ],
+        )
+
+    def test_unsupported_item_type_keeps_per_type_fingerprint(self):
+        """Unchanged parity with the fallback view: a genuinely-new SDK item
+        type still gets its own issue, keyed on the type not the kind."""
+        captures = self._captures(
+            [{"kind": "unsupported-item-type", "item_type": "quantum_report"}],
+            "/api/25893/envelope/",
+        )
+        self.assertEqual(
+            captures[0]["fingerprint"],
+            ["envelope-unsupported-item-type", "quantum_report"],
+        )

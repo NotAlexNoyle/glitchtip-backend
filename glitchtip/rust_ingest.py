@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 # could turn that into a response.
 _ENVELOPE_PATH_RE = re.compile(r"^/api/([0-9]{1,19})/envelope/$")
 
+# The parameterized spelling of the path above, used in place of the concrete
+# path in an anomaly report. Every capture below is reachable only through a
+# path that matched, so this is that path with its project id removed.
+_ENVELOPE_ROUTE = "/api/{project_id}/envelope/"
+
 # SDKs authenticate envelope POSTs via ?sentry_key=<key> (glitchtip_key
 # also accepted). The key is a public ingest credential by design (it ships
 # in browser bundles), but there's still no reason to copy customers' keys
@@ -198,8 +203,16 @@ def _init_sync() -> None:
 def _report_anomalies(anomalies: list[dict], path: str) -> None:
     """Mirror the Python view's sentry captures for envelope oddities.
 
-    Anomaly fields are attacker-controlled — they are recorded as context
-    data, never interpreted.
+    Anomaly fields are attacker-controlled: only ``kind`` and ``item_type``
+    are read, and only to build a fingerprint. The rest is recorded as
+    context data, never interpreted.
+
+    An explicit fingerprint is what groups these. The messages name the
+    route rather than the concrete path because a message becomes the issue
+    *title*, which is frozen when the issue is first created — so a path
+    there names the whole group after whichever project happened to trip the
+    bug first. Which project a given event came from stays on the event, via
+    ``_describe_request``.
     """
     for anomaly in anomalies[:_MAX_REPORTED_ANOMALIES]:
         kind = anomaly.get("kind", "unknown")
@@ -214,9 +227,11 @@ def _report_anomalies(anomalies: list[dict], path: str) -> None:
                     item_type or "unknown",
                 ]
                 scope.set_tag("envelope_item_type", item_type or "unknown")
+            else:
+                scope.fingerprint = ["envelope-anomaly", kind]
             scope.set_context("rust ingest anomaly", anomaly)
             sentry_sdk.capture_message(
-                f"Envelope ingest anomaly ({kind}) on {path}", "warning"
+                f"Envelope ingest anomaly ({kind}) on {_ENVELOPE_ROUTE}", "warning"
             )
         logger.warning(
             "Envelope ingest anomaly (%s) for item type %r on %s: %s",
@@ -241,7 +256,7 @@ def _report_anomalies(anomalies: list[dict], path: str) -> None:
                 "rust ingest anomalies", {"total": len(anomalies), "by_kind": counts}
             )
             sentry_sdk.capture_message(
-                f"Envelope ingest reported {remaining} further anomalies on {path}",
+                f"Envelope ingest reported further anomalies on {_ENVELOPE_ROUTE}",
                 "warning",
             )
         logger.warning(
