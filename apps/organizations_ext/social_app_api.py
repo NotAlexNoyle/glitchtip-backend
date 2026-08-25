@@ -22,7 +22,6 @@ from ninja.errors import HttpError
 
 from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
 
-from .constants import OrganizationUserRole
 from .models import Organization, OrganizationSocialApp
 from .queryset_utils import get_organizations_queryset
 from .schema import (
