@@ -213,7 +213,8 @@ async def list_stripe_products(request: AuthHttpRequest):
 )
 @has_permission(['org:read'])
 async def get_stripe_subscription(request: OrgAuthHttpRequest, organization_slug: str):
-    # No scope guard on this route: this filter is the authorization.
+    # The org:read gate above is the authorization now; organization__users
+    # below is redundant with it and kept only as defense in depth.
     return await (
         StripeSubscription.objects.filter(
             organization__users=request.auth.user_id,
