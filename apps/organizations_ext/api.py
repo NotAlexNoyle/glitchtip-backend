@@ -19,7 +19,6 @@ from glitchtip.api.permissions import (
     OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
-    scoped_user_role,
 )
 
 from .constants import OrganizationUserRole
