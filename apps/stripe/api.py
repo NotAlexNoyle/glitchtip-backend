@@ -25,6 +25,7 @@ from apps.projects.models import (
 )
 from apps.uptime.models import UptimeCheckHourlyStatistic
 from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission
 from glitchtip.schema import CamelSchema
 
 from .client import (
@@ -228,18 +229,17 @@ async def get_stripe_subscription(request: AuthHttpRequest, organization_slug: s
     "organizations/{slug:organization_slug}/create-stripe-subscription-checkout/",
     response=StripeCheckoutSessionSchema,
 )
+@has_permission(['org:admin'])
 async def create_stripe_session(
-    request: AuthHttpRequest, organization_slug: str, payload: PriceIDSchema
+    request: OrgAuthHttpRequest, organization_slug: str, payload: PriceIDSchema
 ):
     """
     Create Stripe Checkout, send to client for redirecting to Stripe
     See https://stripe.com/docs/api/checkout/sessions/create
     """
     organization = await aget_object_or_404(
-        Organization.objects.select_related("owner__organization_user__user"),
-        slug=organization_slug,
-        organization_users__role=OrganizationUserRole.OWNER,
-        organization_users__user=request.auth.user_id,
+        Organization.objects,
+        id = request.org_auth.org_id
     )
     if organization.stripe_customer_id:
         customer_id = organization.stripe_customer_id
@@ -260,15 +260,14 @@ async def create_stripe_session(
     "organizations/{slug:organization_slug}/create-billing-portal/",
     response=StripePortalSessionSchema,
 )
+@has_permission(['org:admin'])
 async def stripe_billing_portal_session(
-    request: AuthHttpRequest, organization_slug: str
+    request: OrgAuthHttpRequest, organization_slug: str
 ):
     """See https://stripe.com/docs/billing/subscriptions/integrating-self-serve-portal"""
     organization = await aget_object_or_404(
-        Organization.objects.select_related("owner__organization_user__user"),
-        slug=organization_slug,
-        organization_users__role=OrganizationUserRole.OWNER,
-        organization_users__user=request.auth.user_id,
+        Organization.objects,
+        id = request.org_auth.org_id
     )
     if organization.stripe_customer_id:
         customer_id = organization.stripe_customer_id
@@ -359,8 +358,9 @@ def usage_response(counts: EventCounts) -> dict:
     response=SubscriptionUsageSchema,
     by_alias=True,
 )
+@has_permission(['org:read','org:admin'])
 async def subscription_events_count_for_period(
-    request: AuthHttpRequest,
+    request: OrgAuthHttpRequest,
     organization_slug: str,
     periods_ago: int = 0,
 ):
@@ -394,6 +394,7 @@ async def subscription_events_count_for_period(
     response=DailyEventsCountSchema,
     by_alias=True,
 )
+@has_permission(['org:read', 'org:admin'])
 async def subscription_events_count_daily(
     request: AuthHttpRequest, organization_slug: str
 ):
@@ -538,12 +539,13 @@ async def _get_overage_price() -> StripePrice | None:
     )
 
 
-@router.get(
-    "subscriptions/{slug:organization_slug}/overage/",
-    response=OverageStatusSchema,
-    by_alias=True,
-)
-async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
+async def _overage_status(request: AuthHttpRequest, organization_slug: str) -> dict:
+    """Build the overage status payload.
+
+    Undecorated on purpose: configure_overage returns this same payload, and
+    calling the decorated view internally would resolve authorization a second
+    time for a caller the decorator has already cleared.
+    """
     org = await aget_object_or_404(
         Organization.objects.select_related(
             "stripe_primary_subscription__price__product"
@@ -582,13 +584,24 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
     }
 
 
+@router.get(
+    "subscriptions/{slug:organization_slug}/overage/",
+    response=OverageStatusSchema,
+    by_alias=True,
+)
+@has_permission(['org:read', 'org:admin'])
+async def get_overage_status(request: OrgAuthHttpRequest, organization_slug: str):
+    return await _overage_status(request, organization_slug)
+
+
 @router.post(
     "organizations/{slug:organization_slug}/overage/",
     response=OverageStatusSchema,
     by_alias=True,
 )
+@has_permission(['org:admin'])
 async def configure_overage(
-    request: AuthHttpRequest, organization_slug: str, payload: OverageConfigIn
+    request: OrgAuthHttpRequest, organization_slug: str, payload: OverageConfigIn
 ):
     """Enable/disable metered overage billing and set the spend cap (owner-only).
 
@@ -680,4 +693,4 @@ async def configure_overage(
         await org.asave(update_fields=["metered_billing_enabled"])
 
     await check_organization_throttle.aenqueue(org.id, bypass_cache=True)
-    return await get_overage_status(request, organization_slug)
+    return await _overage_status(request, organization_slug)

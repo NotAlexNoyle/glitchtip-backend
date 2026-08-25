@@ -245,7 +245,9 @@ class OverageAPITestCase(TestCase):
             new=MagicMock(aenqueue=AsyncMock()),
         ):
             res = self._configure({"enabled": True, "capCents": 2000})
-        self.assertEqual(res.status_code, 404)
+        # 403, not 404: @has_permission denies a member without org:admin before
+        # the view runs. The old owner-scoped lookup made this look like a 404.
+        self.assertEqual(res.status_code, 403)
 
     def test_status_reports_overage_cost_when_enabled(self):
         from apps.organizations_ext.models import EventCounts

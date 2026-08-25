@@ -384,19 +384,11 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         """A ledger, not a wall.
 
         A route that takes an ``organization_slug`` is addressing one
-        organization's data, so it should be gated. The apps below are not
-        ported yet -- they still carry their own membership filters. Shrink
-        this list as they land; a *new* name appearing in the diff is the
-        regression this test is for.
+        organization's data, so it should be gated. Shrink this list as the
+        stragglers land; a *new* name appearing in the diff is the regression
+        this test is for.
         """
         expected_ungated = {
-            "apps/stripe/api.py::configure_overage",
-            "apps/stripe/api.py::create_stripe_session",
-            "apps/stripe/api.py::get_overage_status",
-            "apps/stripe/api.py::get_stripe_subscription",
-            "apps/stripe/api.py::stripe_billing_portal_session",
-            "apps/stripe/api.py::subscription_events_count_daily",
-            "apps/stripe/api.py::subscription_events_count_for_period",
             "apps/uptime/api.py::create_monitor",
             "apps/uptime/api.py::create_status_page",
             "apps/uptime/api.py::delete_monitor",
