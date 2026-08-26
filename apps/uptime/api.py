@@ -375,7 +375,7 @@ async def list_status_pages(
     """List status pages, used for showing the current status of an uptime monitor"""
     return StatusPage.objects.filter(
         organization__users=request.auth.user_id,
-        organization_id = request.org_auth.org_id,
+        organization_id=request.org_auth.org_id,
     ).prefetch_related(
         # MonitorSchema reads the check annotations (is_up/last_change) and the
         # organization (heartbeat URL) and project (project_name); load them
@@ -394,7 +394,7 @@ async def list_status_pages(
     response={201: StatusPageSchema},
     by_alias=True,
 )
-@has_permission(['org:write'])
+@has_permission(["org:write"])
 async def create_status_page(
     request: OrgAuthHttpRequest, organization_slug: str, payload: StatusPageIn
 ):
@@ -413,7 +413,7 @@ async def create_status_page(
     "organizations/{slug:organization_slug}/monitors/{int:monitor_id}/",
     response={204: None},
 )
-@has_permission(['org:write'])
+@has_permission(["org:write"])
 async def delete_monitor(
     request: OrgAuthHttpRequest, organization_slug: str, monitor_id: int
 ):
