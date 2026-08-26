@@ -79,9 +79,7 @@ def validate_server_url(url: str) -> str:
     return url
 
 
-async def get_organization_for_manager(
-    request: OrgAuthHttpRequest, organization_slug: str
-) -> Organization:
+async def get_organization(request: OrgAuthHttpRequest) -> Organization:
     organization = await aget_object_or_404(
         get_organizations_queryset(
             scoped_org_id(request),
@@ -159,7 +157,7 @@ def create_linked_social_app(
 async def list_organization_social_apps(
     request: OrgAuthHttpRequest, organization_slug: str
 ):
-    organization = await get_organization_for_manager(request, organization_slug)
+    organization = await get_organization(request)
     return [app async for app in get_social_apps_queryset(organization)]
 
 
@@ -174,7 +172,7 @@ async def create_organization_social_app(
     organization_slug: str,
     payload: OrganizationSocialAppIn,
 ):
-    organization = await get_organization_for_manager(request, organization_slug)
+    organization = await get_organization(request)
     if not await organization_can_customize_sso(organization):
         raise HttpError(403, "Custom SSO is not included in your plan")
     if (
@@ -213,7 +211,7 @@ async def update_organization_social_app(
     social_app_id: int,
     payload: OrganizationSocialAppUpdateIn,
 ):
-    organization = await get_organization_for_manager(request, organization_slug)
+    organization = await get_organization(request)
     social_app = await aget_object_or_404(
         get_social_apps_queryset(organization), id=social_app_id
     )
@@ -244,7 +242,7 @@ async def update_organization_social_app(
 async def delete_organization_social_app(
     request: OrgAuthHttpRequest, organization_slug: str, social_app_id: int
 ):
-    organization = await get_organization_for_manager(request, organization_slug)
+    organization = await get_organization(request)
     social_app = await aget_object_or_404(
         get_social_apps_queryset(organization), id=social_app_id
     )
