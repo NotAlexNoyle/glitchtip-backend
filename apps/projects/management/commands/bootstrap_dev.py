@@ -7,28 +7,13 @@ from apps.organizations_ext.models import Organization
 from apps.projects.models import Project, ProjectKey
 from apps.teams.models import Team
 from apps.users.models import User
+from glitchtip.api.scopes import SCOPES
 
 DEV_EMAIL = "test@example.com"
 DEV_PASSWORD = "admin_pass"
 DEV_TOKEN = "d" * 64
-ALL_SCOPES = [
-    "project:read",
-    "project:write",
-    "project:admin",
-    "project:releases",
-    "team:read",
-    "team:write",
-    "team:admin",
-    "event:read",
-    "event:write",
-    "event:admin",
-    "org:read",
-    "org:write",
-    "org:admin",
-    "member:read",
-    "member:write",
-    "member:admin",
-]
+# The token AGENTS.md documents as "all scopes" -- derived, never a copy.
+ALL_SCOPES = list(SCOPES)
 
 
 class Command(BaseCommand):

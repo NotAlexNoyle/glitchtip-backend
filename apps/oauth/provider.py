@@ -32,6 +32,7 @@ VALID_SCOPES = [
     "member:read",
     "member:write",
     "member:admin",
+    "org:integrations",
 ]
 
 DEFAULT_SCOPES = [
