@@ -374,7 +374,8 @@ async def list_status_pages(
 ):
     """List status pages, used for showing the current status of an uptime monitor"""
     return StatusPage.objects.filter(
-        organization__users=request.auth.user_id
+        organization__users=request.auth.user_id,
+        organization_id = request.org_auth.org_id,
     ).prefetch_related(
         # MonitorSchema reads the check annotations (is_up/last_change) and the
         # organization (heartbeat URL) and project (project_name); load them
