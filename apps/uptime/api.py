@@ -333,7 +333,7 @@ async def update_monitor(
     by_alias=True,
 )
 @paginate
-@has_permission(["org:write"])
+@has_permission(["org:read"])
 async def list_monitor_checks(
     request: OrgAuthHttpRequest,
     response: HttpResponse,
