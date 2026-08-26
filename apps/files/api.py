@@ -15,7 +15,6 @@ from ninja import File, Router
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
 
-from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
 from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission
 
