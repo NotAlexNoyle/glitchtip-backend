@@ -104,7 +104,8 @@ router = Router()
 
 
 @optional_slash(router, "get", "organizations/{slug:organization_slug}/chunk-upload/")
-async def get_chunk_upload_info(request: AuthHttpRequest, organization_slug: str):
+@has_permission(["project:write", "project:admin", "project:releases"])
+async def get_chunk_upload_info(request: OrgAuthHttpRequest, organization_slug: str):
     """Get server settings for chunk file upload"""
     path = reverse("api:get_chunk_upload_info", args=[organization_slug])
     url = (
