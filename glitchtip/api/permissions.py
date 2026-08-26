@@ -10,6 +10,7 @@ from .authentication import Auth, AuthHttpRequest
 from .scopes import Scopes
 
 
+@dataclass
 class OrgAuth:
     auth: Auth
     scope: set[Scopes]
@@ -51,18 +52,18 @@ async def resolve_org_auth(
     if row is None:
         return OrgAuthError(auth, organization_slug, False)
 
-    org_auth = OrgAuth()
-    org_auth.auth = auth
-    org_auth.org_id = row["organization_id"]
-
-    org_auth.role = row["role"]
-    org_auth.role_details = OrganizationUserRole.get_role(row["role"])
-
-    role_scopes = set(org_auth.role_details["scopes"])
+    role_details = OrganizationUserRole.get_role(row["role"])
+    role_scopes = set(role_details["scopes"])
     if auth.auth_type == "token":
-        org_auth.scope = role_scopes & set(auth.token.get_scopes())
-    else:
-        org_auth.scope = role_scopes
+        role_scopes = role_scopes & set(auth.token.get_scopes())
+
+    org_auth = OrgAuth(
+        auth = auth,
+        scope = role_scopes,
+        org_id = row["organization_id"],
+        role = row["role"],
+        role_details = role_details,
+    )
 
     # with orgAuth built, now we check if the user has the required scopes
     # A user just needs one scope from required, so we check if the intersection exists (not empty set)

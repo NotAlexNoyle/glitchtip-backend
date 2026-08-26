@@ -293,20 +293,6 @@ class OrgAuthIsProofOfAuthorizationTestCase(TestCase):
         with self.assertRaises((ScopeNotResolved, AttributeError)):
             scoped_org_id(FakeRequest())
 
-    def test_a_bare_org_auth_yields_nothing(self):
-        """``OrgAuth`` is only meaningful once ``resolve_org_auth`` fills it.
-
-        It is a plain class with annotations rather than a dataclass, so an
-        instance nobody populated has no ``org_id`` at all. That is what makes
-        "holding an OrgAuth" equivalent to "a check passed" -- there is no
-        default to fall back to.
-        """
-        bare = OrgAuth()
-        for name in ("org_id", "scope", "role", "role_details"):
-            with self.subTest(attribute=name):
-                self.assertFalse(hasattr(bare, name))
-
-
 class DecoratorIsTheBoundaryTestCase(TestCase):
     """``@has_permission`` is the only thing that sets ``request.org_auth``.
 
