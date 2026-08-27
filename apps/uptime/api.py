@@ -279,7 +279,7 @@ async def get_monitor(
     response={201: MonitorSchema},
     by_alias=True,
 )
-@has_permission(["org:write"])
+@has_permission(["project:write"])
 async def create_monitor(
     request: OrgAuthHttpRequest, organization_slug: str, payload: MonitorIn
 ):
@@ -301,7 +301,7 @@ async def create_monitor(
     response=MonitorSchema,
     by_alias=True,
 )
-@has_permission(["org:write"])
+@has_permission(["project:write"])
 async def update_monitor(
     request: OrgAuthHttpRequest,
     organization_slug: str,
@@ -394,7 +394,7 @@ async def list_status_pages(
     response={201: StatusPageSchema},
     by_alias=True,
 )
-@has_permission(["org:write"])
+@has_permission(["project:write"])
 async def create_status_page(
     request: OrgAuthHttpRequest, organization_slug: str, payload: StatusPageIn
 ):
@@ -413,7 +413,7 @@ async def create_status_page(
     "organizations/{slug:organization_slug}/monitors/{int:monitor_id}/",
     response={204: None},
 )
-@has_permission(["org:write"])
+@has_permission(["project:write"])
 async def delete_monitor(
     request: OrgAuthHttpRequest, organization_slug: str, monitor_id: int
 ):
