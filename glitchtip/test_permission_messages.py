@@ -24,9 +24,11 @@ class Permission403MessageTestCase(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.organization = baker.make("organizations_ext.Organization")
-        # The first user added to an organization becomes its owner, so seed a
-        # throwaway owner to get a genuine non-owner membership below.
-        cls.organization.add_user(baker.make("users.user"), OrganizationUserRole.OWNER)
+        # The first user added to an organization becomes its owner, so seed an
+        # owner to get a genuine non-owner membership below. The owner is also
+        # the fixture for the cases where the role is not the binding limit.
+        cls.owner = baker.make("users.user")
+        cls.organization.add_user(cls.owner, OrganizationUserRole.OWNER)
         cls.user = baker.make("users.user")
         cls.organization.add_user(cls.user, OrganizationUserRole.MEMBER)
 
@@ -41,8 +43,8 @@ class Permission403MessageTestCase(TestCase):
             "api:delete_organization", args=[cls.organization.slug]
         )
 
-    def make_token(self, scopes: list[str]):
-        token = baker.make("api_tokens.APIToken", user=self.user)
+    def make_token(self, scopes: list[str], user=None):
+        token = baker.make("api_tokens.APIToken", user=user or self.user)
         if scopes:
             token.add_permissions(scopes)
         return token
@@ -72,24 +74,35 @@ class Permission403MessageTestCase(TestCase):
         self.assertEqual(self.detail(res), NOT_A_MEMBER)
 
     def test_token_is_told_which_scopes_are_missing(self):
+        """A MEMBER can only ever hold org:read, so that is the only scope
+        worth naming -- org:write and org:admin would be a dead end."""
         res = self.get(self.detail_url, self.make_token([]))
         self.assertEqual(res.status_code, 403)
         self.assertEqual(
             self.detail(res),
             "Permission denied. Token must have one or more of these scopes: "
-            "['org:admin', 'org:read', 'org:write']",
+            "['org:read']",
         )
 
     def test_missing_scopes_are_listed_in_a_stable_order(self):
-        """Set iteration order for strings varies with hash randomization."""
-        first = self.detail(self.get(self.detail_url, self.make_token([])))
-        second = self.detail(self.get(self.detail_url, self.make_token([])))
+        """Set iteration order for strings varies with hash randomization.
+
+        The owner's token is used so the list is long enough for ordering to
+        matter; a MEMBER would only ever be told about org:read.
+        """
+        first = self.detail(
+            self.get(self.detail_url, self.make_token([], user=self.owner))
+        )
+        second = self.detail(
+            self.get(self.detail_url, self.make_token([], user=self.owner))
+        )
         self.assertEqual(first, second)
         self.assertIn("['org:admin', 'org:read', 'org:write']", first)
 
     def test_token_holding_the_scope_is_not_told_it_is_missing_scopes(self):
-        """A member token that still lacks one scope names only that scope."""
-        token = self.make_token(["org:read", "org:write"])
+        """The owner's role is not the ceiling here, so the token is what is
+        short: name org:admin and not the two scopes it already holds."""
+        token = self.make_token(["org:read", "org:write"], user=self.owner)
         res = self.client.delete(
             self.delete_url, HTTP_AUTHORIZATION=f"Bearer {token.token}"
         )
@@ -127,7 +140,7 @@ class Permission403MessageTestCase(TestCase):
         self.assertEqual(
             self.detail(res),
             "Permission denied. A token cannot exceed your role in the "
-            "organization, and you are a MEMBER",
+            "organization: this requires ORGANIZATION OWNER, you are a MEMBER",
         )
         self.assertNotIn("[]", self.detail(res))
 

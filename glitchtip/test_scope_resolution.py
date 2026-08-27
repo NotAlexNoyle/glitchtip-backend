@@ -20,6 +20,11 @@ ORG_READ = frozenset({"org:read", "org:write", "org:admin"})
 # delete_organization's scope: owner-only.
 ORG_ADMIN = frozenset({"org:admin"})
 
+# resolve_403_message reads both "name" and "scopes" off role_details, so the
+# fixtures carry what get_role() actually returns rather than a stand-in.
+MEMBER_ROLE = OrganizationUserRole.get_role(OrganizationUserRole.MEMBER)
+OWNER_ROLE = OrganizationUserRole.get_role(OrganizationUserRole.OWNER)
+
 
 class ResolveOrgAuthTestCase(TestCase):
     @classmethod
@@ -230,33 +235,41 @@ class Resolve403MessageTestCase(TestCase):
         self.assertNotIn("[]", message)
 
     def test_token_is_told_which_scopes_are_missing(self):
-        err = OrgAuthError(self.token_auth([]), "some-org", True, set(), "Member")
+        """Only the scopes the role could actually grant: a MEMBER can hold
+        org:read, so naming org:write or org:admin would be a dead end."""
+        err = OrgAuthError(self.token_auth([]), "some-org", True, set(), MEMBER_ROLE)
         self.assertEqual(
             resolve_403_message(err, ORG_READ),
             "Permission denied. Token must have one or more of these scopes: "
-            "['org:admin', 'org:read', 'org:write']",
+            "['org:read']",
         )
 
     def test_missing_scopes_are_listed_in_a_stable_order(self):
-        """Set iteration order for strings varies with hash randomization."""
+        """Set iteration order for strings varies with hash randomization.
+
+        An OWNER is used so the list is long enough for ordering to matter; a
+        MEMBER would only ever be told about org:read.
+        """
         first = resolve_403_message(
-            OrgAuthError(self.token_auth([]), "some-org", True, set(), "Member"),
+            OrgAuthError(self.token_auth([]), "some-org", True, set(), OWNER_ROLE),
             ORG_READ,
         )
         second = resolve_403_message(
-            OrgAuthError(self.token_auth([]), "some-org", True, set(), "Member"),
+            OrgAuthError(self.token_auth([]), "some-org", True, set(), OWNER_ROLE),
             ORG_READ,
         )
         self.assertEqual(first, second)
         self.assertIn("['org:admin', 'org:read', 'org:write']", first)
 
     def test_token_naming_missing_scopes_names_only_the_ones_it_lacks(self):
+        """An OWNER, so the role is not the ceiling and the token is what is
+        short: the message names org:admin, not the two it already holds."""
         err = OrgAuthError(
             self.token_auth(["org:read", "org:write"]),
             "some-org",
             True,
-            {"org:read"},
-            "Member",
+            {"org:read", "org:write"},
+            OWNER_ROLE,
         )
         self.assertEqual(
             resolve_403_message(err, ORG_ADMIN),
@@ -268,13 +281,13 @@ class Resolve403MessageTestCase(TestCase):
         """The token holds org:admin; its owner is only a MEMBER. Inviting the
         caller to add scopes would be a dead end -- the cap is the role."""
         err = OrgAuthError(
-            self.token_auth(["org:admin"]), "some-org", True, set(), {"name": "Member"}
+            self.token_auth(["org:admin"]), "some-org", True, set(), MEMBER_ROLE
         )
         message = resolve_403_message(err, ORG_ADMIN)
         self.assertEqual(
             message,
             "Permission denied. A token cannot exceed your role in the "
-            "organization, and you are a MEMBER",
+            "organization: this requires ORGANIZATION OWNER, you are a MEMBER",
         )
         self.assertNotIn("[]", message)
 
@@ -285,7 +298,7 @@ class Resolve403MessageTestCase(TestCase):
             "some-org",
             True,
             {"org:read"},
-            {"name": "Member"},
+            MEMBER_ROLE,
         )
         self.assertEqual(
             resolve_403_message(err, ORG_ADMIN),
@@ -297,7 +310,7 @@ class Resolve403MessageTestCase(TestCase):
         """ROLES is walked from least to most privileged, so a member-level
         scope names MEMBER rather than the first role that happens to hold it."""
         err = OrgAuthError(
-            Auth(self.user.id, "session"), "some-org", True, set(), {"name": "Member"}
+            Auth(self.user.id, "session"), "some-org", True, set(), MEMBER_ROLE
         )
         self.assertIn(
             "Operation requires MEMBER",
