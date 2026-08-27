@@ -313,11 +313,17 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
     @staticmethod
     def _is_route(fn: ast.AST) -> bool:
         for dec in fn.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            func = dec.func
             if (
-                isinstance(dec, ast.Call)
-                and isinstance(dec.func, ast.Attribute)
-                and isinstance(dec.func.value, ast.Name)
-                and dec.func.value.id == "router"
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "router"
+            ):
+                return True
+            if isinstance(func, ast.Name) and any(
+                isinstance(arg, ast.Name) and arg.id == "router" for arg in dec.args
             ):
                 return True
         return False
