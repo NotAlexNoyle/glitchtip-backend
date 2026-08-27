@@ -99,31 +99,39 @@ def has_permission(permissions: list[str]):
 
     return decorator
 
+def _minimum_role_name(required) -> str | None:
+    """ROLES is ordered lowest-first, so the first role holding any required
+    scope is the lowest role that can pass."""
+    for role in ROLES:
+        if required & role["scopes"]:
+            return role["name"].upper()
+    return None
+
 
 def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
-    # if the user is a member, then we have to report what role/scopes they're missing
-    if err.membership:
-        if err.auth.auth_type == "token":  # report scopes missing
-            # two cases:
-            # the token have the scopes necessary, but the user role doesn't allow it.
-            missing = set(required).difference(set(err.auth.token.get_scopes()))
-            if not missing:
-                return f"Permission denied. A token cannot exceed your role in the organization, and you are a {err.role_details['name'].upper()}"
-
-            # The token lacks the scopes in the first place.
-            missing = set(required).difference(err.user_scope)
-            return f"Permission denied. Token must have one or more of these scopes: {sorted(missing)}"
-        else:
-            for role in ROLES:
-                if required & role["scopes"]:
-                    return (
-                        f"Permission denied. Operation requires {role['name'].upper()}, "
-                        f"you are a {err.role_details['name'].upper()}"
-                    )
-    else:
+    if not err.membership:
         return "Permission denied. You are not a member of this organization"
-    return "Permission denied"
 
+    you_are = err.role_details["name"].upper()
+    # Denial means role ∩ token ∩ required was empty. If the role alone grants
+    # nothing required, no token can help; otherwise the token is the gap.
+    attainable = set(err.role_details["scopes"]) & set(required)
+
+    if attainable and err.auth.auth_type == "token":
+        return (
+            "Permission denied. Token must have one or more of these scopes: "
+            f"{sorted(attainable)}"
+        )
+
+    needs = _minimum_role_name(set(required))
+    if needs is None:
+        return "Permission denied"
+    if err.auth.auth_type == "token":
+        return (
+            "Permission denied. A token cannot exceed your role in the "
+            f"organization: this requires {needs}, you are a {you_are}"
+        )
+    return f"Permission denied. Operation requires {needs}, you are a {you_are}"
 
 """ 
 OrgAuth and Auth, after they exist, holds information that routes can use.
