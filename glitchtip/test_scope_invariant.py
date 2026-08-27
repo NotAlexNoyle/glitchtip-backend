@@ -56,7 +56,7 @@ from django.urls import reverse
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
-from glitchtip.api.authentication import Auth, ScopeNotResolved
+from glitchtip.api.authentication import Auth
 from glitchtip.api.permissions import (
     OrgAuth,
     OrgAuthError,
@@ -280,17 +280,12 @@ class OrgAuthIsProofOfAuthorizationTestCase(TestCase):
         ``filter(organization_id=None)`` matches nothing today but says
         nothing about intent, and any future ``if org_id is None`` fallback
         would silently widen.
-
-        ``ScopeNotResolved`` is the named exception for this and is still
-        defined in ``authentication.py``, but nothing raises it since the
-        split, so today the missing attribute is what fails. Either is loud
-        enough; returning ``None`` is not.
         """
 
         class FakeRequest:
             auth = Auth(1, "session")
 
-        with self.assertRaises((ScopeNotResolved, AttributeError)):
+        with self.assertRaises(AttributeError):
             scoped_org_id(FakeRequest())
 
 class DecoratorIsTheBoundaryTestCase(TestCase):

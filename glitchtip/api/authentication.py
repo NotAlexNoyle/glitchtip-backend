@@ -12,15 +12,6 @@ from ninja.security import SessionAuth as BaseSessionAuth
 from apps.api_tokens.models import APIToken
 
 
-class ScopeNotResolved(Exception):
-    """A view asked for a scope-derived value before any permission check ran.
-
-    Views filter by ``Auth.org_id`` instead of re-deriving membership, so a
-    route that forgot its permission decorator must fail loudly (500) rather
-    than fall through to an unfiltered queryset.
-    """
-
-
 @dataclass
 class Auth:
     user_id: int
