@@ -1608,8 +1608,9 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
         )
 
         url = self.get_url(issue.id)
-        # Membership lookup, the scoped issue fetch, and the tag aggregation.
-        with self.assertNumQueries(3):
+        # The scoped issue fetch and the tag aggregation. The membership lookup
+        # that used to be a third query is now an EXISTS inside the fetch.
+        with self.assertNumQueries(2):
             start = timer()
             self.client.get(url)
             end = timer()
@@ -1674,10 +1675,17 @@ class OrganizationScopedIssueAPITestCase(GlitchTestCase):
         self.assertEqual(res.status_code, 404)
 
     async def test_retrieve_unaffiliated_organization(self):
+        """404, not 403: the folded gate cannot say why it found nothing.
+
+        Membership is a term in the fetch, so a non-member and a missing issue
+        are the same zero rows -- which makes this the same answer as the two
+        tests either side of it. See ``FOLDED_DETAIL_ROUTES`` in
+        ``glitchtip/test_scope_invariant.py``.
+        """
         issue = await amake_issue(project=self.project, short_id=1)
         unaffiliated = await baker.amake("organizations_ext.Organization")
         res = await self.async_client.get(self.detail_url(unaffiliated.slug, issue.id))
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 404)
 
     async def test_retrieve_not_my_issue(self):
         not_my_issue = await amake_issue()
