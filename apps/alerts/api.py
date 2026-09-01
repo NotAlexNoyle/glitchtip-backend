@@ -2,11 +2,15 @@ from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import aget_object_or_404
 from ninja import Router, Status
-from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.projects.models import Project
-from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id, org_scoped_list
+from glitchtip.api.permissions import (
+    OrgAuthHttpRequest,
+    has_permission,
+    org_scoped_list,
+    scoped_org_id,
+)
 
 from .constants import RecipientType
 from .models import AlertRecipient, ProjectAlert
@@ -44,16 +48,16 @@ def get_project_alert_queryset(org_id: int, project_slug: str):
     response=list[ProjectAlertSchema],
     by_alias=True,
 )
-@org_scoped_list(["project:read", "project:write", "project:admin"] )
+@org_scoped_list(["project:read", "project:write", "project:admin"])
 async def list_project_alerts(
     request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
 ):
-    return ProjectAlert.objects.filter(
-        project__slug=project_slug         
-    ).prefetch_related("alertrecipient_set")
+    return ProjectAlert.objects.filter(project__slug=project_slug).prefetch_related(
+        "alertrecipient_set"
+    )
 
 
 @router.post(

@@ -1,16 +1,16 @@
 from dataclasses import dataclass
 from functools import wraps
-from django.db.models import Exists, Subquery, QuerySet
-from django.core.exceptions import ImproperlyConfigured
 
+from django.core.exceptions import ImproperlyConfigured
+from django.db.models import Exists, QuerySet, Subquery
 from ninja.errors import HttpError
 from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import ROLES, OrganizationUserRole
-from apps.organizations_ext.models import OrganizationUser, Organization
+from apps.organizations_ext.models import Organization, OrganizationUser
 
 from .authentication import Auth, AuthHttpRequest
-from .scopes import Scopes, SCOPES
+from .scopes import Scopes
 
 
 @dataclass(frozen=True)
@@ -18,8 +18,8 @@ class OrgScope:
     user_id: int
     org_slug: str
     required: frozenset[Scopes]
-    roles: tuple[int, ...]        # role values holding any required scope
-    org_id: int | None = None     # set only when already known for free
+    roles: tuple[int, ...]  # role values holding any required scope
+    org_id: int | None = None  # set only when already known for free
 
     @property
     def org_id_expr(self):
@@ -29,9 +29,9 @@ class OrgScope:
         if self.org_id is not None:
             return self.org_id
         return Subquery(
-            Organization.objects
-            .filter(slug=self.org_slug, is_deleted=False)
-            .values("id")[:1]
+            Organization.objects.filter(slug=self.org_slug, is_deleted=False).values(
+                "id"
+            )[:1]
         )
 
     @property
@@ -42,8 +42,8 @@ class OrgScope:
         qs = OrganizationUser.objects.filter(
             user_id=self.user_id,
             role__in=self.roles,
-            organization__slug=self.org_slug,   # slug and id must AGREE, so a
-            organization__is_deleted=False,     # stale resolved id fails CLOSED
+            organization__slug=self.org_slug,  # slug and id must AGREE, so a
+            organization__is_deleted=False,  # stale resolved id fails CLOSED
         )
         if self.org_id is not None:
             qs = qs.filter(organization_id=self.org_id)
@@ -51,6 +51,7 @@ class OrgScope:
 
     def apply(self, qs):
         return qs.filter(self.gate, **{qs.model.org_field: self.org_id_expr})
+
 
 def org_scoped_list(scopes: list[Scopes]):
     required = frozenset(scopes)
@@ -60,16 +61,17 @@ def org_scoped_list(scopes: list[Scopes]):
         raise ImproperlyConfigured(f"no role holds any of {sorted(required)}")
 
     def decorator(view):
-        @wraps(view)                     # ninja reads the signature for path params
+        @wraps(view)  # ninja reads the signature for path params
         async def gated(request, **kwargs):
             if request.auth.auth_type == "token" and not (
                 required & set(request.auth.token.get_scopes())
             ):
                 raise HttpError(403, "Permission Denied.")
 
-            scope = OrgScope(request.auth.user_id, kwargs["organization_slug"],
-                             required, roles)
-            request.org_scope = scope               # set before the view runs
+            scope = OrgScope(
+                request.auth.user_id, kwargs["organization_slug"], required, roles
+            )
+            request.org_scope = scope  # set before the view runs
             qs = await view(request, **kwargs)
             if not isinstance(qs, QuerySet):
                 raise TypeError(f"{view.__qualname__} must return a QuerySet")
@@ -128,11 +130,11 @@ async def resolve_org_auth(
         role_scopes = role_scopes & set(auth.token.get_scopes())
 
     org_auth = OrgAuth(
-        auth = auth,
-        scope = role_scopes,
-        org_id = row["organization_id"],
-        role = row["role"],
-        role_details = role_details,
+        auth=auth,
+        scope=role_scopes,
+        org_id=row["organization_id"],
+        role=row["role"],
+        role_details=role_details,
     )
 
     # with orgAuth built, now we check if the user has the required scopes
@@ -169,6 +171,7 @@ def has_permission(permissions: list[str]):
 
     return decorator
 
+
 def _minimum_role_name(required) -> str | None:
     """ROLES is ordered lowest-first, so the first role holding any required
     scope is the lowest role that can pass."""
@@ -202,6 +205,7 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
             f"organization: this requires {needs}, you are a {you_are}"
         )
     return f"Permission denied. Operation requires {needs}, you are a {you_are}"
+
 
 """ 
 OrgAuth and Auth, after they exist, holds information that routes can use.

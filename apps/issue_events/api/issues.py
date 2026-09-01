@@ -20,8 +20,8 @@ from apps.teams.models import Team
 from glitchtip.api.permissions import (
     OrgAuthHttpRequest,
     has_permission,
+    org_scoped_list,
     scoped_org_id,
-    org_scoped_list
 )
 
 from ..constants import EventStatus
@@ -439,7 +439,7 @@ async def list_project_issues(
     org = request.org_scope.org_id_expr
     # @org_scoped_list owns authorization; org is only ever a pruning hint here.
     qs = await get_queryset(None, project_slug=project_slug, prune_org=org)
-    
+
     event_id: UUID | None = None
     if filters.query:
         try:
