@@ -26,11 +26,14 @@ authorization ran and passed, so these tests pin the divide itself:
 - ``DecoratorIsTheBoundaryTestCase`` reads the source tree and asserts no
   route reaches for ``scoped_org_id`` without ``@has_permission`` above it --
   the static form of "a route that forgot its decorator must not serve
-  everything" -- and that every ``actor_role=`` a caller passes is the int off
-  the resolved ``OrgAuth``.
+  everything" -- that every org-scoped route carries one of the two gates in
+  ``GATE_DECORATORS``, and that every ``actor_role=`` a caller passes is the
+  int off the resolved ``OrgAuth``.
 - ``CrossOrgIsolationTestCase`` walks every route family with a foreign
-  organization slug and asserts 403. Written against URLs rather than
-  querysets on purpose, so it keeps working no matter which layer filters.
+  organization slug and asserts it is refused -- 403 from ``has_permission``,
+  an empty 200 from the folded gate -- and, for every route either way, that no
+  foreign row comes back. Written against URLs rather than querysets on
+  purpose, so it keeps working no matter which layer filters.
 - ``ScopedQueryCountTestCase`` locks in the query counts the port is for, so a
   later change cannot quietly reintroduce a round trip.
 - ``TokenCeilingEndToEndTestCase`` is the HTTP-level version of the token
@@ -56,6 +59,7 @@ from django.urls import reverse
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
+from glitchtip.api import permissions
 from glitchtip.api.authentication import Auth
 from glitchtip.api.permissions import (
     OrgAuth,
@@ -71,6 +75,28 @@ ORGUSER_TABLE = "organizations_ext_organizationuser"
 ORG_TABLE = "organizations_ext_organization"
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# The decorators that gate an org-scoped route. Both are gates; they differ in
+# what they leave behind.
+#
+# ``has_permission`` resolves an ``OrgAuth`` before the view body runs and
+# raises 403 when the caller is not a member. ``org_scoped_list`` instead folds
+# the membership test into the data query as an uncorrelated EXISTS: it costs no
+# separate auth lookup, and it refuses by returning nothing rather than by
+# raising. Only ``has_permission`` produces an ``OrgAuth``, so only it can
+# satisfy ``scoped_org_id`` -- see the test below, which names it directly.
+GATE_DECORATORS = frozenset({"has_permission", "org_scoped_list"})
+
+# The routes gated by ``org_scoped_list``. Filtering *is* the refusal there, so
+# a foreign organization gets an empty 200 instead of a 403, and the gate rides
+# along on the data query instead of issuing its own. Both consequences are
+# asserted below; this is the one place that lists the affected routes.
+FOLDED_GATE_ROUTES = frozenset(
+    {
+        "list_project_issues",
+        "list_project_alerts",
+    }
+)
 
 # get_organization's scopes -- the widest of the org-read routes.
 ORG_READ = frozenset({"org:read", "org:write", "org:admin"})
@@ -355,7 +381,13 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
     def test_no_route_reads_scoped_org_id_without_the_decorator(self):
         """The hard invariant: reaching for the resolved org id without having
         resolved it is a 500 waiting to happen, and the decorator is what
-        resolves it."""
+        resolves it.
+
+        ``has_permission`` by name, not ``GATE_DECORATORS``: ``scoped_org_id``
+        reads ``request.org_auth``, and ``org_scoped_list`` never sets it. A
+        folded-gate route that called ``scoped_org_id`` would raise
+        ``AttributeError``, so it must not be excused here.
+        """
         offenders = [
             f"{path}::{name}"
             for path, name, decorators, _params, source in self.routes()
@@ -371,9 +403,10 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         """A ledger, not a wall.
 
         A route that takes an ``organization_slug`` is addressing one
-        organization's data, so it should be gated. The apps below are not
-        ported yet -- they still carry their own membership filters. Shrink
-        this list as they land; a *new* name appearing in the diff is the
+        organization's data, so it should be gated -- by any decorator in
+        ``GATE_DECORATORS``, since a folded gate is still a gate. The apps below
+        are not ported yet -- they still carry their own membership filters.
+        Shrink this list as they land; a *new* name appearing in the diff is the
         regression this test is for.
         """
         expected_ungated = {
@@ -392,12 +425,41 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         ungated = {
             f"{path}::{name}"
             for path, name, decorators, params, _source in self.routes()
-            if "organization_slug" in params and "has_permission" not in decorators
+            if "organization_slug" in params
+            and not GATE_DECORATORS.intersection(decorators)
         }
         self.assertEqual(
             ungated,
             expected_ungated,
-            "an org-scoped route gained or lost its @has_permission",
+            "an org-scoped route gained or lost its gate decorator",
+        )
+
+    def test_the_gate_decorators_all_exist(self):
+        """``GATE_DECORATORS`` is matched against decorator names by string, so
+        a renamed decorator would silently stop counting as a gate and quietly
+        empty out the test above."""
+        for name in GATE_DECORATORS:
+            with self.subTest(decorator=name):
+                self.assertTrue(
+                    callable(getattr(permissions, name, None)),
+                    f"{name} is in GATE_DECORATORS but is not a callable in "
+                    "glitchtip.api.permissions",
+                )
+
+    def test_folded_gate_routes_use_the_folded_gate(self):
+        """``FOLDED_GATE_ROUTES`` drives an empty-200 allowance and a query-count
+        allowance further down. Pin it to the source so it cannot outlive the
+        decorator it describes."""
+        actual = {
+            name
+            for _path, name, decorators, _params, _source in self.routes()
+            if "org_scoped_list" in decorators
+        }
+        self.assertEqual(
+            actual,
+            set(FOLDED_GATE_ROUTES),
+            "a route gained or lost @org_scoped_list without FOLDED_GATE_ROUTES "
+            "being updated",
         )
 
     # ``queryset_utils`` is where ``actor_role`` is consumed rather than
@@ -459,11 +521,18 @@ class CrossOrgIsolationTestCase(GlitchTestCase):
     real object rather than an empty list -- an empty foreign fixture would
     pass even with the filtering removed.
 
-    The expected answer is now 403 and only 403. Under the old model a
+    A ``@has_permission`` route answers 403 and only 403. Under the old model a
     non-member fell through to a membership-scoped queryset and got 404, so
-    "refused" meant "403 or 404". ``resolve_org_auth`` refuses non-membership
-    before the view runs, so the vaguer assertion no longer describes the
-    system.
+    "refused" meant "403 or 404"; ``resolve_org_auth`` refuses non-membership
+    before the view runs, so that vaguer assertion no longer describes those
+    routes.
+
+    ``FOLDED_GATE_ROUTES`` are the exception, deliberately: ``org_scoped_list``
+    expresses membership as a term in the data query rather than as a check that
+    can raise, so a non-member is refused by receiving an empty 200. Isolation
+    still holds -- no foreign row is ever served -- but the caller cannot tell
+    "not yours" from "nothing here", so the status code stops carrying the
+    refusal. See ``test_foreign_org_is_refused``.
     """
 
     @classmethod
@@ -503,25 +572,50 @@ class CrossOrgIsolationTestCase(GlitchTestCase):
             "issue stats": ("api:issue_stats", [org], f"?groups={issue}"),
         }
         return {
-            label: reverse(name, args=args) + query
+            label: (reverse(name, args=args) + query, name.removeprefix("api:"))
             for label, (name, args, query) in routes.items()
         }
 
-    def test_foreign_org_is_refused_with_403(self):
-        for label, url in self.foreign_urls().items():
+    def test_foreign_org_is_refused(self):
+        """Refused, in whichever way the route's gate refuses.
+
+        ``@has_permission`` raises before the view body runs, so the answer is
+        403. ``@org_scoped_list`` has no separate refusal to raise -- the
+        membership test is a term in the data query -- so a non-member is
+        refused by getting nothing back, and the status stays 200. Which routes
+        those are is ``FOLDED_GATE_ROUTES``, pinned to the decorator in
+        ``DecoratorIsTheBoundaryTestCase``.
+
+        The empty body is not checked here; ``test_foreign_org_returns_no_rows``
+        below already checks it for every route, folded-gate or not, and that is
+        the assertion carrying the isolation guarantee for these two.
+        """
+        for label, (url, route) in self.foreign_urls().items():
             with self.subTest(route=label):
                 res = self.client.get(url)
-                self.assertEqual(
-                    res.status_code,
-                    403,
-                    f"{label} answered {res.status_code} for a foreign "
-                    "organization; the decorator should have refused it",
-                )
+                if route in FOLDED_GATE_ROUTES:
+                    self.assertEqual(
+                        res.status_code,
+                        200,
+                        f"{label} is gated by @org_scoped_list, which filters "
+                        f"rather than raises, so a foreign organization should "
+                        f"get an empty 200, not {res.status_code}. A 403 here "
+                        "means the route moved to @has_permission -- drop it "
+                        "from FOLDED_GATE_ROUTES.",
+                    )
+                else:
+                    self.assertEqual(
+                        res.status_code,
+                        403,
+                        f"{label} answered {res.status_code} for a foreign "
+                        "organization; the decorator should have refused it",
+                    )
 
     def test_foreign_org_returns_no_rows(self):
-        """The weaker property, kept as a second line of defence. If a route
-        ever answers 200 here, it must at least not hand over rows."""
-        for label, url in self.foreign_urls().items():
+        """The property that actually carries cross-org isolation, and the only
+        one the folded-gate routes have. Every route either refuses outright or
+        hands over nothing."""
+        for label, (url, _route) in self.foreign_urls().items():
             with self.subTest(route=label):
                 res = self.client.get(url)
                 if res.status_code != 200:
@@ -565,7 +659,10 @@ class ScopedQueryCountTestCase(GlitchTestCase):
 
     Two costs are tracked separately. ``auth_lookups`` counts queries that only
     touch the organization tables -- ``resolve_org_auth`` issues exactly one,
-    and any more is a view re-deriving what ``OrgAuth`` already handed it.
+    and any more is a view re-deriving what ``OrgAuth`` already handed it. A
+    ``FOLDED_GATE_ROUTES`` route issues none, because ``org_scoped_list`` puts
+    the check inside the data query; there the gate is counted as a
+    ``member_join`` instead.
     ``member_joins`` counts *data* queries dragged through
     ``organizations_ext_organizationuser``.
 
@@ -586,7 +683,7 @@ class ScopedQueryCountTestCase(GlitchTestCase):
         "list_project_keys": (2, 1, 0),
         "get_organization_issue": (2, 1, 1),
         "list_organization_issue_event": (2, 1, 0),
-        "list_project_issues": (2, 1, 1),
+        "list_project_issues": (1, 0, 1),
         "list_organization_user_reports": (2, 1, 0),
         "get_team": (3, 1, 2),
         "get_organization_member": (4, 1, 1),
@@ -672,12 +769,35 @@ class ScopedQueryCountTestCase(GlitchTestCase):
 
     def test_every_route_resolves_membership_exactly_once(self):
         """``resolve_org_auth`` is one query, and nothing caches it, so the
-        count is also the count of permission checks. More than one means a
-        view is re-deriving what ``OrgAuth`` already told it."""
+        count is also the count of permission checks. More than one means a view
+        is re-deriving what ``OrgAuth`` already told it.
+
+        A ``FOLDED_GATE_ROUTES`` route resolves membership exactly once too --
+        it just does it inside the data query, as an EXISTS on a table the data
+        query was already touching, so it shows up as zero *separate* lookups
+        and one membership join. Zero is the point of that decorator; what is
+        forbidden either way is a second check.
+        """
         for label, url in self.urls().items():
             with self.subTest(route=label):
-                _, auth_lookups, _ = self.measure(url)
-                self.assertEqual(auth_lookups, 1)
+                _, auth_lookups, member_joins = self.measure(url)
+                if label in FOLDED_GATE_ROUTES:
+                    self.assertEqual(
+                        auth_lookups,
+                        0,
+                        f"{label} is gated by @org_scoped_list, whose whole "
+                        "purpose is to fold the check into the data query; a "
+                        "separate auth lookup means it is being resolved twice",
+                    )
+                    self.assertGreaterEqual(
+                        member_joins,
+                        1,
+                        f"{label} shows no membership table in its data query, "
+                        "so the folded gate is not there -- the route is "
+                        "returning rows with nothing checking membership",
+                    )
+                else:
+                    self.assertEqual(auth_lookups, 1)
 
 
 class TokenCeilingEndToEndTestCase(TestCase):
