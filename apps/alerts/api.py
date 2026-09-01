@@ -6,7 +6,7 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.projects.models import Project
-from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id
+from glitchtip.api.permissions import OrgAuthHttpRequest, has_permission, scoped_org_id, org_scoped_list
 
 from .constants import RecipientType
 from .models import AlertRecipient, ProjectAlert
@@ -44,15 +44,16 @@ def get_project_alert_queryset(org_id: int, project_slug: str):
     response=list[ProjectAlertSchema],
     by_alias=True,
 )
-@has_permission(["project:read", "project:write", "project:admin"])
-@paginate
+@org_scoped_list(["project:read", "project:write", "project:admin"] )
 async def list_project_alerts(
     request: OrgAuthHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,
 ):
-    return get_project_alert_queryset(scoped_org_id(request), project_slug)
+    return ProjectAlert.objects.filter(
+        project__slug=project_slug         
+    ).prefetch_related("alertrecipient_set")
 
 
 @router.post(

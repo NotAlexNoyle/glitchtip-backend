@@ -21,6 +21,7 @@ from glitchtip.api.permissions import (
     OrgAuthHttpRequest,
     has_permission,
     scoped_org_id,
+    org_scoped_list
 )
 
 from ..constants import EventStatus
@@ -426,8 +427,7 @@ async def update_issues(
     response=list[IssueSchema],
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
-@paginate
+@org_scoped_list(["event:read", "event:write", "event:admin"])
 async def list_project_issues(
     request: OrgAuthHttpRequest,
     response: HttpResponse,
@@ -436,12 +436,10 @@ async def list_project_issues(
     filters: Query[IssueFilters],
     sort: sort_options = "-last_seen",
 ):
-    organization_id = scoped_org_id(request)
-    qs = await get_queryset(
-        request.auth.user_id,
-        project_slug=project_slug,
-        org_id=organization_id,
-    )
+    org = request.org_scope.org_id_expr
+    # @org_scoped_list owns authorization; org is only ever a pruning hint here.
+    qs = await get_queryset(None, project_slug=project_slug, prune_org=org)
+    
     event_id: UUID | None = None
     if filters.query:
         try:
@@ -451,7 +449,7 @@ async def list_project_issues(
         if event_id is not None:
             request.matching_event_id = event_id
             response["X-Sentry-Direct-Hit"] = "1"
-    return filter_issue_list(qs, filters, sort, event_id, organization_id)
+    return filter_issue_list(qs, filters, sort, event_id, org)
 
 
 @router.get(

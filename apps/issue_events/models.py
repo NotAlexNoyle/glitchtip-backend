@@ -115,6 +115,7 @@ class Issue(SoftDeleteModel):
     culprit = models.CharField(max_length=1024, blank=True, null=True)
     title = models.CharField(max_length=255)
     metadata = models.JSONField()
+    org_field = 'project__organization_id'
 
     class Meta:
         base_manager_name = "objects"

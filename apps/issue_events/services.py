@@ -89,7 +89,17 @@ async def get_queryset(
     organization_slug: str | None = None,
     project_slug: str | None = None,
     org_id: int | None = None,
+    prune_org=None,
 ) -> QuerySet[Issue]:
+    """``org_id`` is authoritative: it both authorizes and prunes.
+
+    ``prune_org`` is an org id *expression* from a caller that has already
+    been authorized elsewhere -- ``@org_scoped_list`` applies its own gate and
+    org filter to whatever we return, so repeating it here would put a second
+    identical predicate in the WHERE clause. It carries no authority and is
+    used for nothing but the partition-pruning constraint below. Pass one or
+    the other, never both.
+    """
     qs = Issue.objects
     leaf_org_id: int | None = None
 
@@ -120,8 +130,9 @@ async def get_queryset(
     # queries prune the hash partitions instead of scanning all of them (the
     # leaf is joined on issue_id, which alone gives the planner no partition to
     # pick). Every non-deleted issue has a leaf row, so this never drops results.
-    if leaf_org_id is not None:
-        qs = qs.filter(index__organization_id=leaf_org_id)
+    prune = leaf_org_id if leaf_org_id is not None else prune_org
+    if prune is not None:
+        qs = qs.filter(index__organization_id=prune)
 
     return qs.annotate(
         num_comments=Count("comments", distinct=True),

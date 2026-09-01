@@ -20,6 +20,7 @@ class ProjectAlert(CreatedModel):
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE)
     timespan_minutes = models.PositiveSmallIntegerField(blank=True, null=True)
     quantity = models.PositiveSmallIntegerField(blank=True, null=True)
+    org_field = "project__organization_id"
     uptime = models.BooleanField(
         default=False, help_text="Send alert on any uptime monitor check failure"
     )
