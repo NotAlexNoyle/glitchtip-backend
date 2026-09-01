@@ -1,13 +1,83 @@
 from dataclasses import dataclass
 from functools import wraps
+from django.db.models import Exists, Subquery, QuerySet
+from django.core.exceptions import ImproperlyConfigured
 
 from ninja.errors import HttpError
+from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import ROLES, OrganizationUserRole
-from apps.organizations_ext.models import OrganizationUser
+from apps.organizations_ext.models import OrganizationUser, Organization
 
 from .authentication import Auth, AuthHttpRequest
-from .scopes import Scopes
+from .scopes import Scopes, SCOPES
+
+
+@dataclass(frozen=True)
+class OrgScope:
+    user_id: int
+    org_slug: str
+    required: frozenset[Scopes]
+    roles: tuple[int, ...]        # role values holding any required scope
+    org_id: int | None = None     # set only when already known for free
+
+    @property
+    def org_id_expr(self):
+        # An int when we know it, otherwise an UNCORRELATED scalar
+        # subquery. Never a join to organization from the data model --
+        # that measured ~14x slower. See "The slug" below.
+        if self.org_id is not None:
+            return self.org_id
+        return Subquery(
+            Organization.objects
+            .filter(slug=self.org_slug, is_deleted=False)
+            .values("id")[:1]
+        )
+
+    @property
+    def gate(self) -> Exists:
+        # No OuterRef. Deliberately UNCORRELATED, so Postgres evaluates
+        # this once as an InitPlan instead of once per row. Adding an
+        # OuterRef here looks more correct and silently makes it per-row.
+        qs = OrganizationUser.objects.filter(
+            user_id=self.user_id,
+            role__in=self.roles,
+            organization__slug=self.org_slug,   # slug and id must AGREE, so a
+            organization__is_deleted=False,     # stale resolved id fails CLOSED
+        )
+        if self.org_id is not None:
+            qs = qs.filter(organization_id=self.org_id)
+        return Exists(qs)
+
+    def apply(self, qs):
+        return qs.filter(self.gate, **{qs.model.org_field: self.org_id_expr})
+
+def org_scoped_list(scopes: list[Scopes]):
+    required = frozenset(scopes)
+    # Import time: which role ints hold at least one required scope.
+    roles = tuple(i for i, r in enumerate(ROLES) if required & r["scopes"])
+    if not roles:
+        raise ImproperlyConfigured(f"no role holds any of {sorted(required)}")
+
+    def decorator(view):
+        @wraps(view)                     # ninja reads the signature for path params
+        async def gated(request, **kwargs):
+            if request.auth.auth_type == "token" and not (
+                required & set(request.auth.token.get_scopes())
+            ):
+                raise HttpError(403, "Permission Denied.")
+
+            scope = OrgScope(request.auth.user_id, kwargs["organization_slug"],
+                             required, roles)
+            request.org_scope = scope               # set before the view runs
+            qs = await view(request, **kwargs)
+            if not isinstance(qs, QuerySet):
+                raise TypeError(f"{view.__qualname__} must return a QuerySet")
+            return scope.apply(qs)
+
+        return paginate(gated)
+
+    return decorator
 
 
 @dataclass
