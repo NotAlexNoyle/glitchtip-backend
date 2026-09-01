@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 
 from django.core.exceptions import ImproperlyConfigured
@@ -20,6 +20,17 @@ class OrgScope:
     required: frozenset[Scopes]
     roles: tuple[int, ...]  # role values holding any required scope
     org_id: int | None = None  # set only when already known for free
+
+    # Proof that the gate reached a query. ``org_scoped_list``/``_all`` apply the
+    # scope themselves so they never need this, but ``org_scoped`` hands the job
+    # to the view, and a view that forgets is an ungated route that still looks
+    # gated to the invariant test. Mutating a frozen dataclass needs the
+    # documented escape hatch; the alternative is losing the check.
+    _applied: bool = field(default=False, compare=False, repr=False)
+
+    @property
+    def applied(self) -> bool:
+        return self._applied
 
     @property
     def org_id_expr(self):
@@ -50,34 +61,122 @@ class OrgScope:
         return Exists(qs)
 
     def apply(self, qs):
+        object.__setattr__(self, "_applied", True)
         return qs.filter(self.gate, **{qs.model.org_field: self.org_id_expr})
 
 
-def org_scoped_list(scopes: list[Scopes]):
+def _resolve_roles(scopes: list[Scopes]) -> tuple[frozenset[Scopes], tuple[int, ...]]:
+    """Import time: which role ints hold at least one required scope."""
     required = frozenset(scopes)
-    # Import time: which role ints hold at least one required scope.
     roles = tuple(i for i, r in enumerate(ROLES) if required & r["scopes"])
     if not roles:
         raise ImproperlyConfigured(f"no role holds any of {sorted(required)}")
+    return required, roles
+
+
+def _enter_scope(request, required, roles, kwargs) -> OrgScope:
+    """Token ceiling, then the scope the view will be gated by."""
+    if request.auth.auth_type == "token" and not (
+        required & set(request.auth.token.get_scopes())
+    ):
+        raise HttpError(403, "Permission Denied.")
+
+    scope = OrgScope(request.auth.user_id, kwargs["organization_slug"], required, roles)
+    request.org_scope = scope  # set before the view runs
+    return scope
+
+
+def _org_gate(required: frozenset[Scopes], roles: tuple[int, ...], view):
+    """The gate, with nothing about response shape in it.
+
+    Checks the token, builds the ``OrgScope``, runs the view, and folds the
+    gate into whatever queryset the view hands back. What happens to that
+    queryset afterwards -- paginated, or evaluated whole -- is the caller's
+    business, and is the ONLY thing the wrappers below differ in.
+    """
+
+    @wraps(view)  # ninja reads the signature for path params
+    async def gated(request, **kwargs):
+        scope = _enter_scope(request, required, roles, kwargs)
+        qs = await view(request, **kwargs)
+        if not isinstance(qs, QuerySet):
+            raise TypeError(f"{view.__qualname__} must return a QuerySet")
+        return scope.apply(qs)
+
+    return gated
+
+
+def org_scoped_list(scopes: list[Scopes]):
+    """Folded gate on a paginated list route.
+
+    The paginator evaluates the page for us -- see ``org_scoped_all`` for why
+    that matters.
+    """
+    required, roles = _resolve_roles(scopes)
 
     def decorator(view):
-        @wraps(view)  # ninja reads the signature for path params
+        return paginate(_org_gate(required, roles, view))
+
+    return decorator
+
+
+def org_scoped_all(scopes: list[Scopes]):
+    """Folded gate on a list route that returns everything, unpaginated.
+
+    Identical to ``org_scoped_list`` but for the missing ``paginate``, plus one
+    consequence of dropping it: something has to evaluate the queryset. Our
+    paginator sets ``Output = None``, which switches off the branch in ninja's
+    ``_inject_pagination`` that would force evaluation, so today it is
+    ``apaginate_queryset`` alone that materializes the rows. With no paginator
+    in the stack there is nobody left to do it, and handing pydantic a lazy
+    queryset would iterate it synchronously inside the event loop --
+    ``SynchronousOnlyOperation``. So we evaluate here.
+    """
+    required, roles = _resolve_roles(scopes)
+
+    def decorator(view):
+        gated = _org_gate(required, roles, view)
+
+        @wraps(view)
+        async def evaluated(request, **kwargs):
+            return [obj async for obj in await gated(request, **kwargs)]
+
+        return evaluated
+
+    return decorator
+
+
+def org_scoped(scopes: list[Scopes]):
+    """Folded gate for a view whose response is not one queryset.
+
+    An aggregate, a bulk mutation, or a route that resolves a single object
+    returns computed data rather than a queryset, so there is nothing for the
+    decorator to fold the gate into. This variant only builds the scope; the
+    view must call ``request.org_scope.apply(qs)`` itself on the queryset that
+    decides which rows it may touch.
+
+    That moves the gate out of the decorator, which is exactly what
+    ``DecoratorIsTheBoundaryTestCase`` relies on not happening, so the promise
+    is enforced at runtime instead: a view that returns without ever applying
+    the scope raises rather than serving. The check is not a substitute for
+    reading the view -- applying the scope to the wrong queryset still passes --
+    but it does catch the gate being dropped entirely.
+    """
+    required, roles = _resolve_roles(scopes)
+
+    def decorator(view):
+        @wraps(view)
         async def gated(request, **kwargs):
-            if request.auth.auth_type == "token" and not (
-                required & set(request.auth.token.get_scopes())
-            ):
-                raise HttpError(403, "Permission Denied.")
+            scope = _enter_scope(request, required, roles, kwargs)
+            result = await view(request, **kwargs)
+            if not scope.applied:
+                raise ImproperlyConfigured(
+                    f"{view.__qualname__} is @org_scoped but never called "
+                    "request.org_scope.apply() -- nothing authorized it"
+                )
+            return result
 
-            scope = OrgScope(
-                request.auth.user_id, kwargs["organization_slug"], required, roles
-            )
-            request.org_scope = scope  # set before the view runs
-            qs = await view(request, **kwargs)
-            if not isinstance(qs, QuerySet):
-                raise TypeError(f"{view.__qualname__} must return a QuerySet")
-            return scope.apply(qs)
-
-        return paginate(gated)
+        return gated
 
     return decorator
 
@@ -95,6 +194,18 @@ class OrgAuthHttpRequest(AuthHttpRequest):
     """A request that has passed @has_permission, so org_auth is resolved."""
 
     org_auth: OrgAuth
+
+
+class OrgScopedHttpRequest(AuthHttpRequest):
+    """A request under a folded gate, so org_scope is set and org_auth is not.
+
+    The folded gate never resolves an ``OrganizationUser`` row, so there is no
+    role, no scope set, and no org id as an int -- only ``org_scope``, whose
+    ``org_id_expr`` is usable in a filter and nowhere else. Routes that need any
+    of the rest want ``@has_permission`` and ``OrgAuthHttpRequest``.
+    """
+
+    org_scope: OrgScope
 
 
 @dataclass

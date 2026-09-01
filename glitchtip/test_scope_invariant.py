@@ -51,19 +51,23 @@ import pathlib
 import re
 
 from asgiref.sync import sync_to_async
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.db.models import IntegerField
+from django.http import HttpRequest
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from model_bakery import baker
 
+from apps.issue_events.models import Issue
 from apps.organizations_ext.constants import OrganizationUserRole
 from glitchtip.api import permissions
 from glitchtip.api.authentication import Auth
 from glitchtip.api.permissions import (
     OrgAuth,
     OrgAuthError,
+    org_scoped,
     resolve_org_auth,
     scoped_org_id,
 )
@@ -80,22 +84,57 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # what they leave behind.
 #
 # ``has_permission`` resolves an ``OrgAuth`` before the view body runs and
-# raises 403 when the caller is not a member. ``org_scoped_list`` instead folds
-# the membership test into the data query as an uncorrelated EXISTS: it costs no
+# raises 403 when the caller is not a member. The folded gates instead fold the
+# membership test into the data query as an uncorrelated EXISTS: it costs no
 # separate auth lookup, and it refuses by returning nothing rather than by
 # raising. Only ``has_permission`` produces an ``OrgAuth``, so only it can
 # satisfy ``scoped_org_id`` -- see the test below, which names it directly.
-GATE_DECORATORS = frozenset({"has_permission", "org_scoped_list"})
+#
+# The three folded variants differ only in what they do with the queryset, not
+# in what they check: ``org_scoped_list`` paginates it, ``org_scoped_all``
+# evaluates it whole, and ``org_scoped`` hands the applying to the view because
+# the response is not one queryset. That last one is the weak link -- the gate
+# is no longer in the decorator -- so it carries a runtime tripwire instead;
+# see ``FoldedGateAppliesTheScopeTestCase``.
+FOLDED_GATE_DECORATORS = frozenset({"org_scoped_list", "org_scoped_all", "org_scoped"})
+GATE_DECORATORS = frozenset({"has_permission"}) | FOLDED_GATE_DECORATORS
 
-# The routes gated by ``org_scoped_list``. Filtering *is* the refusal there, so
-# a foreign organization gets an empty 200 instead of a 403, and the gate rides
-# along on the data query instead of issuing its own. Both consequences are
-# asserted below; this is the one place that lists the affected routes.
-FOLDED_GATE_ROUTES = frozenset(
+# The folded routes that resolve a single object, where "no rows" has to
+# become a status code because there is no empty object to return. 404 is that
+# code, so on these -- and only these -- a non-member is refused with 404 rather
+# than with the 403 ``resolve_org_auth`` would have raised. The gate cannot tell
+# "not a member" from "no such issue" (both are zero rows), and the message that
+# distinguished them is gone with it. Deliberate, and revisitable: resolving the
+# reason on the miss path alone would restore the 403 at the cost of a second
+# query only when refusing. Until then this set is the record of where the
+# status code stopped carrying the reason.
+FOLDED_DETAIL_ROUTES = frozenset(
     {
-        "list_project_issues",
-        "list_project_alerts",
+        "get_organization_issue",
+        "update_organization_issue",
+        "delete_organization_issue",
+        "list_organization_issue_tags",
+        "list_organization_issue_commits",
     }
+)
+
+# The routes gated by one of ``FOLDED_GATE_DECORATORS``. Filtering *is* the
+# refusal there, so a foreign organization gets an empty 200 instead of a 403,
+# and the gate rides along on the data query instead of issuing its own. Both
+# consequences are asserted below; this is the one place that lists the
+# affected routes.
+FOLDED_GATE_ROUTES = (
+    frozenset(
+        {
+            "list_project_issues",
+            "list_project_alerts",
+            "list_issues",
+            "issue_stats",
+            "delete_issues",
+            "update_issues",
+        }
+    )
+    | FOLDED_DETAIL_ROUTES
 )
 
 # get_organization's scopes -- the widest of the org-read routes.
@@ -314,6 +353,7 @@ class OrgAuthIsProofOfAuthorizationTestCase(TestCase):
         with self.assertRaises(AttributeError):
             scoped_org_id(FakeRequest())
 
+
 class DecoratorIsTheBoundaryTestCase(TestCase):
     """``@has_permission`` is the only thing that sets ``request.org_auth``.
 
@@ -453,12 +493,12 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         actual = {
             name
             for _path, name, decorators, _params, _source in self.routes()
-            if "org_scoped_list" in decorators
+            if FOLDED_GATE_DECORATORS.intersection(decorators)
         }
         self.assertEqual(
             actual,
             set(FOLDED_GATE_ROUTES),
-            "a route gained or lost @org_scoped_list without FOLDED_GATE_ROUTES "
+            "a route gained or lost a folded gate without FOLDED_GATE_ROUTES "
             "being updated",
         )
 
@@ -580,11 +620,12 @@ class CrossOrgIsolationTestCase(GlitchTestCase):
         """Refused, in whichever way the route's gate refuses.
 
         ``@has_permission`` raises before the view body runs, so the answer is
-        403. ``@org_scoped_list`` has no separate refusal to raise -- the
-        membership test is a term in the data query -- so a non-member is
-        refused by getting nothing back, and the status stays 200. Which routes
-        those are is ``FOLDED_GATE_ROUTES``, pinned to the decorator in
-        ``DecoratorIsTheBoundaryTestCase``.
+        403. A folded gate has no separate refusal to raise -- the membership
+        test is a term in the data query -- so a non-member is refused by
+        getting nothing back. On a collection that is an empty 200; on a route
+        resolving a single object there is no empty object, so it is a 404. The
+        three sets are ``FOLDED_DETAIL_ROUTES`` and ``FOLDED_GATE_ROUTES``,
+        both pinned to the decorators in ``DecoratorIsTheBoundaryTestCase``.
 
         The empty body is not checked here; ``test_foreign_org_returns_no_rows``
         below already checks it for every route, folded-gate or not, and that is
@@ -593,11 +634,19 @@ class CrossOrgIsolationTestCase(GlitchTestCase):
         for label, (url, route) in self.foreign_urls().items():
             with self.subTest(route=label):
                 res = self.client.get(url)
-                if route in FOLDED_GATE_ROUTES:
+                if route in FOLDED_DETAIL_ROUTES:
+                    self.assertEqual(
+                        res.status_code,
+                        404,
+                        f"{label} resolves one object under a folded gate, so "
+                        f"a foreign organization should get 404, not "
+                        f"{res.status_code}. See FOLDED_DETAIL_ROUTES.",
+                    )
+                elif route in FOLDED_GATE_ROUTES:
                     self.assertEqual(
                         res.status_code,
                         200,
-                        f"{label} is gated by @org_scoped_list, which filters "
+                        f"{label} is gated by a folded gate, which filters "
                         f"rather than raises, so a foreign organization should "
                         f"get an empty 200, not {res.status_code}. A 403 here "
                         "means the route moved to @has_permission -- drop it "
@@ -675,13 +724,13 @@ class ScopedQueryCountTestCase(GlitchTestCase):
 
     # route -> (total queries, auth lookups, membership joins on data queries)
     EXPECTED: dict[str, tuple[int, int, int]] = {
-        "list_issues": (2, 1, 1),
+        "list_issues": (1, 0, 1),
         "list_organization_projects": (3, 1, 1),
         "list_teams": (3, 1, 2),
         "list_organization_members": (3, 1, 1),
         "get_project": (2, 1, 1),
         "list_project_keys": (2, 1, 0),
-        "get_organization_issue": (2, 1, 1),
+        "get_organization_issue": (1, 0, 1),
         "list_organization_issue_event": (2, 1, 0),
         "list_project_issues": (1, 0, 1),
         "list_organization_user_reports": (2, 1, 0),
@@ -785,7 +834,7 @@ class ScopedQueryCountTestCase(GlitchTestCase):
                     self.assertEqual(
                         auth_lookups,
                         0,
-                        f"{label} is gated by @org_scoped_list, whose whole "
+                        f"{label} is gated by a folded gate, whose whole "
                         "purpose is to fold the check into the data query; a "
                         "separate auth lookup means it is being resolved twice",
                     )
@@ -817,6 +866,11 @@ class TokenCeilingEndToEndTestCase(TestCase):
         cls.member = baker.make("users.user")
         cls.member_ou = cls.org.add_user(cls.member, OrganizationUserRole.MEMBER)
         cls.stranger = baker.make("users.user")
+        # A visible row, so a 200 on a folded-gate route means "the gate passed"
+        # rather than "the gate refused me quietly" -- the two are the same
+        # status code there, and an empty fixture cannot tell them apart.
+        cls.project = baker.make("projects.Project", organization=cls.org)
+        cls.issue = baker.make("issue_events.Issue", project=cls.project)
 
     def token(self, user, scopes):
         token = baker.make("api_tokens.APIToken", user=user)
@@ -857,11 +911,20 @@ class TokenCeilingEndToEndTestCase(TestCase):
         self.assertEqual(res.status_code, 204)
 
     def test_member_token_keeps_scopes_within_its_role(self):
-        """The ceiling caps, it does not revoke."""
+        """The ceiling caps, it does not revoke.
+
+        ``list_issues`` is folded, so 200 alone would also be how it refuses.
+        The row is the assertion that carries the meaning here.
+        """
         token = self.member_token(["event:read", "org:admin"])
         url = reverse("api:list_issues", args=[self.org.slug])
         res = self.client.get(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
         self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            [row["id"] for row in res.json()],
+            [str(self.issue.id)],
+            "event:read survived the ceiling, so the issue should be visible",
+        )
 
     def test_fully_scoped_token_of_a_non_member_is_refused(self):
         """Membership gates the token, not just its scopes.
@@ -872,27 +935,44 @@ class TokenCeilingEndToEndTestCase(TestCase):
         at the boundary.
         """
         token = self.token(self.stranger, list(SCOPES))
-        url = reverse("api:list_issues", args=[self.org.slug])
+        url = reverse("api:list_organization_members", args=[self.org.slug])
         res = self.client.get(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
         self.assertEqual(res.status_code, 403)
 
-    def test_a_non_member_token_is_refused_on_a_specific_issue(self):
-        """Same statement one level down, on a route that names an object.
+    def test_fully_scoped_token_of_a_non_member_gets_nothing_when_folded(self):
+        """The same statement on a folded gate, which cannot raise.
 
-        The refusal has to come from the decorator rather than from an empty
-        queryset, otherwise removing a view's membership filter -- which is
-        what the port does -- turns this into a leak.
+        A stranger holding every scope in the system still sees no rows,
+        because the EXISTS in the data query is the membership test. The status
+        code stops carrying the refusal, so the body has to.
+        """
+        token = self.token(self.stranger, list(SCOPES))
+        url = reverse("api:list_issues", args=[self.org.slug])
+        res = self.client.get(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), [], "a non-member token saw issues")
+
+    def test_a_non_member_token_is_refused_on_a_specific_issue(self):
+        """Same statement one level down, on routes that name an object.
+
+        What must hold is that the row is never served. Which code says so
+        depends on the gate: ``list_organization_comments`` is still
+        ``@has_permission`` and refuses with 403, while
+        ``get_organization_issue`` is folded and refuses with 404 -- see
+        ``FOLDED_DETAIL_ROUTES``. Both are refusals; neither returns the issue.
         """
         their_issue = baker.make("issue_events.Issue")
         token = self.token(self.stranger, ["event:read", "event:admin"])
-        for name, args in (
+        for name, args, expected in (
             (
                 "api:get_organization_issue",
                 [their_issue.project.organization.slug, their_issue.id],
+                404,
             ),
             (
                 "api:list_organization_comments",
                 [their_issue.project.organization.slug, their_issue.id],
+                403,
             ),
         ):
             with self.subTest(route=name):
@@ -900,4 +980,126 @@ class TokenCeilingEndToEndTestCase(TestCase):
                     reverse(name, args=args),
                     HTTP_AUTHORIZATION=f"Bearer {token.token}",
                 )
-                self.assertEqual(res.status_code, 403)
+                self.assertEqual(res.status_code, expected)
+
+
+@org_scoped(["event:read", "event:write", "event:admin"])
+async def _forgetful_view(request, organization_slug: str):
+    """A view that carries the gate decorator and never applies the gate."""
+    return [issue async for issue in Issue.objects.all()]
+
+
+@org_scoped(["event:read", "event:write", "event:admin"])
+async def _diligent_view(request, organization_slug: str):
+    return [issue async for issue in request.org_scope.apply(Issue.objects.all())]
+
+
+class FoldedGateAppliesTheScopeTestCase(TestCase):
+    """``@org_scoped`` moves the gate out of the decorator, so something has to
+    hold the view to its end of the bargain.
+
+    ``org_scoped_list`` and ``org_scoped_all`` apply the scope themselves, so a
+    route carrying either cannot be ungated. ``org_scoped`` cannot make that
+    promise -- an aggregate or a bulk mutation has several queries and no single
+    one to fold into, so the view applies the scope. A view that forgets is a
+    route that serves every organization's rows while still passing
+    ``test_org_scoped_routes_are_gated``, which reads decorator names.
+
+    So the decorator checks afterwards and refuses to return. This is a
+    tripwire, not a proof: applying the scope to the wrong queryset, or to one
+    the response does not come from, still passes. It catches the gate being
+    dropped, which is the failure that a reviewer scanning decorators would
+    also miss.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.mine = make_org_fixture()
+        cls.theirs = make_org_fixture()
+
+    def request_for(self, fixture):
+        request = HttpRequest()
+        request.auth = Auth(fixture["user"].id, "session")
+        return request
+
+    async def test_a_view_that_never_applies_the_scope_raises(self):
+        with self.assertRaises(ImproperlyConfigured) as caught:
+            await _forgetful_view(
+                self.request_for(self.mine),
+                organization_slug=self.mine["org"].slug,
+            )
+        self.assertIn("never called", str(caught.exception))
+
+    async def test_a_view_that_applies_the_scope_is_let_through(self):
+        rows = await _diligent_view(
+            self.request_for(self.mine), organization_slug=self.mine["org"].slug
+        )
+        self.assertEqual([i.id for i in rows], [self.mine["issue"].id])
+
+    async def test_the_applied_scope_still_excludes_a_foreign_org(self):
+        """The tripwire must not be the only thing the gate does."""
+        rows = await _diligent_view(
+            self.request_for(self.mine), organization_slug=self.theirs["org"].slug
+        )
+        self.assertEqual(rows, [])
+
+
+class FoldedGateMutationsAreNoOpsTestCase(GlitchTestCase):
+    """A folded gate on a *mutation* refuses by changing nothing.
+
+    ``CrossOrgIsolationTestCase`` walks GET routes, so it cannot reach these
+    two. They are the uncomfortable case for the folded gate: a non-member gets
+    200 and a success-shaped body from a bulk delete, which reads as "done".
+    Nothing was done, and that is the only thing making the empty-200 refusal
+    acceptable here, so it is asserted rather than assumed.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.mine = make_org_fixture()
+        cls.theirs = make_org_fixture()
+        cls.user = cls.mine["user"]
+
+    def setUp(self):
+        self.client.force_login(self.user)
+
+    def foreign_issue(self):
+        return Issue.objects.get(id=self.theirs["issue"].id)
+
+    def test_a_foreign_bulk_delete_deletes_nothing(self):
+        url = reverse("api:delete_issues", args=[self.theirs["org"].slug])
+        res = self.client.delete(url + "?id=" + str(self.theirs["issue"].id))
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(
+            self.foreign_issue().is_deleted,
+            "a non-member's bulk delete reached another organization's issue",
+        )
+
+    def test_a_foreign_bulk_update_updates_nothing(self):
+        url = reverse("api:update_issues", args=[self.theirs["org"].slug])
+        before = self.foreign_issue().index.status
+        res = self.client.put(
+            url + "?id=" + str(self.theirs["issue"].id),
+            data={"status": "resolved"},
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            self.foreign_issue().index.status,
+            before,
+            "a non-member's bulk update changed another organization's issue",
+        )
+
+    def test_the_same_calls_work_inside_my_own_organization(self):
+        """Guard against the two above passing because the routes are broken."""
+        mine = self.mine["issue"]
+        url = reverse("api:delete_issues", args=[self.mine["org"].slug])
+        res = self.client.delete(url + "?id=" + str(mine.id))
+        self.assertEqual(res.status_code, 200)
+        # The route flags the issue and enqueues the reaper, which runs inline
+        # under the test task backend, so the row is gone rather than flagged.
+        self.assertFalse(
+            Issue.objects.filter(id=mine.id).exists(),
+            "the same call inside my own organization did nothing either, so "
+            "the two tests above prove nothing",
+        )
