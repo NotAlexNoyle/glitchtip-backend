@@ -10,6 +10,7 @@ from apps.organizations_ext.constants import ROLES, OrganizationUserRole
 from apps.organizations_ext.models import Organization, OrganizationUser
 
 from .authentication import Auth, AuthHttpRequest
+from .org_ids import aresolve_org_id
 from .scopes import Scopes
 
 
@@ -19,7 +20,9 @@ class OrgScope:
     org_slug: str
     required: frozenset[Scopes]
     roles: tuple[int, ...]  # role values holding any required scope
-    org_id: int | None = None  # set only when already known for free
+    # Resolved from the slug by org_ids.aresolve_org_id; None only when no
+    # organization has that slug, which the subquery fallback handles.
+    org_id: int | None = None
 
     # Proof that the gate reached a query. ``org_scoped_list``/``_all`` apply the
     # scope themselves so they never need this, but ``org_scoped`` hands the job
@@ -74,14 +77,24 @@ def _resolve_roles(scopes: list[Scopes]) -> tuple[frozenset[Scopes], tuple[int, 
     return required, roles
 
 
-def _enter_scope(request, required, roles, kwargs) -> OrgScope:
+async def _enter_scope(request, required, roles, kwargs) -> OrgScope:
     """Token ceiling, then the scope the view will be gated by."""
     if request.auth.auth_type == "token" and not (
         required & set(request.auth.token.get_scopes())
     ):
         raise HttpError(403, "Permission Denied.")
 
-    scope = OrgScope(request.auth.user_id, kwargs["organization_slug"], required, roles)
+    # Warm, this is free; cold, it is one indexed probe per slug per worker.
+    # It buys plan-time partition pruning on the nested RANGE -> HASH tables,
+    # which a subquery cannot give us. See glitchtip/api/org_ids.py.
+    slug = kwargs["organization_slug"]
+    scope = OrgScope(
+        request.auth.user_id,
+        slug,
+        required,
+        roles,
+        org_id=await aresolve_org_id(slug),
+    )
     request.org_scope = scope  # set before the view runs
     return scope
 
@@ -97,7 +110,7 @@ def _org_gate(required: frozenset[Scopes], roles: tuple[int, ...], view):
 
     @wraps(view)  # ninja reads the signature for path params
     async def gated(request, **kwargs):
-        scope = _enter_scope(request, required, roles, kwargs)
+        scope = await _enter_scope(request, required, roles, kwargs)
         qs = await view(request, **kwargs)
         if not isinstance(qs, QuerySet):
             raise TypeError(f"{view.__qualname__} must return a QuerySet")
@@ -167,7 +180,7 @@ def org_scoped(scopes: list[Scopes]):
     def decorator(view):
         @wraps(view)
         async def gated(request, **kwargs):
-            scope = _enter_scope(request, required, roles, kwargs)
+            scope = await _enter_scope(request, required, roles, kwargs)
             result = await view(request, **kwargs)
             if not scope.applied:
                 raise ImproperlyConfigured(
