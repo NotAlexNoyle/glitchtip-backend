@@ -519,7 +519,7 @@ class OverageConfigIn(CamelSchema):
     cap_cents: int = 0
 
 
-async def get_overage_price() -> StripePrice | None:
+async def _get_overage_price() -> StripePrice | None:
     """The live metered overage price, or None if the account has none.
 
     This lookup is the feature gate: overage billing is offered exactly when an
@@ -578,7 +578,7 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
     return {
         "enabled": org.metered_billing_enabled,
         "eligible": eligible,
-        "configured": await get_overage_price() is not None,
+        "configured": await _get_overage_price() is not None,
         "active": overage_active(org),
         "cap_cents": org.overage_spend_cap_cents,
         "cap_units": cap_units,
@@ -635,7 +635,7 @@ async def configure_overage(
                 },
                 status=400,
             )
-        overage_price = await get_overage_price()
+        overage_price = await _get_overage_price()
         if overage_price is None:
             return JsonResponse(
                 {"detail": "Overage billing is not configured on this server."},

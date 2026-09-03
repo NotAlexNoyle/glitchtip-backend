@@ -31,7 +31,6 @@ from apps.projects.api import router as projects_router
 from apps.releases.api import router as releases_router
 from apps.sourcecode.api import router as sourcecode_router
 from apps.stats.api import router as stats_router
-from apps.stripe.api import get_overage_price
 from apps.stripe.api import router as stripe_router
 from apps.stripe.models import SupportLicense
 from apps.teams.api import router as teams_router
@@ -243,10 +242,6 @@ async def get_settings(request: HttpRequest):
         # is usable. When absent, the frontend hides those and offers copy-link
         # invites instead.
         enabled_features.append("email")
-    # Deliberately uncached; the webhooks that archive the price apply
-    # immediately.
-    if settings.BILLING_ENABLED and await get_overage_price() is not None:
-        enabled_features.append("overage")
 
     # Legacy env wins; fall back to the SupportLicense singleton.
     if settings.BILLING_ENABLED or settings.I_PAID_FOR_GLITCHTIP:

@@ -30,8 +30,6 @@ class SettingsTestCase(TestCase):
     def setUp(self):
         self.url = reverse("api:get_settings")
 
-    # Pinned to the self-hosted default: billing adds an overage-price lookup.
-    @override_settings(BILLING_ENABLED=False)
     def test_settings(self):
         with self.assertNumQueries(1):
             res = self.client.get(self.url)  # Check that no auth is necessary
@@ -54,27 +52,6 @@ class SettingsTestCase(TestCase):
     def test_legacy_i_paid_env_var_still_overrides(self):
         res = self.client.get(self.url)
         self.assertTrue(res.json()["iPaidForGlitchTip"])
-
-    @override_settings(BILLING_ENABLED=True)
-    def test_overage_feature_tracks_live_price(self):
-        self.assertNotIn("overage", self.client.get(self.url).json()["enabledFeatures"])
-        product = baker.make("stripe.StripeProduct", is_overage=True)
-        price = baker.make(
-            "stripe.StripePrice", product=product, price=0, is_metered=True
-        )
-        self.assertIn("overage", self.client.get(self.url).json()["enabledFeatures"])
-        # Archiving applies on the next call; the lookup is deliberately uncached.
-        price.active = False
-        price.save(update_fields=["active"])
-        self.assertNotIn("overage", self.client.get(self.url).json()["enabledFeatures"])
-
-    @override_settings(BILLING_ENABLED=False)
-    def test_overage_feature_absent_and_queryless_when_billing_disabled(self):
-        product = baker.make("stripe.StripeProduct", is_overage=True)
-        baker.make("stripe.StripePrice", product=product, price=0, is_metered=True)
-        with self.assertNumQueries(1):
-            res = self.client.get(self.url)
-        self.assertNotIn("overage", res.json()["enabledFeatures"])
 
     async def test_settings_oidc(self):
         social_app = await baker.amake(
