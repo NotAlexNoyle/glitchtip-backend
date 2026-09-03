@@ -47,6 +47,7 @@ obtained without an authorization check.
 """
 
 import ast
+import inspect
 import pathlib
 import re
 
@@ -68,7 +69,7 @@ from glitchtip.api.org_ids import aresolve_org_id
 from glitchtip.api.permissions import (
     OrgAuth,
     OrgAuthError,
-    org_scoped,
+    org_scoped_qs,
     resolve_org_auth,
     scoped_org_id,
 )
@@ -91,14 +92,31 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # raising. Only ``has_permission`` produces an ``OrgAuth``, so only it can
 # satisfy ``scoped_org_id`` -- see the test below, which names it directly.
 #
-# The three folded variants differ only in what they do with the queryset, not
-# in what they check: ``org_scoped_list`` paginates it, ``org_scoped_all``
-# evaluates it whole, and ``org_scoped`` hands the applying to the view because
-# the response is not one queryset. That last one is the weak link -- the gate
-# is no longer in the decorator -- so it carries a runtime tripwire instead;
-# see ``FoldedGateAppliesTheScopeTestCase``.
-FOLDED_GATE_DECORATORS = frozenset({"org_scoped_list", "org_scoped_all", "org_scoped"})
+# The three folded variants differ only in which direction the queryset moves
+# and what becomes of it, not in what they check. ``org_scoped_list`` and
+# ``org_scoped_all`` take one out of the view and fold the gate into it on the
+# way -- paginating it, or evaluating it whole. ``org_scoped_qs`` folds on the
+# way IN instead, because a route that needs rows mid-body has nothing left to
+# fold into by the time it returns; it hands the view an already-gated queryset
+# as ``qs``. In every case the gate is in the decorator, so a gated route cannot
+# be ungated -- see ``InjectedQuerysetIsTheGateTestCase``.
+FOLDED_GATE_DECORATORS = frozenset(
+    {"org_scoped_list", "org_scoped_all", "org_scoped_qs"}
+)
 GATE_DECORATORS = frozenset({"has_permission"}) | FOLDED_GATE_DECORATORS
+
+# ``@org_scoped_qs`` routes that touch a manager directly *after* the gated
+# queryset has already chosen the rows they may act on, and only ever keyed on
+# ids that came back through it: ``update_issues`` writes through to the
+# IssueIndex / IssueHash / IssueEvent leaves, ``issue_stats`` reads
+# IssueAggregate rows for the issues the gate returned. The scope is inherited
+# through those ids, so it is not re-applied.
+#
+# Anywhere else, a ``.objects`` in an injected route body is the view ignoring
+# the queryset it was handed and building its own ungated one. Adding a name
+# here is claiming the manager access is downstream of the gate -- check that
+# the ids really did come from ``qs`` before you do.
+INJECTED_ROUTES_WITH_FOLLOWUP_QUERIES = frozenset({"update_issues", "issue_stats"})
 
 # The folded routes that resolve a single object, where "no rows" has to
 # become a status code because there is no empty object to return. 404 is that
@@ -438,6 +456,43 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
             offenders,
             [],
             "route(s) read scoped_org_id() with no @has_permission to set it",
+        )
+
+    def test_injected_routes_take_the_queryset_they_are_handed(self):
+        """``@org_scoped_qs`` gates the queryset it passes in, so the parameter
+        it passes it through is not optional -- a route without one is a wiring
+        mistake. The decorator refuses at import too; this states it where a
+        reviewer reading the invariants will see it."""
+        offenders = [
+            f"{path}::{name}"
+            for path, name, decorators, params, _source in self.routes()
+            if "org_scoped_qs" in decorators and "qs" not in params
+        ]
+        self.assertEqual(
+            offenders, [], "@org_scoped_qs route(s) declare no `qs` parameter"
+        )
+
+    def test_injected_routes_do_not_reach_past_the_gated_queryset(self):
+        """The one failure injection leaves open: a view handed a gated queryset
+        that ignores it and goes back to the manager for an ungated one.
+
+        That is a ``.objects`` in a route body, which is greppable in a way the
+        old "did you remember to call apply()" never was -- applying the scope
+        to the wrong queryset looked identical to applying it to the right one.
+        ``INJECTED_ROUTES_WITH_FOLLOWUP_QUERIES`` records where manager access
+        is deliberate and why.
+        """
+        offenders = [
+            f"{path}::{name}"
+            for path, name, decorators, _params, source in self.routes()
+            if "org_scoped_qs" in decorators
+            and ".objects" in source
+            and name not in INJECTED_ROUTES_WITH_FOLLOWUP_QUERIES
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "injected route(s) build their own queryset instead of using `qs`",
         )
 
     def test_org_scoped_routes_are_gated(self):
@@ -991,33 +1046,29 @@ class TokenCeilingEndToEndTestCase(TestCase):
                 self.assertEqual(res.status_code, expected)
 
 
-@org_scoped(["event:read", "event:write", "event:admin"])
-async def _forgetful_view(request, organization_slug: str):
-    """A view that carries the gate decorator and never applies the gate."""
-    return [issue async for issue in Issue.objects.all()]
+async def _ungated_source(request, **kwargs):
+    """The base queryset a route declares. Nothing here authorizes anything."""
+    return Issue.objects.all()
 
 
-@org_scoped(["event:read", "event:write", "event:admin"])
-async def _diligent_view(request, organization_slug: str):
-    return [issue async for issue in request.org_scope.apply(Issue.objects.all())]
+@org_scoped_qs(["event:read", "event:write", "event:admin"], _ungated_source)
+async def _injected_view(request, qs, organization_slug: str):
+    return [issue async for issue in qs]
 
 
-class FoldedGateAppliesTheScopeTestCase(TestCase):
-    """``@org_scoped`` moves the gate out of the decorator, so something has to
-    hold the view to its end of the bargain.
+class InjectedQuerysetIsTheGateTestCase(TestCase):
+    """``@org_scoped_qs`` gates by handing the view an already-gated queryset.
 
-    ``org_scoped_list`` and ``org_scoped_all`` apply the scope themselves, so a
-    route carrying either cannot be ungated. ``org_scoped`` cannot make that
-    promise -- an aggregate or a bulk mutation has several queries and no single
-    one to fold into, so the view applies the scope. A view that forgets is a
-    route that serves every organization's rows while still passing
-    ``test_org_scoped_routes_are_gated``, which reads decorator names.
+    Its predecessor ``@org_scoped`` built the scope and asked the view to call
+    ``request.org_scope.apply()`` on the right queryset, then checked afterwards
+    that *something* had been applied. That could only ever be a tripwire: it
+    caught the gate being dropped entirely, not the gate being applied to a
+    queryset the response did not come from.
 
-    So the decorator checks afterwards and refuses to return. This is a
-    tripwire, not a proof: applying the scope to the wrong queryset, or to one
-    the response does not come from, still passes. It catches the gate being
-    dropped, which is the failure that a reviewer scanning decorators would
-    also miss.
+    Folding on the way in removes the question. The base queryset below is
+    deliberately ``Issue.objects.all()`` -- wide open, no membership filter, no
+    organization filter -- so anything these tests do not see is the decorator's
+    doing and nothing else.
     """
 
     @classmethod
@@ -1030,26 +1081,36 @@ class FoldedGateAppliesTheScopeTestCase(TestCase):
         request.auth = Auth(fixture["user"].id, "session")
         return request
 
-    async def test_a_view_that_never_applies_the_scope_raises(self):
-        with self.assertRaises(ImproperlyConfigured) as caught:
-            await _forgetful_view(
-                self.request_for(self.mine),
-                organization_slug=self.mine["org"].slug,
-            )
-        self.assertIn("never called", str(caught.exception))
-
-    async def test_a_view_that_applies_the_scope_is_let_through(self):
-        rows = await _diligent_view(
+    async def test_the_view_receives_a_gated_queryset(self):
+        rows = await _injected_view(
             self.request_for(self.mine), organization_slug=self.mine["org"].slug
         )
         self.assertEqual([i.id for i in rows], [self.mine["issue"].id])
 
-    async def test_the_applied_scope_still_excludes_a_foreign_org(self):
-        """The tripwire must not be the only thing the gate does."""
-        rows = await _diligent_view(
+    async def test_a_foreign_org_reaches_nothing(self):
+        rows = await _injected_view(
             self.request_for(self.mine), organization_slug=self.theirs["org"].slug
         )
         self.assertEqual(rows, [])
+
+    def test_a_view_without_a_qs_parameter_is_refused_at_decoration(self):
+        """The gate has nowhere to put the queryset, so this cannot be wired up
+        wrong quietly -- it fails at import, before the route is ever served."""
+        with self.assertRaises(ImproperlyConfigured) as caught:
+
+            @org_scoped_qs(["event:read"], _ungated_source)
+            async def _no_qs(request, organization_slug: str):  # pragma: no cover
+                return []
+
+        self.assertIn("takes no `qs`", str(caught.exception))
+
+    def test_qs_is_hidden_from_the_signature_ninja_reads(self):
+        """``qs`` is supplied by the decorator, so ninja must not see it and try
+        to bind it as a query parameter. ``@wraps`` leaves a ``__wrapped__``
+        that ``inspect.signature`` follows back to the undecorated view, so this
+        only holds while the decorator sets ``__signature__`` itself."""
+        params = list(inspect.signature(_injected_view).parameters)
+        self.assertEqual(params, ["request", "organization_slug"])
 
 
 class FoldedGateMutationsAreNoOpsTestCase(GlitchTestCase):

@@ -18,8 +18,8 @@ from apps.releases.schema import CommitSchema
 from apps.teams.models import Team
 from glitchtip.api.permissions import (
     OrgScopedHttpRequest,
-    org_scoped,
     org_scoped_list,
+    org_scoped_qs,
 )
 
 from ..constants import EventStatus
@@ -41,6 +41,25 @@ from ..tasks import delete_issue_task, update_issues_task
 from . import router
 
 EventStatusEnum = StrEnum("EventStatusEnum", EventStatus.labels)
+
+
+# The base querysets ``@org_scoped_qs`` folds the gate into. They are the one
+# place a route's reachable rows are stated, which is why they live here rather
+# than inline: the decorator gates whatever comes back, so anything these two
+# return is what the view is allowed to touch and nothing else.
+#
+# ``prune_org`` carries no authority -- the gate the decorator folds in is the
+# authorization. It is the partition-pruning hint only; see services.get_queryset.
+async def issue_qs(request: OrgScopedHttpRequest, **kwargs) -> QuerySet[Issue]:
+    return await get_queryset(None, prune_org=request.org_scope.org_id_expr)
+
+
+async def issue_stats_qs(
+    request: OrgScopedHttpRequest, filters, **kwargs
+) -> QuerySet[Issue]:
+    # Deliberately not get_queryset: the stats route wants the bare rows for the
+    # ids it was asked about, not the list route's joins and annotations.
+    return Issue.objects.filter(id__in=filters.groups)
 
 
 class StatusDetailsSchema(Schema):
@@ -148,12 +167,13 @@ async def _aggregate_tags(issue: Issue, key: str | None):
     response=IssueDetailSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"])
+@org_scoped_qs(["event:read", "event:write", "event:admin"], issue_qs)
 async def get_organization_issue(
-    request: OrgScopedHttpRequest, organization_slug: str, issue_id: int
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
+    organization_slug: str,
+    issue_id: int,
 ):
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     qs = qs.annotate(
         user_report_count=Count("userreport", distinct=True),
     )
@@ -168,12 +188,13 @@ async def get_organization_issue(
     response=list[CommitSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"])
+@org_scoped_qs(["event:read", "event:write", "event:admin"], issue_qs)
 async def list_organization_issue_commits(
-    request: OrgScopedHttpRequest, organization_slug: str, issue_id: int
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
+    organization_slug: str,
+    issue_id: int,
 ):
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     try:
         issue = await qs.select_related("first_release").filter(id=issue_id).aget()
     except Issue.DoesNotExist:
@@ -187,12 +208,13 @@ async def list_organization_issue_commits(
     "/organizations/{slug:organization_slug}/issues/{int:issue_id}/",
     response={204: None},
 )
-@org_scoped(["event:write", "event:admin"])
+@org_scoped_qs(["event:write", "event:admin"], issue_qs)
 async def delete_organization_issue(
-    request: OrgScopedHttpRequest, organization_slug: str, issue_id: int
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
+    organization_slug: str,
+    issue_id: int,
 ):
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     result = await qs.filter(id=issue_id).aupdate(is_deleted=True)
     if not result:
         raise Http404()
@@ -205,15 +227,14 @@ async def delete_organization_issue(
     response=IssueDetailSchema,
     by_alias=True,
 )
-@org_scoped(["event:write", "event:admin"])
+@org_scoped_qs(["event:write", "event:admin"], issue_qs)
 async def update_organization_issue(
     request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
     organization_slug: str,
     issue_id: int,
     payload: UpdateIssueSchema,
 ):
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     return await update_issue_status(qs, issue_id, payload)
 
 
@@ -312,14 +333,13 @@ async def list_issues(
 @router.delete(
     "organizations/{slug:organization_slug}/issues/", response=UpdateIssueSchema
 )
-@org_scoped(["event:write", "event:admin"])
+@org_scoped_qs(["event:write", "event:admin"], issue_qs)
 async def delete_issues(
     request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
     organization_slug: str,
     filters: Query[IssueFilters],
 ):
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     qs = filter_issue_list(qs, filters)
     await qs.aupdate(is_deleted=True)
     issue_ids = [
@@ -333,16 +353,15 @@ async def delete_issues(
 @router.put(
     "organizations/{slug:organization_slug}/issues/", response=UpdateIssueSchema
 )
-@org_scoped(["event:write", "event:admin"])
+@org_scoped_qs(["event:write", "event:admin"], issue_qs)
 async def update_issues(
     request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
     organization_slug: str,
     filters: Query[IssueFilters],
     payload: UpdateIssueSchema,
 ):
     user_id = request.auth.user_id
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     qs = filter_issue_list(qs, filters)
 
     # Freeze the set of issues to update to avoid race conditions with new
@@ -465,15 +484,14 @@ async def list_project_issues(
     response=list[IssueTagSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"])
+@org_scoped_qs(["event:read", "event:write", "event:admin"], issue_qs)
 async def list_organization_issue_tags(
     request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
     organization_slug: str,
     issue_id: int,
     key: str | None = None,
 ):
-    scope = request.org_scope
-    qs = scope.apply(await get_queryset(None, prune_org=scope.org_id_expr))
     try:
         issue = await qs.filter(id=issue_id).aget()
     except Issue.DoesNotExist:
@@ -496,9 +514,10 @@ class IssueStatsFilters(Schema):
 # This endpoint previously returned issue data with no scope check at all. Its
 # queryset is membership-filtered, so it was not a data leak, but a token with
 # no event scope could read it.
-@org_scoped(["event:read", "event:write", "event:admin"])
+@org_scoped_qs(["event:read", "event:write", "event:admin"], issue_stats_qs)
 async def issue_stats(
     request: OrgScopedHttpRequest,
+    qs: QuerySet[Issue],
     organization_slug: str,
     filters: Query[IssueStatsFilters],
 ):
@@ -508,12 +527,10 @@ async def issue_stats(
     This endpoint returns data for the last 24 hours, formatted as a series of
     [timestamp, count] pairs.
     """
-    # apply() supplies both the membership gate and the organization filter
-    # this used to spell out; the follow-up queries are keyed on issue ids that
-    # came back from it, so they inherit the scope.
-    issues_qs = request.org_scope.apply(
-        Issue.objects.filter(id__in=filters.groups)
-    ).select_related("index")[:200]  # Sanity limit; leaf for count/last_seen
+    # The gate the decorator folded in supplies both the membership check and
+    # the organization filter this used to spell out; the follow-up queries are
+    # keyed on issue ids that came back from it, so they inherit the scope.
+    issues_qs = qs.select_related("index")[:200]  # Sanity limit; leaf for count
 
     issue_list = [issue async for issue in issues_qs]
     issue_ids = [issue.id for issue in issue_list]

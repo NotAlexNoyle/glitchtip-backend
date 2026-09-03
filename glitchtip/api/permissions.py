@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field
+import inspect
+from dataclasses import dataclass
 from functools import wraps
 
 from django.core.exceptions import ImproperlyConfigured
@@ -23,17 +24,6 @@ class OrgScope:
     # Resolved from the slug by org_ids.aresolve_org_id; None only when no
     # organization has that slug, which the subquery fallback handles.
     org_id: int | None = None
-
-    # Proof that the gate reached a query. ``org_scoped_list``/``_all`` apply the
-    # scope themselves so they never need this, but ``org_scoped`` hands the job
-    # to the view, and a view that forgets is an ungated route that still looks
-    # gated to the invariant test. Mutating a frozen dataclass needs the
-    # documented escape hatch; the alternative is losing the check.
-    _applied: bool = field(default=False, compare=False, repr=False)
-
-    @property
-    def applied(self) -> bool:
-        return self._applied
 
     @property
     def org_id_expr(self):
@@ -64,7 +54,6 @@ class OrgScope:
         return Exists(qs)
 
     def apply(self, qs):
-        object.__setattr__(self, "_applied", True)
         return qs.filter(self.gate, **{qs.model.org_field: self.org_id_expr})
 
 
@@ -79,7 +68,7 @@ def _resolve_roles(scopes: list[Scopes]) -> tuple[frozenset[Scopes], tuple[int, 
 
 async def _enter_scope(request, required, roles, kwargs) -> OrgScope:
     """Token ceiling, then the scope the view will be gated by."""
-    if request.auth.auth_type == 'token':
+    if request.auth.auth_type == "token":
         effective = required & set(request.auth.token.get_scopes())
         if not effective:
             raise HttpError(403, "Permission Denied.")
@@ -160,36 +149,54 @@ def org_scoped_all(scopes: list[Scopes]):
     return decorator
 
 
-def org_scoped(scopes: list[Scopes]):
+def org_scoped_qs(scopes: list[Scopes], queryset):
     """Folded gate for a view whose response is not one queryset.
 
     An aggregate, a bulk mutation, or a route that resolves a single object
-    returns computed data rather than a queryset, so there is nothing for the
-    decorator to fold the gate into. This variant only builds the scope; the
-    view must call ``request.org_scope.apply(qs)`` itself on the queryset that
-    decides which rows it may touch.
+    needs *rows* in the middle of its body, so by the time it returns there is
+    nothing left for ``_org_gate`` to fold into. A decorator wraps -- it runs
+    before the view and after it, never in the middle -- so the only way to
+    gate these is to fold on the way IN rather than on the way out.
 
-    That moves the gate out of the decorator, which is exactly what
-    ``DecoratorIsTheBoundaryTestCase`` relies on not happening, so the promise
-    is enforced at runtime instead: a view that returns without ever applying
-    the scope raises rather than serving. The check is not a substitute for
-    reading the view -- applying the scope to the wrong queryset still passes --
-    but it does catch the gate being dropped entirely.
+    ``queryset`` is an async ``(request, **kwargs) -> QuerySet`` called once the
+    scope exists, with ninja's already-parsed parameters, so it can narrow by
+    ``filters`` or a path id. Whatever it returns is gated before the view sees
+    it and handed over as ``qs``.
+
+    The direction is the whole point. The view cannot forget to authorize,
+    because it is never handed anything unauthorized to work with -- where the
+    previous ``@org_scoped`` asked the view to remember a call and could only
+    check afterwards that it had. What remains is a view that ignores ``qs``
+    and reaches for a manager itself, which is a ``.objects`` sitting in a route
+    body; ``DecoratorIsTheBoundaryTestCase`` reads the source for exactly that.
     """
     required, roles = _resolve_roles(scopes)
 
     def decorator(view):
-        @wraps(view)
+        signature = inspect.signature(view)
+        if "qs" not in signature.parameters:
+            raise ImproperlyConfigured(
+                f"{view.__qualname__} is @org_scoped_qs but takes no `qs` "
+                "parameter -- there is nowhere to hand it the gated queryset"
+            )
+
+        @wraps(view)  # ninja reads the signature for path params
         async def gated(request, **kwargs):
             scope = await _enter_scope(request, required, roles, kwargs)
-            result = await view(request, **kwargs)
-            if not scope.applied:
-                raise ImproperlyConfigured(
-                    f"{view.__qualname__} is @org_scoped but never called "
-                    "request.org_scope.apply() -- nothing authorized it"
-                )
-            return result
+            return await view(
+                request, qs=scope.apply(await queryset(request, **kwargs)), **kwargs
+            )
 
+        # ninja builds the operation's parameters from the signature, and ``qs``
+        # is ours to supply -- it is not a query param and must not show up in
+        # the schema. ``@wraps`` leaves a ``__wrapped__`` that
+        # ``inspect.signature`` follows straight back to the undecorated view,
+        # so setting ``__signature__`` here is what stops that unwrap.
+        gated.__signature__ = signature.replace(
+            parameters=[
+                param for name, param in signature.parameters.items() if name != "qs"
+            ]
+        )
         return gated
 
     return decorator
