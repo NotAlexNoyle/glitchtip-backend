@@ -42,7 +42,12 @@ from .constants import (
 )
 from .exceptions import StripeError
 from .models import StripePrice, StripeProduct, StripeSubscription
-from .overage import cost_cents_for_units, overage_eligible, units_for_budget
+from .overage import (
+    cost_cents_for_units,
+    overage_active,
+    overage_eligible,
+    units_for_budget,
+)
 from .utils import compute_cycle, select_subscription_items, unix_to_datetime
 
 logger = logging.getLogger(__name__)
@@ -499,6 +504,7 @@ class OverageStatusSchema(CamelSchema):
     enabled: bool
     eligible: bool  # has an active paid subscription an overage item can attach to
     configured: bool  # an overage product/price is provisioned in Stripe
+    active: bool  # what the throttle task actually enforces
     cap_cents: int
     cap_units: int
     quota: int
@@ -513,7 +519,7 @@ class OverageConfigIn(CamelSchema):
     cap_cents: int = 0
 
 
-async def _get_overage_price() -> StripePrice | None:
+async def get_overage_price() -> StripePrice | None:
     """The live metered overage price, or None if the account has none.
 
     This lookup is the feature gate: overage billing is offered exactly when an
@@ -572,7 +578,8 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
     return {
         "enabled": org.metered_billing_enabled,
         "eligible": eligible,
-        "configured": await _get_overage_price() is not None,
+        "configured": await get_overage_price() is not None,
+        "active": overage_active(org),
         "cap_cents": org.overage_spend_cap_cents,
         "cap_units": cap_units,
         "quota": quota,
@@ -628,7 +635,7 @@ async def configure_overage(
                 },
                 status=400,
             )
-        overage_price = await _get_overage_price()
+        overage_price = await get_overage_price()
         if overage_price is None:
             return JsonResponse(
                 {"detail": "Overage billing is not configured on this server."},

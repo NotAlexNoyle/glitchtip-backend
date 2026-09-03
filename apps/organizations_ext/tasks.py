@@ -243,7 +243,7 @@ async def _check_and_update_throttle(org: Organization):
     total_event_count = 0
 
     if org.stripe_primary_subscription:
-        from apps.stripe.overage import overage_eligible, units_for_budget
+        from apps.stripe.overage import overage_active, units_for_budget
 
         sub = org.stripe_primary_subscription
         price = sub.price
@@ -261,18 +261,9 @@ async def _check_and_update_throttle(org: Organization):
             counts = await get_event_counts(org.id, start, end)
             total_event_count = counts.total_event_count
 
-            # Both flags are sticky DB state that outlives the plan that
-            # justified them: a downgrade to a free plan keeps the subscription
-            # active, and the primary-subscription pointer is only cleared
-            # asynchronously. Without the eligibility test here the API refuses
-            # to *enable* overage on such an org while this path keeps invoicing
-            # it. `select_related` on both callers keeps this DB-free.
-            if (
-                org.metered_billing_enabled
-                and sub.metered_item_id
-                and start
-                and overage_eligible(sub)
-            ):
+            # `start` is a period concern, not an eligibility one, so it stays
+            # outside the shared predicate.
+            if overage_active(org) and start:
                 # Paid overage: charge for usage above quota up to the spend cap,
                 # then resume the progressive ramp (no further charges).
                 cap_units = units_for_budget(org.overage_spend_cap_cents)

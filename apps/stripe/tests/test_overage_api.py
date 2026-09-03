@@ -70,7 +70,36 @@ class OverageAPITestCase(TestCase):
         self.assertFalse(body["enabled"])
         self.assertTrue(body["eligible"])
         self.assertTrue(body["configured"])
+        self.assertFalse(body["active"])
         self.assertEqual(body["quota"], QUOTA)
+
+    def test_active_mirrors_the_throttle_predicate(self):
+        """The metered item can vanish while enabled and eligible stay set."""
+        self.org.metered_billing_enabled = True
+        self.org.save(update_fields=["metered_billing_enabled"])
+        self.sub.metered_item_id = "si_1"
+        self.sub.save(update_fields=["metered_item_id"])
+        self.assertTrue(self._status().json()["active"])
+
+        self.sub.metered_item_id = ""
+        self.sub.save(update_fields=["metered_item_id"])
+        body = self._status().json()
+        self.assertTrue(body["enabled"])
+        self.assertTrue(body["eligible"])
+        self.assertFalse(body["active"])
+
+    def test_active_false_when_plan_ineligible(self):
+        self.org.metered_billing_enabled = True
+        self.org.save(update_fields=["metered_billing_enabled"])
+        self.sub.metered_item_id = "si_1"
+        self.sub.save(update_fields=["metered_item_id"])
+        self.price.price = 0
+        self.price.save(update_fields=["price"])
+
+        body = self._status().json()
+        self.assertTrue(body["enabled"])
+        self.assertFalse(body["eligible"])
+        self.assertFalse(body["active"])
 
     def test_archived_overage_product_is_not_configured(self):
         """Archiving the overage product in Stripe turns the feature off — this
