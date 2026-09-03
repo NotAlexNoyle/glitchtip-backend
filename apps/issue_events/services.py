@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from django.db.models import Count, F, FloatField, Q, Value
+from django.db.models import Count, F, FloatField, Q, Subquery, Value
 from django.db.models.expressions import ExpressionWrapper
 from django.db.models.functions import Extract, Log
 from django.db.models.query import QuerySet
@@ -89,17 +89,16 @@ async def get_queryset(
     organization_slug: str | None = None,
     project_slug: str | None = None,
     org_id: int | None = None,
-    prune_org=None,
+    prune_org: Subquery | None = None,
 ) -> QuerySet[Issue]:
     """``org_id`` is authoritative: it both authorizes and prunes.
 
-    ``prune_org`` is an org id *expression* from a caller that has already
-    been authorized elsewhere -- ``@org_scoped_list`` applies its own gate and
-    org filter to whatever we return, so repeating it here would put a second
-    identical predicate in the WHERE clause. It carries no authority and is
-    used for nothing but the partition-pruning constraint below. Pass one or
-    the other, never both.
+    ``prune_org`` is an org id expression from a caller already authorized by
+    a folded gate. It carries no authority and only prunes.
     """
+    if prune_org is not None and (org_id is not None or organization_slug):
+        raise ValueError("pass org_id/organization_slug or prune_org, never both")
+
     qs = Issue.objects
     leaf_org_id: int | None = None
 

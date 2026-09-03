@@ -81,51 +81,17 @@ ORG_TABLE = "organizations_ext_organization"
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# The decorators that gate an org-scoped route. Both are gates; they differ in
-# what they leave behind.
-#
-# ``has_permission`` resolves an ``OrgAuth`` before the view body runs and
-# raises 403 when the caller is not a member. The folded gates instead fold the
-# membership test into the data query as an uncorrelated EXISTS: it costs no
-# separate auth lookup, and it refuses by returning nothing rather than by
-# raising. Only ``has_permission`` produces an ``OrgAuth``, so only it can
-# satisfy ``scoped_org_id`` -- see the test below, which names it directly.
-#
-# The three folded variants differ only in which direction the queryset moves
-# and what becomes of it, not in what they check. ``org_scoped_list`` and
-# ``org_scoped_all`` take one out of the view and fold the gate into it on the
-# way -- paginating it, or evaluating it whole. ``org_scoped_qs`` folds on the
-# way IN instead, because a route that needs rows mid-body has nothing left to
-# fold into by the time it returns; it hands the view an already-gated queryset
-# as ``qs``. In every case the gate is in the decorator, so a gated route cannot
-# be ungated -- see ``InjectedQuerysetIsTheGateTestCase``.
-FOLDED_GATE_DECORATORS = frozenset(
-    {"org_scoped_list", "org_scoped_all", "org_scoped_qs"}
-)
+# Only ``has_permission`` produces an ``OrgAuth``, so only it can satisfy
+# ``scoped_org_id``. The folded gates refuse by returning no rows instead.
+FOLDED_GATE_DECORATORS = frozenset({"org_scoped_list", "org_scoped_qs"})
 GATE_DECORATORS = frozenset({"has_permission"}) | FOLDED_GATE_DECORATORS
 
-# ``@org_scoped_qs`` routes that touch a manager directly *after* the gated
-# queryset has already chosen the rows they may act on, and only ever keyed on
-# ids that came back through it: ``update_issues`` writes through to the
-# IssueIndex / IssueHash / IssueEvent leaves, ``issue_stats`` reads
-# IssueAggregate rows for the issues the gate returned. The scope is inherited
-# through those ids, so it is not re-applied.
-#
-# Anywhere else, a ``.objects`` in an injected route body is the view ignoring
-# the queryset it was handed and building its own ungated one. Adding a name
-# here is claiming the manager access is downstream of the gate -- check that
-# the ids really did come from ``qs`` before you do.
+# Adding a name here claims the manager access is keyed on ids that came back
+# through ``qs``. Check that before you do.
 INJECTED_ROUTES_WITH_FOLLOWUP_QUERIES = frozenset({"update_issues", "issue_stats"})
 
-# The folded routes that resolve a single object, where "no rows" has to
-# become a status code because there is no empty object to return. 404 is that
-# code, so on these -- and only these -- a non-member is refused with 404 rather
-# than with the 403 ``resolve_org_auth`` would have raised. The gate cannot tell
-# "not a member" from "no such issue" (both are zero rows), and the message that
-# distinguished them is gone with it. Deliberate, and revisitable: resolving the
-# reason on the miss path alone would restore the 403 at the cost of a second
-# query only when refusing. Until then this set is the record of where the
-# status code stopped carrying the reason.
+# Single-object folded routes: zero rows has to become a status code, so a
+# non-member is refused with 404 rather than 403.
 FOLDED_DETAIL_ROUTES = frozenset(
     {
         "get_organization_issue",
@@ -136,11 +102,7 @@ FOLDED_DETAIL_ROUTES = frozenset(
     }
 )
 
-# The routes gated by one of ``FOLDED_GATE_DECORATORS``. Filtering *is* the
-# refusal there, so a foreign organization gets an empty 200 instead of a 403,
-# and the gate rides along on the data query instead of issuing its own. Both
-# consequences are asserted below; this is the one place that lists the
-# affected routes.
+# Filtering is the refusal, so a foreign organization gets an empty 200.
 FOLDED_GATE_ROUTES = (
     frozenset(
         {
@@ -155,9 +117,7 @@ FOLDED_GATE_ROUTES = (
     | FOLDED_DETAIL_ROUTES
 )
 
-# get_organization's scopes -- the widest of the org-read routes.
 ORG_READ = frozenset({"org:read", "org:write", "org:admin"})
-# delete_organization's scope -- owner only.
 ORG_ADMIN = frozenset({"org:admin"})
 
 
@@ -1106,13 +1066,10 @@ class InjectedQuerysetIsTheGateTestCase(TestCase):
 
 
 class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
-    """A folded gate on a *mutation* refuses out loud, and changes nothing.
+    """A folded gate on a *mutation* 404s, and changes nothing.
 
-    ``CrossOrgIsolationTestCase`` walks GET routes, so it cannot reach these
-    two. A gate that is only a filter cannot tell "denied" from "matched
-    nothing", and a bulk route that answers both with a success-shaped body
-    tells a non-member their delete was done. Both halves are asserted: the
-    status distinguishes the two, and nothing was written either way.
+    A success-shaped body would tell a non-member their delete was done. 404
+    rather than 403 so the refusal is indistinguishable from absence.
     """
 
     @classmethod
@@ -1130,7 +1087,7 @@ class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
     def test_a_foreign_bulk_delete_deletes_nothing(self):
         url = reverse("api:delete_issues", args=[self.theirs["org"].slug])
         res = self.client.delete(url + "?id=" + str(self.theirs["issue"].id))
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 404)
         self.assertFalse(
             self.foreign_issue().is_deleted,
             "a non-member's bulk delete reached another organization's issue",
@@ -1144,7 +1101,7 @@ class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
             data={"status": "resolved"},
             content_type="application/json",
         )
-        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.status_code, 404)
         self.assertEqual(
             self.foreign_issue().index.status,
             before,

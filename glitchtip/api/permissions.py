@@ -1,4 +1,5 @@
 import inspect
+import logging
 from dataclasses import dataclass
 from functools import wraps
 
@@ -12,6 +13,8 @@ from apps.organizations_ext.models import Organization, OrganizationUser
 
 from .authentication import Auth, AuthHttpRequest
 from .scopes import Scopes
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,7 +76,11 @@ async def _enter_scope(request, required, roles, kwargs) -> OrgScope:
     if request.auth.auth_type == "token":
         effective = required & set(request.auth.token.get_scopes())
         if not effective:
-            raise HttpError(403, "Permission Denied.")
+            raise HttpError(
+                403,
+                f"Permission denied. This endpoint requires one of {sorted(required)}; "
+                "your token grants none of them.",
+            )
         roles = tuple(i for i, r in enumerate(ROLES) if effective & r["scopes"])
 
     scope = OrgScope(request.auth.user_id, kwargs["organization_slug"], required, roles)
@@ -105,39 +112,14 @@ def _org_gate(required: frozenset[Scopes], roles: tuple[int, ...], view):
 def org_scoped_list(scopes: list[Scopes]):
     """Folded gate on a paginated list route.
 
-    The paginator evaluates the page for us -- see ``org_scoped_all`` for why
-    that matters.
+    An unpaginated variant would have to evaluate the queryset itself:
+    ``apaginate_queryset`` is what materializes the rows today, and handing
+    pydantic a lazy queryset iterates it in the event loop.
     """
     required, roles = _resolve_roles(scopes)
 
     def decorator(view):
         return paginate(_org_gate(required, roles, view))
-
-    return decorator
-
-
-def org_scoped_all(scopes: list[Scopes]):
-    """Folded gate on a list route that returns everything, unpaginated.
-
-    Identical to ``org_scoped_list`` but for the missing ``paginate``, plus one
-    consequence of dropping it: something has to evaluate the queryset. Our
-    paginator sets ``Output = None``, which switches off the branch in ninja's
-    ``_inject_pagination`` that would force evaluation, so today it is
-    ``apaginate_queryset`` alone that materializes the rows. With no paginator
-    in the stack there is nobody left to do it, and handing pydantic a lazy
-    queryset would iterate it synchronously inside the event loop --
-    ``SynchronousOnlyOperation``. So we evaluate here.
-    """
-    required, roles = _resolve_roles(scopes)
-
-    def decorator(view):
-        gated = _org_gate(required, roles, view)
-
-        @wraps(view)
-        async def evaluated(request, **kwargs):
-            return [obj async for obj in await gated(request, **kwargs)]
-
-        return evaluated
 
     return decorator
 
@@ -334,16 +316,22 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
 
 
 async def raise_for_denial(request: OrgScopedHttpRequest) -> None:
-    """Raise 403 if an empty result set means denial rather than no matches.
+    """404 when an empty result set means denial rather than no matches.
 
-    A folded gate is a filter, so the view cannot tell the two apart. A read can
-    serve an empty body either way; a mutation reporting success would be
-    claiming work it was refused. Only the empty path pays for this query.
+    404 rather than 403 so a refusal is indistinguishable from absence. The
+    reason is logged, never returned. Only the empty path pays for this query.
     """
     scope = request.org_scope
     result = await resolve_org_auth(request.auth, set(scope.required), scope.org_slug)
     if isinstance(result, OrgAuthError):
-        raise HttpError(403, resolve_403_message(result, scope.required))
+        logger.info(
+            "folded gate refused user=%s org=%s required=%s: %s",
+            request.auth.user_id,
+            scope.org_slug,
+            sorted(scope.required),
+            resolve_403_message(result, scope.required),
+        )
+        raise HttpError(404, "Not Found")
 
 
 """ 

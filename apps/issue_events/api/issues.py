@@ -48,9 +48,6 @@ EventStatusEnum = StrEnum("EventStatusEnum", EventStatus.labels)
 # place a route's reachable rows are stated, which is why they live here rather
 # than inline: the decorator gates whatever comes back, so anything these two
 # return is what the view is allowed to touch and nothing else.
-#
-# ``prune_org`` carries no authority -- the gate the decorator folds in is the
-# authorization. It is the partition-pruning hint only; see services.get_queryset.
 async def issue_qs(request: OrgScopedHttpRequest, **kwargs) -> QuerySet[Issue]:
     return await get_queryset(None, prune_org=request.org_scope.org_id_expr)
 
@@ -317,7 +314,6 @@ async def list_issues(
     sort: sort_options = "-last_seen",
 ):
     org = request.org_scope.org_id_expr
-    # @org_scoped_list owns authorization; org is only ever a pruning hint here.
     qs = (await get_queryset(None, prune_org=org)).filter(is_deleted=False)
     event_id: UUID | None = None
     if filters.query:
@@ -470,7 +466,6 @@ async def list_project_issues(
     sort: sort_options = "-last_seen",
 ):
     org = request.org_scope.org_id_expr
-    # @org_scoped_list owns authorization; org is only ever a pruning hint here.
     qs = await get_queryset(None, project_slug=project_slug, prune_org=org)
 
     event_id: UUID | None = None
