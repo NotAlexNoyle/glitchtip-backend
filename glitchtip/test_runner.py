@@ -10,18 +10,6 @@ class TimedTextTestResult(TextTestResult):
         self.clocks = {}
 
     def startTest(self, test):
-        # The slug -> org id map in glitchtip/api/org_ids.py is process state,
-        # so it outlives the per-test transaction rollback that removes the
-        # rows it describes. Two tests reusing one slug would otherwise have
-        # the second resolve to the first's (now absent) id, fail the gate,
-        # and return empty -- a confusing failure a long way from its cause.
-        # Every test goes through here, so this is the one place that covers
-        # all the base classes in glitchtip/test_utils/test_case.py.
-        # Imported here, not at module scope, because the runner is loaded
-        # before the app registry is ready.
-        from glitchtip.api import org_ids
-
-        org_ids.clear()
         self.clocks[test] = time()
         super(TextTestResult, self).startTest(test)
         if self.showAll:

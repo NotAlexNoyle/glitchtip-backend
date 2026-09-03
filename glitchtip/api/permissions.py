@@ -11,7 +11,6 @@ from apps.organizations_ext.constants import ROLES, OrganizationUserRole
 from apps.organizations_ext.models import Organization, OrganizationUser
 
 from .authentication import Auth, AuthHttpRequest
-from .org_ids import aresolve_org_id
 from .scopes import Scopes
 
 
@@ -21,17 +20,11 @@ class OrgScope:
     org_slug: str
     required: frozenset[Scopes]
     roles: tuple[int, ...]  # role values holding any required scope
-    # Resolved from the slug by org_ids.aresolve_org_id; None only when no
-    # organization has that slug, which the subquery fallback handles.
-    org_id: int | None = None
 
     @property
-    def org_id_expr(self):
-        # An int when we know it, otherwise an UNCORRELATED scalar
-        # subquery. Never a join to organization from the data model --
-        # that measured ~14x slower. See "The slug" below.
-        if self.org_id is not None:
-            return self.org_id
+    def org_id_expr(self) -> Subquery:
+        # An UNCORRELATED scalar subquery, never a join to organization from
+        # the data model -- that measured ~14x slower.
         return Subquery(
             Organization.objects.filter(slug=self.org_slug, is_deleted=False).values(
                 "id"
@@ -45,14 +38,12 @@ class OrgScope:
         # OuterRef here looks more correct and silently makes it per-row.
         qs = OrganizationUser.objects.filter(
             user_id=self.user_id,
-            organization__slug=self.org_slug,  # slug and id must AGREE, so a
-            organization__is_deleted=False,  # stale resolved id fails CLOSED
+            organization__slug=self.org_slug,
+            organization__is_deleted=False,
         )
         if len(self.roles) < len(ROLES):
             # A no-op on event:* routes, where every role qualifies.
             qs = qs.filter(role__in=self.roles)
-        if self.org_id is not None:
-            qs = qs.filter(organization_id=self.org_id)
         return Exists(qs)
 
     def apply(self, qs):
@@ -85,17 +76,7 @@ async def _enter_scope(request, required, roles, kwargs) -> OrgScope:
             raise HttpError(403, "Permission Denied.")
         roles = tuple(i for i, r in enumerate(ROLES) if effective & r["scopes"])
 
-    # Warm, this is free; cold, it is one indexed probe per slug per worker.
-    # It buys plan-time partition pruning on the nested RANGE -> HASH tables,
-    # which a subquery cannot give us. See glitchtip/api/org_ids.py.
-    slug = kwargs["organization_slug"]
-    scope = OrgScope(
-        request.auth.user_id,
-        slug,
-        required,
-        roles,
-        org_id=await aresolve_org_id(slug),
-    )
+    scope = OrgScope(request.auth.user_id, kwargs["organization_slug"], required, roles)
     request.org_scope = scope  # set before the view runs
     return scope
 

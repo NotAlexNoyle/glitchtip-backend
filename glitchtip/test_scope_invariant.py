@@ -51,7 +51,7 @@ import inspect
 import pathlib
 import re
 
-from asgiref.sync import async_to_sync, sync_to_async
+from asgiref.sync import sync_to_async
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.db.models import IntegerField
@@ -65,7 +65,6 @@ from apps.issue_events.models import Issue
 from apps.organizations_ext.constants import OrganizationUserRole
 from glitchtip.api import permissions
 from glitchtip.api.authentication import Auth
-from glitchtip.api.org_ids import aresolve_org_id
 from glitchtip.api.permissions import (
     OrgAuth,
     OrgAuthError,
@@ -801,13 +800,6 @@ class ScopedQueryCountTestCase(GlitchTestCase):
 
     def setUp(self):
         self.client.force_login(self.user)
-        # These numbers are the steady state, which is what production runs
-        # in: the slug -> org id map is a per-worker cache warmed by the first
-        # request naming a slug. The test runner clears it before every test,
-        # so warm it here rather than measuring one cold probe that no real
-        # request after the first would pay. Without this the folded-gate
-        # routes read as one auth lookup instead of zero.
-        async_to_sync(aresolve_org_id)(self.organization.slug)
 
     def measure(self, url):
         with CaptureQueriesContext(connection) as ctx:

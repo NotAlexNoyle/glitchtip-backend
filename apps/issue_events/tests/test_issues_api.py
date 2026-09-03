@@ -4,7 +4,6 @@ import re
 import uuid
 from timeit import default_timer as timer
 
-from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.postgres.search import SearchVector
 from django.db.models import Value
@@ -14,7 +13,6 @@ from freezegun import freeze_time
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
-from glitchtip.api.org_ids import aresolve_org_id
 from glitchtip.test_utils.issue import amake_issue, arefresh_issue
 from glitchtip.test_utils.test_case import (
     APIPermissionTestCase,
@@ -1620,11 +1618,6 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
         )
 
         url = self.get_url(issue.id)
-        # Steady state, which is what a worker serves after its first request
-        # for this slug: the slug -> org id map is warm, so the isolation
-        # filter carries an int and costs nothing. The runner clears the map
-        # per test, so warm it explicitly rather than measuring a cold probe.
-        async_to_sync(aresolve_org_id)(self.organization.slug)
         # The scoped issue fetch and the tag aggregation. The membership lookup
         # that used to be a third query is now an EXISTS inside the fetch.
         with self.assertNumQueries(2):
