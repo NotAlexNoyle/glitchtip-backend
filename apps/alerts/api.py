@@ -7,6 +7,7 @@ from apps.organizations_ext.constants import OrganizationUserRole
 from apps.projects.models import Project
 from glitchtip.api.permissions import (
     OrgAuthHttpRequest,
+    OrgScopedHttpRequest,
     has_permission,
     org_scoped_list,
     scoped_org_id,
@@ -50,7 +51,7 @@ def get_project_alert_queryset(org_id: int, project_slug: str):
 )
 @org_scoped_list(["project:read", "project:write", "project:admin"])
 async def list_project_alerts(
-    request: OrgAuthHttpRequest,
+    request: OrgScopedHttpRequest,
     response: HttpResponse,
     organization_slug: str,
     project_slug: str,

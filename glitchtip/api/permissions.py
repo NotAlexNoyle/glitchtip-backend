@@ -45,10 +45,12 @@ class OrgScope:
         # OuterRef here looks more correct and silently makes it per-row.
         qs = OrganizationUser.objects.filter(
             user_id=self.user_id,
-            role__in=self.roles,
             organization__slug=self.org_slug,  # slug and id must AGREE, so a
             organization__is_deleted=False,  # stale resolved id fails CLOSED
         )
+        if len(self.roles) < len(ROLES):
+            # A no-op on event:* routes, where every role qualifies.
+            qs = qs.filter(role__in=self.roles)
         if self.org_id is not None:
             qs = qs.filter(organization_id=self.org_id)
         return Exists(qs)
@@ -64,6 +66,15 @@ def _resolve_roles(scopes: list[Scopes]) -> tuple[frozenset[Scopes], tuple[int, 
     if not roles:
         raise ImproperlyConfigured(f"no role holds any of {sorted(required)}")
     return required, roles
+
+
+def _require_slug_param(view) -> None:
+    """Import time: a gated route must have a slug for the gate to scope to."""
+    if "organization_slug" not in inspect.signature(view).parameters:
+        raise ImproperlyConfigured(
+            f"{view.__qualname__} is org-scoped but takes no "
+            "`organization_slug` parameter -- the gate has nothing to scope to"
+        )
 
 
 async def _enter_scope(request, required, roles, kwargs) -> OrgScope:
@@ -97,6 +108,7 @@ def _org_gate(required: frozenset[Scopes], roles: tuple[int, ...], view):
     queryset afterwards -- paginated, or evaluated whole -- is the caller's
     business, and is the ONLY thing the wrappers below differ in.
     """
+    _require_slug_param(view)
 
     @wraps(view)  # ninja reads the signature for path params
     async def gated(request, **kwargs):
@@ -173,6 +185,7 @@ def org_scoped_qs(scopes: list[Scopes], queryset):
     required, roles = _resolve_roles(scopes)
 
     def decorator(view):
+        _require_slug_param(view)
         signature = inspect.signature(view)
         if "qs" not in signature.parameters:
             raise ImproperlyConfigured(
