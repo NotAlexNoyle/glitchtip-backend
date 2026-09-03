@@ -79,10 +79,11 @@ def _resolve_roles(scopes: list[Scopes]) -> tuple[frozenset[Scopes], tuple[int, 
 
 async def _enter_scope(request, required, roles, kwargs) -> OrgScope:
     """Token ceiling, then the scope the view will be gated by."""
-    if request.auth.auth_type == "token" and not (
-        required & set(request.auth.token.get_scopes())
-    ):
-        raise HttpError(403, "Permission Denied.")
+    if request.auth.auth_type == 'token':
+        effective = required & set(request.auth.token.get_scopes())
+        if not effective:
+            raise HttpError(403, "Permission Denied.")
+        roles = tuple(i for i, r in enumerate(ROLES) if effective & r["scopes"])
 
     # Warm, this is free; cold, it is one indexed probe per slug per worker.
     # It buys plan-time partition pruning on the nested RANGE -> HASH tables,
