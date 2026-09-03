@@ -1113,14 +1113,14 @@ class InjectedQuerysetIsTheGateTestCase(TestCase):
         self.assertEqual(params, ["request", "organization_slug"])
 
 
-class FoldedGateMutationsAreNoOpsTestCase(GlitchTestCase):
-    """A folded gate on a *mutation* refuses by changing nothing.
+class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
+    """A folded gate on a *mutation* refuses out loud, and changes nothing.
 
     ``CrossOrgIsolationTestCase`` walks GET routes, so it cannot reach these
-    two. They are the uncomfortable case for the folded gate: a non-member gets
-    200 and a success-shaped body from a bulk delete, which reads as "done".
-    Nothing was done, and that is the only thing making the empty-200 refusal
-    acceptable here, so it is asserted rather than assumed.
+    two. A gate that is only a filter cannot tell "denied" from "matched
+    nothing", and a bulk route that answers both with a success-shaped body
+    tells a non-member their delete was done. Both halves are asserted: the
+    status distinguishes the two, and nothing was written either way.
     """
 
     @classmethod
@@ -1138,7 +1138,7 @@ class FoldedGateMutationsAreNoOpsTestCase(GlitchTestCase):
     def test_a_foreign_bulk_delete_deletes_nothing(self):
         url = reverse("api:delete_issues", args=[self.theirs["org"].slug])
         res = self.client.delete(url + "?id=" + str(self.theirs["issue"].id))
-        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.status_code, 403)
         self.assertFalse(
             self.foreign_issue().is_deleted,
             "a non-member's bulk delete reached another organization's issue",
@@ -1152,7 +1152,7 @@ class FoldedGateMutationsAreNoOpsTestCase(GlitchTestCase):
             data={"status": "resolved"},
             content_type="application/json",
         )
-        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.status_code, 403)
         self.assertEqual(
             self.foreign_issue().index.status,
             before,

@@ -339,6 +339,19 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
     return f"Permission denied. Operation requires {needs}, you are a {you_are}"
 
 
+async def raise_for_denial(request: OrgScopedHttpRequest) -> None:
+    """Raise 403 if an empty result set means denial rather than no matches.
+
+    A folded gate is a filter, so the view cannot tell the two apart. A read can
+    serve an empty body either way; a mutation reporting success would be
+    claiming work it was refused. Only the empty path pays for this query.
+    """
+    scope = request.org_scope
+    result = await resolve_org_auth(request.auth, set(scope.required), scope.org_slug)
+    if isinstance(result, OrgAuthError):
+        raise HttpError(403, resolve_403_message(result, scope.required))
+
+
 """ 
 OrgAuth and Auth, after they exist, holds information that routes can use.
 These getters will expose this information to save views from re-deriving

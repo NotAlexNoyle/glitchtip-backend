@@ -20,6 +20,7 @@ from glitchtip.api.permissions import (
     OrgScopedHttpRequest,
     org_scoped_list,
     org_scoped_qs,
+    raise_for_denial,
 )
 
 from ..constants import EventStatus
@@ -341,12 +342,16 @@ async def delete_issues(
     filters: Query[IssueFilters],
 ):
     qs = filter_issue_list(qs, filters)
-    await qs.aupdate(is_deleted=True)
-    issue_ids = [
-        issue_id
-        async for issue_id in qs.filter(is_deleted=True).values_list("id", flat=True)
-    ]
-    await delete_issue_task.aenqueue(issue_ids)
+    if await qs.aupdate(is_deleted=True):
+        issue_ids = [
+            issue_id
+            async for issue_id in qs.filter(is_deleted=True).values_list(
+                "id", flat=True
+            )
+        ]
+        await delete_issue_task.aenqueue(issue_ids)
+    else:
+        await raise_for_denial(request)
     return {"status": "resolved"}
 
 
@@ -374,6 +379,7 @@ async def update_issues(
         qs.order_by("-id").values_list("id", "project__organization_id").afirst()
     )
     if row is None:
+        await raise_for_denial(request)
         return payload
     max_id, organization_id = row
 

@@ -927,6 +927,16 @@ class IssueAPITestCase(GlitchTestCase):
             index = await IssueIndex.objects.aget(issue_id=issue.pk)
             self.assertEqual(index.status, status_to_set)
 
+    async def test_bulk_mutations_succeed_when_nothing_matches(self):
+        """A member whose filter matches no rows is not denied."""
+        url = f"{self.list_url}?id=0"
+        res = await self.async_client.put(
+            url, {"status": "resolved"}, content_type="application/json"
+        )
+        self.assertEqual(res.status_code, 200, msg=res.content)
+        res = await self.async_client.delete(url)
+        self.assertEqual(res.status_code, 200, msg=res.content)
+
     async def test_bulk_delete_via_ids(self):
         """Bulk delete Issues with ids"""
         issues = await baker.amake(
