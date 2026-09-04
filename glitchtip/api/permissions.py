@@ -1,5 +1,4 @@
 import inspect
-import logging
 from dataclasses import dataclass
 from functools import wraps
 
@@ -10,11 +9,10 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import ROLES, OrganizationUserRole
 from apps.organizations_ext.models import Organization, OrganizationUser
+from glitchtip.base_models import OrgScopedModel
 
 from .authentication import Auth, AuthHttpRequest
 from .scopes import Scopes
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -50,7 +48,44 @@ class OrgScope:
         return Exists(qs)
 
     def apply(self, qs):
-        return qs.filter(self.gate, **{qs.model.org_field: self.org_id_expr})
+        model = qs.model
+        if not issubclass(model, OrgScopedModel):
+            raise ImproperlyConfigured(
+                f"{model._meta.label} is returned by a gated route but is not "
+                "an OrgScopedModel, so the gate cannot isolate it. Declare "
+                "org_field on it via OrgScopedModel."
+            )
+        return qs.filter(self.gate, **{model.org_field: self.org_id_expr})
+
+
+# Route-state declarations. Markers only -- they change no behavior. CI reads
+# them (RouteStateLedgerTestCase) so that every route is either gated, declared
+# with one of these, or public: three states, no undeclared fourth.
+
+
+def self_service(view):
+    """Identity is the scope. No organization in the path (``/users/{id}/``)."""
+    view.__route_state__ = "self_service"
+    return view
+
+
+def legacy_any_member(view):
+    """Membership only, deliberately -- there is no organization to scope to.
+
+    Never on a route with an organization in its path: those get a real scope.
+    """
+    view.__route_state__ = "legacy_any_member"
+    return view
+
+
+def gates_manually(view):
+    """Isolation is hand-written, so ORM injection cannot reach it.
+
+    Raw-SQL routes. Each one is a hole in the guarantee, which is why the count
+    is budgeted rather than merely recorded.
+    """
+    view.__route_state__ = "gates_manually"
+    return view
 
 
 def _resolve_roles(scopes: list[Scopes]) -> tuple[frozenset[Scopes], tuple[int, ...]]:
@@ -313,25 +348,6 @@ def resolve_403_message(err: OrgAuthError, required: set[Scopes]) -> str:
             f"organization: this requires {needs}, you are a {you_are}"
         )
     return f"Permission denied. Operation requires {needs}, you are a {you_are}"
-
-
-async def raise_for_denial(request: OrgScopedHttpRequest) -> None:
-    """404 when an empty result set means denial rather than no matches.
-
-    404 rather than 403 so a refusal is indistinguishable from absence. The
-    reason is logged, never returned. Only the empty path pays for this query.
-    """
-    scope = request.org_scope
-    result = await resolve_org_auth(request.auth, set(scope.required), scope.org_slug)
-    if isinstance(result, OrgAuthError):
-        logger.info(
-            "folded gate refused user=%s org=%s required=%s: %s",
-            request.auth.user_id,
-            scope.org_slug,
-            sorted(scope.required),
-            resolve_403_message(result, scope.required),
-        )
-        raise HttpError(404, "Not Found")
 
 
 """ 

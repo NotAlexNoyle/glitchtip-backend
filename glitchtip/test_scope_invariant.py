@@ -47,6 +47,7 @@ obtained without an authorization check.
 """
 
 import ast
+import collections
 import inspect
 import pathlib
 import re
@@ -68,11 +69,13 @@ from glitchtip.api.authentication import Auth
 from glitchtip.api.permissions import (
     OrgAuth,
     OrgAuthError,
+    OrgScope,
     org_scoped_qs,
     resolve_org_auth,
     scoped_org_id,
 )
 from glitchtip.api.scopes import SCOPES
+from glitchtip.base_models import ORG_SCOPED_MODELS
 from glitchtip.test_utils import generators  # noqa: F401
 from glitchtip.test_utils.test_case import GlitchTestCase
 
@@ -115,6 +118,87 @@ FOLDED_GATE_ROUTES = (
         }
     )
     | FOLDED_DETAIL_ROUTES
+)
+
+UNGATED_ORG_ROUTES = frozenset(
+    {
+        "apps/stripe/api.py::configure_overage",
+        "apps/stripe/api.py::create_stripe_session",
+        "apps/stripe/api.py::get_overage_status",
+        "apps/stripe/api.py::get_stripe_subscription",
+        "apps/stripe/api.py::stripe_billing_portal_session",
+        "apps/stripe/api.py::subscription_events_count_daily",
+        "apps/stripe/api.py::subscription_events_count_for_period",
+        # auth=None -- an external monitor POSTs this with a secret in the URL,
+        # so there is no session or token to resolve scopes from. This one can
+        # never be gated.
+        "apps/uptime/api.py::heartbeat_check",
+    }
+)
+
+# Route-state declarations, matched by decorator name like GATE_DECORATORS.
+STATE_DECORATORS = frozenset({"self_service", "legacy_any_member", "gates_manually"})
+
+# Markers may only get rarer. Both start at zero: nothing is declared yet, so
+# the first addition of either fails here and has to be argued for, which is
+# the point -- they are the guarantee leaking.
+LEGACY_ANY_MEMBER_BUDGET = 0
+GATES_MANUALLY_BUDGET = 0
+
+# Routes with neither a gate nor a state declaration -- the undeclared fourth
+# state, enumerated so it can only shrink. Public (``auth=None``) routes are
+# not here; the router call is their declaration.
+#
+# Roughly: ~19 self-service (users, api-tokens, recovery codes), 3 user-scoped
+# fan-out (list_organizations, create_organization, list_projects), 4 wizard,
+# 1 invite, 4 ingest/embed, and 9 stripe -- 7 of which take an
+# ``organization_slug`` and so need a real scope, not a marker.
+#
+# NOTE: a raw-SQL route can be gated and still hand-write its own isolation,
+# so it passes as declared here. logs, stats and uptime are known to; they
+# need @gates_manually once each has been read. That classification is not
+# something this ledger can find for you.
+UNDECLARED_ROUTES = frozenset(
+    {
+        "apps/api_tokens/api.py::create_api_token",
+        "apps/api_tokens/api.py::delete_api_token",
+        "apps/api_tokens/api.py::list_api_tokens",
+        "apps/event_ingest/api.py::event_security",
+        "apps/event_ingest/api.py::event_store",
+        "apps/event_ingest/embed_api.py::get_embed_error_page",
+        "apps/event_ingest/embed_api.py::submit_embed_error_page",
+        "apps/organizations_ext/api.py::accept_invite",
+        "apps/organizations_ext/api.py::create_organization",
+        "apps/organizations_ext/api.py::list_organizations",
+        "apps/projects/api.py::list_projects",
+        "apps/projects/api.py::update_user_notification_alerts",
+        "apps/projects/api.py::user_notification_alerts",
+        "apps/stripe/api.py::configure_overage",
+        "apps/stripe/api.py::create_stripe_session",
+        "apps/stripe/api.py::get_overage_status",
+        "apps/stripe/api.py::get_stripe_subscription",
+        "apps/stripe/api.py::list_stripe_products",
+        "apps/stripe/api.py::stripe_billing_portal_session",
+        "apps/stripe/api.py::stripe_create_subscription",
+        "apps/stripe/api.py::subscription_events_count_daily",
+        "apps/stripe/api.py::subscription_events_count_for_period",
+        "apps/users/api.py::create_email",
+        "apps/users/api.py::delete_email",
+        "apps/users/api.py::delete_user",
+        "apps/users/api.py::generate_recovery_codes",
+        "apps/users/api.py::get_notifications",
+        "apps/users/api.py::get_user",
+        "apps/users/api.py::list_emails",
+        "apps/users/api.py::list_users",
+        "apps/users/api.py::send_confirm_email",
+        "apps/users/api.py::set_email_as_primary",
+        "apps/users/api.py::set_recovery_codes",
+        "apps/users/api.py::update_notifications",
+        "apps/users/api.py::update_user",
+        "apps/wizard/api.py::setup_wizard_delete",
+        "apps/wizard/api.py::setup_wizard_hash",
+        "apps/wizard/api.py::setup_wizard_set_token",
+    }
 )
 
 ORG_READ = frozenset({"org:read", "org:write", "org:admin"})
@@ -355,7 +439,8 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         return names
 
     @staticmethod
-    def _is_route(fn: ast.AST) -> bool:
+    def _route_call(fn: ast.AST) -> ast.Call | None:
+        """The ``@router.*`` decorator itself, which carries ``auth=``."""
         for dec in fn.decorator_list:
             if not isinstance(dec, ast.Call):
                 continue
@@ -365,12 +450,12 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
                 and isinstance(func.value, ast.Name)
                 and func.value.id == "router"
             ):
-                return True
+                return dec
             if isinstance(func, ast.Name) and any(
                 isinstance(arg, ast.Name) and arg.id == "router" for arg in dec.args
             ):
-                return True
-        return False
+                return dec
+        return None
 
     @classmethod
     def routes(cls):
@@ -385,7 +470,8 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
             for fn in ast.walk(tree):
                 if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                if not cls._is_route(fn):
+                route_call = cls._route_call(fn)
+                if route_call is None:
                     continue
                 params = [a.arg for a in fn.args.args + fn.args.kwonlyargs]
                 yield (
@@ -394,6 +480,10 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
                     cls._decorator_names(fn),
                     params,
                     ast.unparse(fn),
+                    any(
+                        kw.arg == "auth" and ast.unparse(kw.value) == "None"
+                        for kw in route_call.keywords
+                    ),
                 )
 
     def test_no_route_reads_scoped_org_id_without_the_decorator(self):
@@ -408,7 +498,7 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         """
         offenders = [
             f"{path}::{name}"
-            for path, name, decorators, _params, source in self.routes()
+            for path, name, decorators, _params, source, _public in self.routes()
             if "scoped_org_id" in source and "has_permission" not in decorators
         ]
         self.assertEqual(
@@ -424,7 +514,7 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         reviewer reading the invariants will see it."""
         offenders = [
             f"{path}::{name}"
-            for path, name, decorators, params, _source in self.routes()
+            for path, name, decorators, params, _source, _public in self.routes()
             if "org_scoped_qs" in decorators and "qs" not in params
         ]
         self.assertEqual(
@@ -443,7 +533,7 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         """
         offenders = [
             f"{path}::{name}"
-            for path, name, decorators, _params, source in self.routes()
+            for path, name, decorators, _params, source, _public in self.routes()
             if "org_scoped_qs" in decorators
             and ".objects" in source
             and name not in INJECTED_ROUTES_WITH_FOLLOWUP_QUERIES
@@ -464,28 +554,15 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         Shrink this list as they land; a *new* name appearing in the diff is the
         regression this test is for.
         """
-        expected_ungated = {
-            "apps/stripe/api.py::configure_overage",
-            "apps/stripe/api.py::create_stripe_session",
-            "apps/stripe/api.py::get_overage_status",
-            "apps/stripe/api.py::get_stripe_subscription",
-            "apps/stripe/api.py::stripe_billing_portal_session",
-            "apps/stripe/api.py::subscription_events_count_daily",
-            "apps/stripe/api.py::subscription_events_count_for_period",
-            # auth=None -- an external monitor POSTs this with a secret in the
-            # URL, so there is no session or token to resolve scopes from. This
-            # one can never be gated.
-            "apps/uptime/api.py::heartbeat_check",
-        }
         ungated = {
             f"{path}::{name}"
-            for path, name, decorators, params, _source in self.routes()
+            for path, name, decorators, params, _source, _public in self.routes()
             if "organization_slug" in params
             and not GATE_DECORATORS.intersection(decorators)
         }
         self.assertEqual(
             ungated,
-            expected_ungated,
+            UNGATED_ORG_ROUTES,
             "an org-scoped route gained or lost its gate decorator",
         )
 
@@ -507,7 +584,7 @@ class DecoratorIsTheBoundaryTestCase(TestCase):
         decorator it describes."""
         actual = {
             name
-            for _path, name, decorators, _params, _source in self.routes()
+            for _path, name, decorators, _params, _source, _public in self.routes()
             if FOLDED_GATE_DECORATORS.intersection(decorators)
         }
         self.assertEqual(
@@ -1066,10 +1143,27 @@ class InjectedQuerysetIsTheGateTestCase(TestCase):
 
 
 class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
-    """A folded gate on a *mutation* 404s, and changes nothing.
+    """A folded gate on a *mutation* changes nothing, and answers 200.
 
-    A success-shaped body would tell a non-member their delete was done. 404
-    rather than 403 so the refusal is indistinguishable from absence.
+    The refusal is the empty write. A non-member's filter matches no rows, so
+    the update touches nothing and the route returns the same 200 it returns to
+    a member whose filter matched nothing -- which is also what master answers
+    in both cases. Isolation is carried by the row count, not the status code;
+    the assertions below check the foreign rows directly for that reason.
+
+    OPEN QUESTION, for David, 7.0: 200 ``{"status": "resolved"}`` on a bulk
+    delete that deleted nothing is a false success, not merely an uninformative
+    one -- unlike an empty list, the body asserts that work happened. A 404
+    here would fix that, and it is what this test asserted before. It was
+    reverted because telling the two empties apart needs ``resolve_org_auth``
+    on the empty path, which (a) puts back the authorization round trip the
+    folded gate exists to remove, making a denial cost more than a success and
+    inverting the enumeration argument in the directive, (b) revives two
+    ``drop`` rows to produce a log line the caller never sees, and (c) is a
+    200 -> 404 change on an existing route, which the directive reserves for
+    7.0 with a matrix entry. If the false success is worth fixing, the
+    directive's own sequencing has it as a deliberate refusal in 7.0, priced at
+    one extra round trip on writes.
     """
 
     @classmethod
@@ -1087,10 +1181,30 @@ class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
     def test_a_foreign_bulk_delete_deletes_nothing(self):
         url = reverse("api:delete_issues", args=[self.theirs["org"].slug])
         res = self.client.delete(url + "?id=" + str(self.theirs["issue"].id))
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 200)
         self.assertFalse(
             self.foreign_issue().is_deleted,
             "a non-member's bulk delete reached another organization's issue",
+        )
+
+    def test_a_foreign_bulk_delete_costs_one_query(self):
+        """The empty write is the whole request. A second query here is the
+        authorization round trip coming back, and it would make refusing a
+        non-member more expensive than serving a member."""
+        url = reverse("api:delete_issues", args=[self.theirs["org"].slug])
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.delete(url + "?id=" + str(self.theirs["issue"].id))
+        data_queries = [
+            sql
+            for query in ctx.captured_queries
+            if (sql := " ".join(query["sql"].split()))
+            and not re.search(r'FROM "(django_session|users_user)"', sql)
+        ]
+        self.assertEqual(
+            len(data_queries),
+            1,
+            "a refused bulk delete should be one gated UPDATE and nothing "
+            f"else, got {data_queries}",
         )
 
     def test_a_foreign_bulk_update_updates_nothing(self):
@@ -1101,7 +1215,7 @@ class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
             data={"status": "resolved"},
             content_type="application/json",
         )
-        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.status_code, 200)
         self.assertEqual(
             self.foreign_issue().index.status,
             before,
@@ -1121,3 +1235,204 @@ class FoldedGateMutationsDenyNonMembersTestCase(GlitchTestCase):
             "the same call inside my own organization did nothing either, so "
             "the two tests above prove nothing",
         )
+
+
+class FoldedGateModelsAreDeclaredTestCase(GlitchTestCase):
+    """Every model a folded gate isolates declares how to reach its org id.
+
+    Route-keyed, not model-keyed: the gate is what needs ``org_field``, so the
+    domain is the routes using it. ``CALLS`` grows with the port -- adding a
+    route to ``FOLDED_GATE_ROUTES`` without an entry here fails below.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.create_user()
+        cls.issue = baker.make("issue_events.Issue", project=cls.project)
+        baker.make("alerts.ProjectAlert", project=cls.project)
+
+    def setUp(self):
+        self.client.force_login(self.user)
+
+    def calls(self):
+        """route -> (method, url, body). Status codes are irrelevant; only
+        reaching ``OrgScope.apply`` is."""
+        org, project, issue = self.organization.slug, self.project.slug, self.issue.id
+        resolved = {"status": "resolved"}
+        return {
+            "list_issues": ("get", reverse("api:list_issues", args=[org]), None),
+            "list_project_issues": (
+                "get",
+                reverse("api:list_project_issues", args=[org, project]),
+                None,
+            ),
+            "issue_stats": (
+                "get",
+                reverse("api:issue_stats", args=[org]) + f"?groups={issue}",
+                None,
+            ),
+            "list_project_alerts": (
+                "get",
+                reverse("api:list_project_alerts", args=[org, project]),
+                None,
+            ),
+            "get_organization_issue": (
+                "get",
+                reverse("api:get_organization_issue", args=[org, issue]),
+                None,
+            ),
+            "list_organization_issue_tags": (
+                "get",
+                reverse("api:list_organization_issue_tags", args=[org, issue]),
+                None,
+            ),
+            "list_organization_issue_commits": (
+                "get",
+                reverse("api:list_organization_issue_commits", args=[org, issue]),
+                None,
+            ),
+            "update_issues": (
+                "put",
+                reverse("api:update_issues", args=[org]) + f"?id={issue}",
+                resolved,
+            ),
+            "update_organization_issue": (
+                "put",
+                reverse("api:update_organization_issue", args=[org, issue]),
+                resolved,
+            ),
+            "delete_issues": (
+                "delete",
+                reverse("api:delete_issues", args=[org]) + f"?id={issue}",
+                None,
+            ),
+            "delete_organization_issue": (
+                "delete",
+                reverse("api:delete_organization_issue", args=[org, issue]),
+                None,
+            ),
+        }
+
+    def test_every_folded_route_is_exercised_here(self):
+        self.assertEqual(
+            set(self.calls()),
+            set(FOLDED_GATE_ROUTES),
+            "a folded-gate route has no entry in CALLS, so nothing checks the "
+            "model it hands the gate",
+        )
+
+    def test_gated_models_declare_their_org_field(self):
+        seen: dict[str, set] = {}
+        route = None
+        original = OrgScope.apply
+
+        def spy(scope, qs):
+            seen.setdefault(route, set()).add(qs.model)
+            return original(scope, qs)
+
+        OrgScope.apply = spy
+        try:
+            for route, (method, url, body) in self.calls().items():
+                kwargs = (
+                    {"data": body, "content_type": "application/json"} if body else {}
+                )
+                getattr(self.client, method)(url, **kwargs)
+        finally:
+            OrgScope.apply = original
+
+        for name in self.calls():
+            with self.subTest(route=name):
+                models = seen.get(name, set())
+                self.assertTrue(
+                    models, f"{name} never reached the gate, so it is ungated"
+                )
+                for model in models:
+                    self.assertIn(
+                        model,
+                        ORG_SCOPED_MODELS,
+                        f"{name} hands the gate {model._meta.label}, which is "
+                        "not an OrgScopedModel",
+                    )
+                    # Compiles the expression the gate builds, so a bad path
+                    # fails here rather than on a request.
+                    str(model._default_manager.filter(**{model.org_field: 1}).query)
+
+
+class RouteStateLedgerTestCase(TestCase):
+    """Every route is gated, declared with one state, or public.
+
+    Source-reading, like DecoratorIsTheBoundaryTestCase, whose route walker it
+    borrows. The ledger is what lets this be an equality rather than an
+    aspiration: it can only change by someone editing it.
+    """
+
+    def routes(self):
+        return list(DecoratorIsTheBoundaryTestCase.routes())
+
+    def test_the_state_decorators_all_exist(self):
+        """Matched by string, so a rename would silently stop counting."""
+        for name in STATE_DECORATORS:
+            with self.subTest(decorator=name):
+                self.assertTrue(callable(getattr(permissions, name, None)))
+
+    def test_every_route_is_gated_declared_or_public(self):
+        undeclared = {
+            f"{path}::{name}"
+            for path, name, decorators, _params, _source, public in self.routes()
+            if not public
+            and not (GATE_DECORATORS | STATE_DECORATORS).intersection(decorators)
+        }
+        self.assertEqual(
+            undeclared,
+            UNDECLARED_ROUTES,
+            "a route gained or lost a declaration without UNDECLARED_ROUTES "
+            "being updated",
+        )
+
+    def test_no_route_declares_two_states(self):
+        for path, name, decorators, _params, _source, _public in self.routes():
+            with self.subTest(route=f"{path}::{name}"):
+                self.assertLessEqual(
+                    len(STATE_DECORATORS.intersection(decorators)),
+                    1,
+                    "a route can only be in one state",
+                )
+
+    def test_no_org_scoped_route_is_legacy_any_member(self):
+        """The marker widens the role set to every role. On a route that names
+        an organization that is a policy change wearing a mechanism's clothes;
+        those routes get a real scope."""
+        offenders = [
+            f"{path}::{name}"
+            for path, name, decorators, params, _source, _public in self.routes()
+            if "organization_slug" in params and "legacy_any_member" in decorators
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_marker_budgets_do_not_rise(self):
+        counts = collections.Counter(
+            marker
+            for _path, _name, decorators, _params, _source, _public in self.routes()
+            for marker in STATE_DECORATORS.intersection(decorators)
+        )
+        for marker, budget in (
+            ("legacy_any_member", LEGACY_ANY_MEMBER_BUDGET),
+            ("gates_manually", GATES_MANUALLY_BUDGET),
+        ):
+            with self.subTest(marker=marker):
+                self.assertLessEqual(
+                    counts[marker],
+                    budget,
+                    f"{marker} rose above {budget}. Raising the budget is a "
+                    "reviewed decision, not a fix for this failure.",
+                )
+
+    def test_an_ungated_org_route_is_also_undeclared(self):
+        """The two ledgers overlap by construction: an org-scoped route with no
+        gate has no state either. Tie them so they cannot drift apart."""
+        public = {
+            f"{path}::{name}"
+            for path, name, _decorators, _params, _source, is_public in self.routes()
+            if is_public
+        }
+        self.assertLessEqual(UNGATED_ORG_ROUTES - public, UNDECLARED_ROUTES)

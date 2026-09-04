@@ -20,7 +20,6 @@ from glitchtip.api.permissions import (
     OrgScopedHttpRequest,
     org_scoped_list,
     org_scoped_qs,
-    raise_for_denial,
 )
 
 from ..constants import EventStatus
@@ -338,6 +337,12 @@ async def delete_issues(
     filters: Query[IssueFilters],
 ):
     qs = filter_issue_list(qs, filters)
+    # Zero rows is not distinguishable from a refusal here, and deliberately
+    # so: the gate is a term in the query, so a non-member and a filter that
+    # matched nothing both arrive as an empty update. Both get the 200 they get
+    # on master. Saying "not yours" would cost an authorization round trip on
+    # every empty write -- see the note above the tests in
+    # glitchtip/test_scope_invariant.py.
     if await qs.aupdate(is_deleted=True):
         issue_ids = [
             issue_id
@@ -346,8 +351,6 @@ async def delete_issues(
             )
         ]
         await delete_issue_task.aenqueue(issue_ids)
-    else:
-        await raise_for_denial(request)
     return {"status": "resolved"}
 
 
@@ -375,7 +378,8 @@ async def update_issues(
         qs.order_by("-id").values_list("id", "project__organization_id").afirst()
     )
     if row is None:
-        await raise_for_denial(request)
+        # Nothing to update, whether because nothing matched or because the
+        # gate refused. Same 200 either way -- see delete_issues above.
         return payload
     max_id, organization_id = row
 

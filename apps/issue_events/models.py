@@ -8,7 +8,12 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
 
-from glitchtip.base_models import AggregationModel, CreatedModel, SoftDeleteModel
+from glitchtip.base_models import (
+    AggregationModel,
+    CreatedModel,
+    OrgScopedModel,
+    SoftDeleteModel,
+)
 from glitchtip.partition_manager import UUID7Helper
 from sentry.constants import MAX_CULPRIT_LENGTH
 
@@ -75,7 +80,7 @@ class IssueAggregate(AggregationModel):
     # PartitioningMeta removed to detach from psql_partition
 
 
-class Issue(SoftDeleteModel):
+class Issue(OrgScopedModel, SoftDeleteModel):
     # Fields ordered for optimal data alignment: 8-byte, 4-byte, 2-byte, 1-byte, then variable-width
     project = models.ForeignKey(
         "projects.Project", on_delete=models.CASCADE, related_name="issues"

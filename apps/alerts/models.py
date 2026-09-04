@@ -4,14 +4,14 @@ from asgiref.sync import sync_to_async
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 
-from glitchtip.base_models import CreatedModel
+from glitchtip.base_models import CreatedModel, OrgScopedModel
 
 from .constants import RecipientType
 from .email import send_email_notification
 from .webhooks import send_webhook_notification
 
 
-class ProjectAlert(CreatedModel):
+class ProjectAlert(OrgScopedModel, CreatedModel):
     """
     Example: Send notification when project has 15 events in 5 minutes.
     """
