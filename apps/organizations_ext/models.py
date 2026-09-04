@@ -257,6 +257,20 @@ class Organization(SharedBaseModel, OrganizationBase):
         help_text="Max overage spend per billing cycle, in cents. Metered "
         "billing stops reporting (and throttling resumes) once reached.",
     )
+    # On the organization because the meter aggregates per customer: scoped
+    # to a subscription, the counter restarted at zero whenever a replacement
+    # one became primary, re-reporting the cycle.
+    overage_units_reported = models.PositiveBigIntegerField(
+        default=0,
+        help_text="Cumulative billable overage events reported to the meter "
+        "this cycle. Meter events are additive, so we report deltas.",
+    )
+    overage_period_start = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Cycle anchor for overage_units_reported; counter resets when "
+        "the current cycle start moves past this.",
+    )
     stripe_customer_id = models.CharField(max_length=28, blank=True)
     stripe_primary_subscription = models.ForeignKey(
         "stripe.StripeSubscription",
