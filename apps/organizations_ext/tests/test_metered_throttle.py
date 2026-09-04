@@ -92,14 +92,14 @@ class MeteredThrottleTestCase(TestCase):
         mock_meter.assert_not_awaited()
 
     def test_within_cap_reports_overage_no_throttle(self):
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         mock_meter = self._run(org, 150_000)
         self.assertEqual(self._throttle(org), 0)
         # Reports the overage delta (50,000) as the meter value.
         mock_meter.assert_awaited_once()
         self.assertEqual(mock_meter.await_args.args[2], 50_000)
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 50_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 50_000)
 
     def test_just_past_cap_ramps_to_ten(self):
         org, _ = self._make_org()
@@ -118,6 +118,40 @@ class MeteredThrottleTestCase(TestCase):
         self._run(org, ALLOWED + QUOTA + 1)
         self.assertEqual(self._throttle(org), 100)
 
+    def test_replacement_subscription_does_not_rereport_the_cycle(self):
+        """A second active subscription must not re-bill the cycle from zero.
+
+        The meter aggregates per customer, so a counter scoped to the
+        subscription restarted at zero when a replacement one became primary
+        and re-sent everything the old one had already reported, doubling the
+        invoice up to the spend cap. Reachable from a support-created
+        replacement, the non-atomic checkout path, or a cancel-at-period-end
+        overlapping a new signup.
+        """
+        org, sub_a = self._make_org()
+        first = self._run(org, 150_000)
+        self.assertEqual(first.await_args.args[2], 50_000)
+
+        now = timezone.now()
+        sub_b = StripeSubscription.objects.create(
+            stripe_id="sub_2",
+            created=now + timedelta(minutes=1),
+            current_period_start=sub_a.current_period_start,
+            current_period_end=sub_a.current_period_end,
+            start_date=now,
+            price=sub_a.price,
+            organization=org,
+            status=SubscriptionStatus.ACTIVE,
+            metered_item_id="si_2",
+        )
+        org.stripe_primary_subscription = sub_b
+        org.save(update_fields=["stripe_primary_subscription"])
+
+        second = self._run(org, 150_000)
+        second.assert_not_awaited()
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 50_000)
+
     def test_report_is_idempotent_across_checks(self):
         org, _sub = self._make_org()
         self._run(org, 150_000)
@@ -126,16 +160,16 @@ class MeteredThrottleTestCase(TestCase):
         mock_meter.assert_not_awaited()
 
     def test_cycle_rollover_resets_counter(self):
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         # Pretend a prior cycle already reported a large amount.
-        sub.overage_period_start = timezone.now() - timedelta(days=90)
-        sub.overage_units_reported = 999_999
-        sub.save(update_fields=["overage_period_start", "overage_units_reported"])
+        org.overage_period_start = timezone.now() - timedelta(days=90)
+        org.overage_units_reported = 999_999
+        org.save(update_fields=["overage_period_start", "overage_units_reported"])
 
         mock_meter = self._run(org, 150_000)
-        sub.refresh_from_db()
+        org.refresh_from_db()
         # Counter reset to the new cycle, delta reported from zero.
-        self.assertEqual(sub.overage_units_reported, 50_000)
+        self.assertEqual(org.overage_units_reported, 50_000)
         mock_meter.assert_awaited_once()
         self.assertEqual(mock_meter.await_args.args[2], 50_000)
 
@@ -157,15 +191,15 @@ class MeteredThrottleTestCase(TestCase):
         # Mid-cycle double-charge regression: after reporting overage, a
         # disable + re-enable within the same cycle must report only the new
         # delta, never the units already metered.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         self._run(org, 150_000)  # reports 50,000; counter -> 50,000
 
         # Disable mirrors the API: flag off, counter and item left intact.
         org.metered_billing_enabled = False
         org.save(update_fields=["metered_billing_enabled"])
         self._run(org, 170_000)  # disabled -> no report
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 50_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 50_000)
 
         # Re-enable in the same cycle and grow usage; only the increment reports.
         org.metered_billing_enabled = True
@@ -173,29 +207,29 @@ class MeteredThrottleTestCase(TestCase):
         mock_meter = self._run(org, 180_000)  # overage 80,000; delta 30,000
         mock_meter.assert_awaited_once()
         self.assertEqual(mock_meter.await_args.args[2], 30_000)
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 80_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 80_000)
 
     def test_identifier_keyed_on_base_counter(self):
         # The identifier must encode the counter the delta was computed FROM,
         # so a re-send that raced a lost persist dedupes at Stripe instead of
         # double-billing (the delta itself may differ between the two sends).
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         mock_meter = self._run(org, 150_000)
-        sub.refresh_from_db()
-        cycle = sub.overage_period_start.isoformat()
-        self.assertEqual(mock_meter.await_args.args[3], f"sub_1:{cycle}:0")
+        org.refresh_from_db()
+        cycle = org.overage_period_start.isoformat()
+        self.assertEqual(mock_meter.await_args.args[3], f"cus_1:{cycle}:0")
 
         mock_meter = self._run(org, 180_000)  # delta 30,000 from base 50,000
-        self.assertEqual(mock_meter.await_args.args[3], f"sub_1:{cycle}:50000")
+        self.assertEqual(mock_meter.await_args.args[3], f"cus_1:{cycle}:50000")
 
     def test_transient_stripe_error_retries_same_report(self):
         # A 5xx must not advance the counter: the next check re-sends the same
         # delta under the same identifier, so the retry can't double-bill.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         mock_meter = self._run(org, 150_000, meter_error=StripeError("", status=503))
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 0)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 0)
 
         retry_meter = self._run(org, 150_000)
         retry_meter.assert_awaited_once()
@@ -206,10 +240,10 @@ class MeteredThrottleTestCase(TestCase):
         # A 400 (e.g. duplicate identifier) can never succeed on retry; the
         # counter advances so the check doesn't loop on it — and doesn't
         # eventually outlive Stripe's uniqueness window and double-bill.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         self._run(org, 150_000, meter_error=StripeError("dup", status=400))
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 50_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 50_000)
 
         mock_meter = self._run(org, 150_000)  # no growth -> nothing to report
         mock_meter.assert_not_awaited()
@@ -217,15 +251,15 @@ class MeteredThrottleTestCase(TestCase):
     def test_cap_lowered_then_restored_bills_only_growth(self):
         # Lowering the cap below already-reported units must not regress the
         # counter — a lower base would re-bill recorded units on later growth.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         self._run(org, 150_000)  # counter -> 50,000
 
         org.overage_spend_cap_cents = 500  # ~3,333 affordable units
         org.save(update_fields=["overage_spend_cap_cents"])
         mock_meter = self._run(org, 160_000)
         mock_meter.assert_not_awaited()
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 50_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 50_000)
 
         org.overage_spend_cap_cents = CAP_CENTS
         org.save(update_fields=["overage_spend_cap_cents"])
@@ -235,12 +269,12 @@ class MeteredThrottleTestCase(TestCase):
     def test_stale_persist_cannot_regress_counter(self):
         # A writer that lost the lock race must not move the counter backwards:
         # deltas recomputed from the lower base would re-bill recorded units.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         self._run(org, 180_000)  # counter -> 80,000
-        sub.refresh_from_db()
-        async_to_sync(_persist_overage)(sub, sub.overage_period_start, 50_000)
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 80_000)
+        org.refresh_from_db()
+        async_to_sync(_persist_overage)(org, org.overage_period_start, 50_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 80_000)
 
     def test_stale_check_from_a_closed_cycle_is_dropped(self):
         # A check that read the period dates just before a renewal advanced
@@ -248,32 +282,32 @@ class MeteredThrottleTestCase(TestCase):
         # forward, so treating it as a rollover would re-report the whole prior
         # cycle Stripe has already invoiced, and drag the anchor backwards.
         org, sub = self._make_org()
-        sub.overage_period_start = sub.current_period_start + timedelta(days=30)
-        sub.overage_units_reported = 0
-        sub.save(update_fields=["overage_period_start", "overage_units_reported"])
+        org.overage_period_start = sub.current_period_start + timedelta(days=30)
+        org.overage_units_reported = 0
+        org.save(update_fields=["overage_period_start", "overage_units_reported"])
 
         mock_meter = self._run(org, 150_000)
 
         mock_meter.assert_not_awaited()
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 0)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 0)
         self.assertEqual(
-            sub.overage_period_start, sub.current_period_start + timedelta(days=30)
+            org.overage_period_start, sub.current_period_start + timedelta(days=30)
         )
 
     def test_persist_cannot_move_the_anchor_backwards(self):
         # The same guard at the write: only a *later* cycle may reset the
         # counter, so an older anchor is refused rather than read as rollover.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         self._run(org, 180_000)  # counter -> 80,000
-        sub.refresh_from_db()
-        anchor = sub.overage_period_start
+        org.refresh_from_db()
+        anchor = org.overage_period_start
 
-        async_to_sync(_persist_overage)(sub, anchor - timedelta(days=30), 999_999)
+        async_to_sync(_persist_overage)(org, anchor - timedelta(days=30), 999_999)
 
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 80_000)
-        self.assertEqual(sub.overage_period_start, anchor)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 80_000)
+        self.assertEqual(org.overage_period_start, anchor)
 
     def test_ineligible_plan_is_not_metered(self):
         """The opt-in flag and the item id are sticky state that outlive the
@@ -287,11 +321,11 @@ class MeteredThrottleTestCase(TestCase):
             ("unpaid", {"status": SubscriptionStatus.UNPAID}),
         ):
             with self.subTest(label):
-                org, sub = self._make_org(stripe_id=f"sub_{label}", **kwargs)
+                org, _sub = self._make_org(stripe_id=f"sub_{label}", **kwargs)
                 mock_meter = self._run(org, 150_000)
                 mock_meter.assert_not_awaited()
-                sub.refresh_from_db()
-                self.assertEqual(sub.overage_units_reported, 0)
+                org.refresh_from_db()
+                self.assertEqual(org.overage_units_reported, 0)
 
     def test_refused_counter_write_is_not_reported(self):
         # The counter is advanced before the send so the DB always bounds what
@@ -311,8 +345,8 @@ class MeteredThrottleTestCase(TestCase):
         # next report in this cycle computes its delta from.
         org, sub = self._make_org()
         self._run(org, 150_000)  # counter -> 50,000
-        sub.refresh_from_db()
-        old_anchor = sub.overage_period_start
+        org.refresh_from_db()
+        old_anchor = org.overage_period_start
 
         new_start = sub.current_period_start + timedelta(days=30)
         StripeSubscription.objects.filter(pk=sub.pk).update(
@@ -323,16 +357,16 @@ class MeteredThrottleTestCase(TestCase):
         mock_meter = self._run(org, 50_000)
 
         mock_meter.assert_not_awaited()
-        sub.refresh_from_db()
-        self.assertGreater(sub.overage_period_start, old_anchor)
-        self.assertEqual(sub.overage_units_reported, 0)
+        org.refresh_from_db()
+        self.assertGreater(org.overage_period_start, old_anchor)
+        self.assertEqual(org.overage_units_reported, 0)
 
     def test_rollback_only_reverts_own_write(self):
         # Rollback is conditional on the counter still holding the write-ahead
         # value; a superseded write must not be stomped back.
-        org, sub = self._make_org()
+        org, _sub = self._make_org()
         self._run(org, 150_000)  # counter -> 50,000
-        sub.refresh_from_db()
-        async_to_sync(_rollback_overage)(sub, sub.overage_period_start, 40_000, 10_000)
-        sub.refresh_from_db()
-        self.assertEqual(sub.overage_units_reported, 50_000)
+        org.refresh_from_db()
+        async_to_sync(_rollback_overage)(org, org.overage_period_start, 40_000, 10_000)
+        org.refresh_from_db()
+        self.assertEqual(org.overage_units_reported, 50_000)
