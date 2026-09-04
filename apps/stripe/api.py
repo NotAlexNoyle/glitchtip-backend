@@ -506,6 +506,9 @@ class OverageStatusSchema(CamelSchema):
     configured: bool  # an overage product/price is provisioned in Stripe
     active: bool  # what the throttle task actually enforces
     cap_cents: int
+    # The ceiling configure_overage enforces; served so the client validates
+    # against it rather than a copy that drifts or blocks a raised env var.
+    max_cap_cents: int
     cap_units: int
     quota: int
     usage: int
@@ -581,6 +584,7 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
         "configured": await _get_overage_price() is not None,
         "active": overage_active(org),
         "cap_cents": org.overage_spend_cap_cents,
+        "max_cap_cents": settings.GLITCHTIP_OVERAGE_MAX_CAP_CENTS,
         "cap_units": cap_units,
         "quota": quota,
         "usage": usage,
