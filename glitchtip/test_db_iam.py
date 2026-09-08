@@ -118,7 +118,7 @@ class ConfigureOptionsTestCase(SimpleTestCase):
             db_iam.configure_options(options, iam_auth=True)
         assert options == {"sslmode": "prefer"}
 
-    def test_token_ttl_is_only_a_fallback(self):
+    def test_credential_ttl_is_only_a_fallback(self):
         # The RDS provider states the token's own expiry, which the driver
         # prefers, so this is absent unless explicitly configured.
         assert "credential_ttl" not in db_iam.configure_options(
@@ -126,10 +126,96 @@ class ConfigureOptionsTestCase(SimpleTestCase):
         )
         assert (
             db_iam.configure_options(
-                {}, iam_auth=True, token_ttl=300, sslrootcert="/certs/rds.pem"
+                {}, iam_auth=True, credential_ttl=300, sslrootcert="/certs/rds.pem"
             )["credential_ttl"]
             == 300
         )
+        # 0 is how an unset env.int arrives; it must not reach the driver as a
+        # refresh interval of zero seconds.
+        assert "credential_ttl" not in db_iam.configure_options(
+            {}, iam_auth=True, credential_ttl=0, sslrootcert="/certs/rds.pem"
+        )
+
+
+class CredentialProviderTestCase(SimpleTestCase):
+    """The generic hook, for a credential issuer that is not AWS."""
+
+    def test_generic_provider_is_wired(self):
+        options = db_iam.configure_options(
+            {},
+            iam_auth=False,
+            credential_provider="myapp.db.vault_credential",
+            credential_ttl=120,
+            sslmode="verify-full",
+        )
+        assert options["credential_provider"] == "myapp.db.vault_credential"
+        assert options["credential_ttl"] == 120
+
+    def test_generic_provider_defaults_to_verified_tls(self):
+        # Not AWS does not mean not cleartext: the credential still reaches
+        # PostgreSQL as a password.
+        options = db_iam.configure_options(
+            {}, iam_auth=False, credential_provider="myapp.db.vault_credential"
+        )
+        assert options["sslmode"] == "verify-full"
+
+    def test_generic_provider_gets_the_same_tls_guards(self):
+        for sslmode in ("disable", "allow", "prefer"):
+            with self.subTest(sslmode=sslmode):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    db_iam.configure_options(
+                        {},
+                        iam_auth=False,
+                        credential_provider="myapp.db.vault_credential",
+                        sslmode=sslmode,
+                    )
+                assert "DATABASE_CREDENTIAL_PROVIDER" in str(ctx.exception)
+        for sslmode in db_iam.UNVERIFIED_SSLMODES:
+            with self.subTest(sslmode=sslmode):
+                with self.assertRaises(ImproperlyConfigured):
+                    db_iam.configure_options(
+                        {},
+                        iam_auth=False,
+                        credential_provider="myapp.db.vault_credential",
+                        sslmode=sslmode,
+                    )
+                options = db_iam.configure_options(
+                    {},
+                    iam_auth=False,
+                    credential_provider="myapp.db.vault_credential",
+                    sslmode=sslmode,
+                    allow_unverified_tls=True,
+                )
+                assert options["sslmode"] == sslmode
+
+    def test_generic_provider_does_not_require_the_rds_bundle(self):
+        # The bundle requirement exists because RDS certificates are not in
+        # the system trust store. A custom provider may front a server whose
+        # certificate already is, and insisting would block a correct config.
+        options = db_iam.configure_options(
+            {}, iam_auth=False, credential_provider="myapp.db.vault_credential"
+        )
+        assert "sslrootcert" not in options
+
+    def test_iam_auth_and_a_generic_provider_are_mutually_exclusive(self):
+        # One alias has one credential source. Silently preferring one would
+        # give an operator who set both a scheme they did not choose.
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            db_iam.configure_options(
+                {},
+                iam_auth=True,
+                credential_provider="myapp.db.vault_credential",
+                sslrootcert="/certs/rds.pem",
+            )
+        assert "mutually exclusive" in str(ctx.exception)
+
+    def test_nothing_is_written_when_the_two_collide(self):
+        options = {"sslmode": "verify-full"}
+        with self.assertRaises(ImproperlyConfigured):
+            db_iam.configure_options(
+                options, iam_auth=True, credential_provider="myapp.db.vault_credential"
+            )
+        assert options == {"sslmode": "verify-full"}
 
 
 def _provider_available():

@@ -71,57 +71,79 @@ def configure_options(
     options,
     *,
     iam_auth,
-    token_ttl=None,
+    credential_provider=None,
+    credential_ttl=None,
     sslmode=None,
     sslrootcert=None,
     allow_unverified_tls=False,
 ):
-    """Apply TLS and IAM-auth settings to one alias's ``OPTIONS`` dict.
+    """Apply TLS and rotating-credential settings to one alias's ``OPTIONS``.
 
     Mutates and returns ``options``, but only after every check has passed —
     a caller that catches ``ImproperlyConfigured`` is never left with IAM
     half-wired onto a rejected sslmode.
+
+    ``iam_auth`` selects the shipped AWS provider; ``credential_provider`` is
+    the generic hook for any other issuer (Vault's dynamic secrets, an
+    in-house signer). They are mutually exclusive: one alias has one
+    credential source, and silently preferring one over the other would mean
+    an operator who set both gets an authentication scheme they did not
+    choose. Whichever is used, the guards below apply — a provider does not
+    become safe to put on a plaintext connection by not being AWS.
 
     An entry already present (set explicitly in a ``DATABASES`` override)
     wins over the environment, except ``credential_provider``, which IAM auth
     owns. Kept here rather than inline in settings so the guards are reachable
     from tests without re-importing settings.
     """
+    if iam_auth and credential_provider:
+        raise ImproperlyConfigured(
+            "DATABASE_IAM_AUTH and DATABASE_CREDENTIAL_PROVIDER are mutually "
+            f"exclusive: DATABASE_IAM_AUTH already selects {RDS_IAM_PROVIDER}. "
+            "Set DATABASE_CREDENTIAL_PROVIDER only for a non-AWS credential "
+            "issuer, and leave DATABASE_IAM_AUTH off when you do."
+        )
+
     resolved = dict(options)
     if sslmode:
         resolved.setdefault("sslmode", sslmode)
     if sslrootcert:
         resolved.setdefault("sslrootcert", sslrootcert)
 
-    if iam_auth:
-        # An IAM token reaches PostgreSQL as a cleartext password, so the
-        # connection must both be encrypted and prove who it is talking to.
+    if iam_auth or credential_provider:
+        setting = "DATABASE_IAM_AUTH" if iam_auth else "DATABASE_CREDENTIAL_PROVIDER"
+        # A minted credential reaches PostgreSQL as a cleartext password, so
+        # the connection must both be encrypted and prove who it is talking to.
         resolved.setdefault("sslmode", "verify-full")
         mode = resolved["sslmode"]
         if mode in UNVERIFIED_SSLMODES:
             if not allow_unverified_tls:
                 raise ImproperlyConfigured(
                     f"DATABASE_SSLMODE={mode!r} authenticates nothing about the "
-                    "server, so a live IAM token would be handed to whatever "
+                    "server, so a live credential would be handed to whatever "
                     "answers on the database hostname and could be replayed "
-                    "against the real database for 15 minutes. "
+                    "against the real database until it expires. "
                     f"{'verify-ca validates the chain but not the hostname, and the RDS global bundle trusts every RDS instance in every AWS account. ' if mode == 'verify-ca' else ''}"
-                    f"Use 'verify-full' with DATABASE_SSLROOTCERT set to the RDS "
-                    f"CA bundle ({RDS_CA_BUNDLE_URL}). If you genuinely accept "
+                    f"Use 'verify-full' with DATABASE_SSLROOTCERT set to the CA "
+                    f"the server's certificate chains to (for RDS, "
+                    f"{RDS_CA_BUNDLE_URL}). If you genuinely accept "
                     "an unauthenticated server, set "
                     "DATABASE_IAM_ALLOW_UNVERIFIED_TLS=true."
                 )
         elif mode not in VERIFIED_SSLMODES:
             raise ImproperlyConfigured(
                 f"DATABASE_SSLMODE={mode!r} cannot be combined with "
-                "DATABASE_IAM_AUTH: an IAM token is sent as a cleartext "
+                f"{setting}: a minted credential is sent as a cleartext "
                 "password, and this mode permits an unencrypted session "
                 "('prefer' negotiates TLS but accepts plaintext if the server "
                 f"declines). Use {', '.join(VERIFIED_SSLMODES)}."
             )
-        elif not resolved.get("sslrootcert"):
+        elif iam_auth and not resolved.get("sslrootcert"):
             # RDS certificates do not chain to a CA in the system trust store,
             # so verify-full without the bundle fails as an opaque TLS error.
+            # Only insisted on for RDS: a custom provider may well front a
+            # server whose certificate the system store already trusts, and
+            # demanding a bundle there would block a correct configuration.
             raise ImproperlyConfigured(
                 "DATABASE_IAM_AUTH requires DATABASE_SSLROOTCERT to point at "
                 "the Amazon RDS CA bundle, because RDS certificates are not "
@@ -131,11 +153,14 @@ def configure_options(
         # One provider serves every alias it is enabled for: it is handed the
         # host, port and user of the connection being opened, and an RDS token
         # signs exactly those, so each alias gets a token for its own endpoint.
-        resolved["credential_provider"] = RDS_IAM_PROVIDER
-        if token_ttl:
-            # Only a fallback: the RDS provider states the token's own expiry,
-            # which the driver prefers, so this is unused with it.
-            resolved["credential_ttl"] = token_ttl
+        resolved["credential_provider"] = (
+            RDS_IAM_PROVIDER if iam_auth else credential_provider
+        )
+        if credential_ttl:
+            # Only a fallback for issuers that report no expiry: the RDS
+            # provider states the token's own expiry, which the driver
+            # prefers, so this is unused with it.
+            resolved["credential_ttl"] = credential_ttl
 
     options.clear()
     options.update(resolved)

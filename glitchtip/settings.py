@@ -856,7 +856,8 @@ ACCOUNT_EMAIL_SUBJECT_PREFIX = env.str("ACCOUNT_EMAIL_SUBJECT_PREFIX", "")
 # authenticates with a short-lived IAM token, so any PASSWORD in DATABASE_URL
 # is ignored by the driver. See glitchtip/db_iam.py for the AWS prerequisites.
 DATABASE_IAM_AUTH = env.bool("DATABASE_IAM_AUTH", False)
-# Which DATABASES aliases authenticate with IAM. Defaults to "default" only,
+# Which DATABASES aliases authenticate with a minted credential — IAM or a
+# DATABASE_CREDENTIAL_PROVIDER one. Defaults to "default" only,
 # and deliberately not to every alias: the read_only alias may point at a
 # PgBouncer, which authenticates its own clients and cannot validate an IAM
 # token — it would simply receive a live, replayable AWS credential in the
@@ -869,10 +870,16 @@ DATABASE_IAM_AUTH_ALIASES = [
     for alias in env.str("DATABASE_IAM_AUTH_ALIASES", "default").split(",")
     if alias.strip()
 ]
-# Seconds a minted credential is reused. Only a fallback: the RDS provider
-# reports the token's own expiry, which the driver prefers, so this has no
-# effect with it. Unset means the driver's own default.
-DATABASE_IAM_TOKEN_TTL = env.int("DATABASE_IAM_TOKEN_TTL", 0)
+# Generic hook for a non-AWS credential issuer (Vault's dynamic secrets, an
+# in-house signer): a dotted path to a callable following django-vpg's
+# credential_provider contract. Mutually exclusive with DATABASE_IAM_AUTH, and
+# subject to the same TLS guards. Applies to the same aliases.
+DATABASE_CREDENTIAL_PROVIDER = env.str("DATABASE_CREDENTIAL_PROVIDER", None)
+# Seconds a minted credential is reused. Only a fallback for providers that
+# report no expiry: the RDS provider reports the token's own expiry, which the
+# driver prefers, so this has no effect with it. Unset means the driver's own
+# default.
+DATABASE_CREDENTIAL_TTL = env.int("DATABASE_CREDENTIAL_TTL", 0)
 # Accept a database server whose identity is not verified. Only meaningful
 # with IAM auth, where it means a live token may be handed to anything that
 # answers on the hostname. Exists so the insecure choice has to be made
@@ -950,7 +957,7 @@ if VALKEY_HOST:
 else:
     VALKEY_URL = env.str("VALKEY_URL", env.str("REDIS_URL", "redis://redis:6379/0"))
 
-if DATABASE_IAM_AUTH:
+if DATABASE_IAM_AUTH or DATABASE_CREDENTIAL_PROVIDER:
     _unknown = set(DATABASE_IAM_AUTH_ALIASES) - set(DATABASES)
     if _unknown:
         raise ImproperlyConfigured(
@@ -979,8 +986,11 @@ if DATABASE_IAM_AUTH:
     except (TypeError, ValueError):  # pragma: no cover - builtin without one
         _vpg_params = {}
     if "credential_provider" not in _vpg_params:
+        _db_credential_setting = (
+            "DATABASE_IAM_AUTH" if DATABASE_IAM_AUTH else "DATABASE_CREDENTIAL_PROVIDER"
+        )
         raise ImproperlyConfigured(
-            "DATABASE_IAM_AUTH requires a database driver with "
+            f"{_db_credential_setting} requires a database driver with "
             "rotating-credential support, but the loaded "
             f"{sys.modules['django_vpg._vpg_driver'].__name__} extension "
             "does not accept "
@@ -1050,12 +1060,17 @@ for _db_alias, db_config in DATABASES.items():
                 f"disable prepared statements; got {_prepare_threshold!r}"
             )
 
-    # TLS and, when enabled, RDS IAM authentication. An OPTIONS entry set
-    # explicitly in a DATABASES override still wins over the environment.
+    # TLS and, when enabled, a rotating credential (RDS IAM, or whatever
+    # DATABASE_CREDENTIAL_PROVIDER names). An OPTIONS entry set explicitly in
+    # a DATABASES override still wins over the environment.
+    _db_credential_alias = _db_alias in DATABASE_IAM_AUTH_ALIASES
     _db_iam.configure_options(
         options,
-        iam_auth=DATABASE_IAM_AUTH and _db_alias in DATABASE_IAM_AUTH_ALIASES,
-        token_ttl=DATABASE_IAM_TOKEN_TTL,
+        iam_auth=DATABASE_IAM_AUTH and _db_credential_alias,
+        credential_provider=(
+            DATABASE_CREDENTIAL_PROVIDER if _db_credential_alias else None
+        ),
+        credential_ttl=DATABASE_CREDENTIAL_TTL,
         sslmode=DATABASE_SSLMODE,
         sslrootcert=DATABASE_SSLROOTCERT,
         allow_unverified_tls=DATABASE_IAM_ALLOW_UNVERIFIED_TLS,
