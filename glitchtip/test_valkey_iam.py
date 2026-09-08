@@ -111,6 +111,15 @@ class TlsGuardTestCase(SimpleTestCase):
                 assert "VALKEY_URL" in message
                 assert "cleartext" in message
 
+    def test_the_error_never_echoes_the_url(self):
+        # VALKEY_URL carries userinfo; a message that echoed it would put a
+        # live password into logs and the DEBUG 500 page. Only the scheme.
+        for location in (":s3cret@cache:6379/0", "redis://app:s3cret@cache:6379/0"):
+            with self.subTest(location=location):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    valkey_iam.configure_options({}, location=location, iam_auth=True)
+                assert "s3cret" not in str(ctx.exception)
+
     def test_the_error_does_not_offer_the_plaintext_escape(self):
         # django-vcache has credential_provider_allow_plaintext for local
         # development. GlitchTip does not expose it, and the message must not

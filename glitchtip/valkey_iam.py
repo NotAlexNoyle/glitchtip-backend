@@ -129,8 +129,8 @@ def configure_options(
     if not tls:
         raise ImproperlyConfigured(
             f"{setting} sends the minted credential to Valkey as a cleartext "
-            f"AUTH argument, so it requires TLS, but VALKEY_URL uses "
-            f"{scheme or location!r}. Use a valkeys:// or rediss:// URL — "
+            f"AUTH argument, so it requires TLS, but VALKEY_URL uses the "
+            f"scheme {scheme or '<none>'!r}. Use a valkeys:// or rediss:// URL — "
             "ElastiCache IAM auth requires in-transit encryption anyway — or, "
             "with sentinel://, set VALKEY_SSL_CA_CERTS."
         )
