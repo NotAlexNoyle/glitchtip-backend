@@ -123,13 +123,11 @@ test-latest:
       paths:
         - $UV_CACHE_DIR
   script:
-    # Create MinIO bucket for cold storage tests
-    - apt-get update && apt-get install -y curl
-    - curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-    - chmod +x /usr/local/bin/mc
-    - mc alias set myminio http://minio:9000 minioadmin minioadmin
-    - mc mb --ignore-existing myminio/glitchtip-cold || true
     - uv sync --frozen --no-install-project
+    # Create the MinIO bucket the cold storage tests read and write. boto3 is
+    # already a project dependency, so this needs no client from dl.min.io,
+    # which now returns 410 along with the rest of the archived project.
+    - uv run python -c "import boto3, os; c = boto3.client('s3', endpoint_url=os.environ['AWS_S3_ENDPOINT_URL']); b = os.environ['GLITCHTIP_COLD_STORAGE_BUCKET']; c.create_bucket(Bucket=b) if b not in [x['Name'] for x in c.list_buckets()['Buckets']] else None"
     # Pre-install DuckDB extensions (mirrors Dockerfile build step)
     - python -c "import duckdb; c=duckdb.connect(); c.install_extension('httpfs'); c.install_extension('aws'); c.close()"
     - uv run ./manage.py test
