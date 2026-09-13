@@ -1306,15 +1306,20 @@ GLITCHTIP_LICENSE_KEY = env.str("GLITCHTIP_LICENSE_KEY", None)
 I_PAID_FOR_GLITCHTIP = env.bool("I_PAID_FOR_GLITCHTIP", bool(GLITCHTIP_LICENSE_KEY))
 
 MARKETING_URL = "https://glitchtip.com"
+_THROTTLE_SWEEP = {
+    "task": "apps.organizations_ext.tasks.check_all_organizations_throttle",
+    # Seconds. The scheduler acts on a cron string or an int and silently
+    # never runs anything else, so no timedelta here.
+    "schedule": 4 * 60 * 60,
+}
 if BILLING_ENABLED:
     I_PAID_FOR_GLITCHTIP = True
-    VTASKS_SCHEDULE["check-all-organizations-throttle"] = {
-        "task": "apps.organizations_ext.tasks.check_all_organizations_throttle",
-        "schedule": timedelta(hours=4),
-    }
+    VTASKS_SCHEDULE["check-all-organizations-throttle"] = _THROTTLE_SWEEP
 elif TESTING:
-    # Must run tests with billing enabled
+    # Must run tests with billing enabled, sweep included so its schedule is
+    # under test too.
     BILLING_ENABLED = True
+    VTASKS_SCHEDULE["check-all-organizations-throttle"] = _THROTTLE_SWEEP
     logging.disable(logging.WARNING)
 
 # Refuse social-auth outbound HTTP (OIDC discovery, token/userinfo calls) to
