@@ -110,7 +110,7 @@ test-latest:
       alias: postgres
     - name: valkey/valkey:9
       alias: redis
-    - name: minio/minio:latest
+    - name: quay.io/minio/minio:latest
       alias: minio
       command: ["server", "/data"]
       variables:
