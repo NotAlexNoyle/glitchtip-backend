@@ -412,24 +412,39 @@ async def _check_and_update_throttle(org: Organization):
             # them: a downgrade to a free plan keeps the subscription active,
             # and the primary-subscription pointer is only cleared
             # asynchronously. `select_related` on both callers keeps it DB-free.
-            # Reporting additionally waits for the item's own period to be known
-            # (has_metered_window): a total counted over the plan's window would
-            # be filed under the item's, and where the two differ that bills the
-            # overlap twice. Until the refresh above succeeds the organization is
-            # throttled at quota plus cap but nothing is sent.
-            if overage_active(org) and has_metered_window(sub):
+            if overage_active(org):
                 # Paid overage: charge for usage above the cycle's quota up to
                 # the spend cap, then resume the progressive ramp (no further
                 # charges).
                 cap_units = units_for_budget(org.overage_spend_cap_cents)
-                await _report_overage(
-                    org,
-                    start,
-                    end,
-                    measured_at,
-                    max(0, total_event_count - quota),
-                    cap_units,
-                )
+                if has_metered_window(sub):
+                    # Reporting waits for the item's own period to be known:
+                    # a total counted over the plan's window would be filed
+                    # under the item's, and where the two differ that bills
+                    # the overlap twice.
+                    await _report_overage(
+                        org,
+                        start,
+                        end,
+                        measured_at,
+                        max(0, total_event_count - quota),
+                        cap_units,
+                    )
+                elif total_event_count > quota:
+                    # Bounded fail-open. The customer has paid for this
+                    # headroom, so an unknown period pauses billing, not
+                    # collection: the meter takes cycle-to-date restatements,
+                    # so the first report after the period is learned carries
+                    # everything served meanwhile, and exposure is capped by
+                    # the spend cap either way. Loud so a lasting gap is a
+                    # log line, not a surprise on an invoice.
+                    logger.warning(
+                        "Serving unbilled overage for org %s: metered item %s "
+                        "has no recorded period yet; the next report restates "
+                        "the cycle total",
+                        org.id,
+                        sub.metered_item_id,
+                    )
                 org_throttle = _progressive_throttle(
                     total_event_count, quota + cap_units, quota
                 )

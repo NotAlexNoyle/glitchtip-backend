@@ -640,18 +640,29 @@ class MeteredThrottleTestCase(TestCase):
         # and cap (300,000 against 233,333 allowed).
         self.assertEqual(self._throttle(org), 50)
 
-    def test_unknown_metered_period_throttles_but_does_not_report(self):
+    def test_unknown_metered_period_keeps_headroom_but_does_not_report(self):
         """An item whose period Stripe hasn't told us yet, with Stripe down.
         Counting over the plan's window is fine for the throttle; reporting
         that total would file it under the item's period, and where the two
-        differ the overlap is billed twice. So: throttled, not reported."""
+        differ the overlap is billed twice. The paid headroom stays: the meter
+        takes cycle-to-date restatements, so the first report after the period
+        is learned bills everything served meanwhile. So: served, not billed
+        yet, not throttled."""
         org, sub = self._make_org(metered_period=(None, None))
         self._run(org, 150_000).assert_not_awaited()
         self.fetched.assert_awaited_once()
         self.assertEqual(
             self.counted, (sub.current_period_start, sub.current_period_end)
         )
-        # Over quota with no paid headroom to count on: the plain ramp.
+        self.assertEqual(self._throttle(org), 0)
+        org.refresh_from_db()
+        self.assertIsNone(org.overage_last_reported_at)
+
+    def test_unknown_metered_period_still_ramps_past_the_cap(self):
+        # Fail-open is bounded: the window being unknown defers billing, but
+        # the spend cap still caps what is served unbilled.
+        org, _ = self._make_org(metered_period=(None, None))
+        self._run(org, ALLOWED + 1).assert_not_awaited()
         self.assertEqual(self._throttle(org), 10)
         org.refresh_from_db()
         self.assertIsNone(org.overage_last_reported_at)
