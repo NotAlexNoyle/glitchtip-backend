@@ -64,7 +64,7 @@ _MAX_STREAMS = 1024
 
 
 def bound_minidump(data: bytes) -> bytes:
-    """Return a copy of ``data`` that is safe to hand to MinidumpFile.
+    """Return ``data``, or a copy of it, that is safe to hand to MinidumpFile.
 
     The ``minidump`` package trusts every count in the file and loops that
     many times, so a few crafted bytes can claim millions of streams or
@@ -78,10 +78,14 @@ def bound_minidump(data: bytes) -> bytes:
     count, dir_rva = struct.unpack_from("<II", data, 8)
     if count > _MAX_STREAMS or dir_rva + count * 12 > len(data):
         raise InvalidMinidump("stream directory out of bounds")
-    bounded = bytearray(data)
+    # Only the directory is rewritten, so copy just that (a few KB) rather
+    # than the whole dump, and splice it back in with one allocation — or
+    # none, when every stream is one we read.
+    dir_end = dir_rva + count * 12
+    directory = bytearray(data[dir_rva:dir_end])
+    patched = False
     for i in range(count):
-        entry = dir_rva + i * 12
-        stream_type, size, rva = struct.unpack_from("<III", data, entry)
+        stream_type, size, rva = struct.unpack_from("<III", directory, i * 12)
         if rva + size > len(data):
             raise InvalidMinidump("stream out of bounds")
         try:
@@ -90,8 +94,9 @@ def bound_minidump(data: bytes) -> bytes:
             kept = False
         if not kept:
             struct.pack_into(
-                "<I", bounded, entry, MINIDUMP_STREAM_TYPE.UnusedStream.value
+                "<I", directory, i * 12, MINIDUMP_STREAM_TYPE.UnusedStream.value
             )
+            patched = True
             continue
         item_size = _KEPT_STREAMS[MINIDUMP_STREAM_TYPE(stream_type)]
         if item_size is None:
@@ -101,7 +106,10 @@ def bound_minidump(data: bytes) -> bytes:
         (items,) = struct.unpack_from("<I", data, rva)
         if 4 + items * item_size > size:
             raise InvalidMinidump("list count exceeds stream size")
-    return bytes(bounded)
+    if not patched:
+        return data
+    view = memoryview(data)
+    return b"".join((view[:dir_rva], directory, view[dir_end:]))
 
 
 def parse_cv_record_debug_id(cv_record_bytes: bytes) -> str | None:
@@ -241,20 +249,14 @@ def _get_exception_name(exc_code: ExceptionCode) -> str:
     return name
 
 
-def minidump_to_event(data: bytes, sentry_meta: dict | None = None) -> dict:
-    """Parse a minidump binary and return an error event dict.
+def parse_minidump(data: bytes) -> dict:
+    """Parse a minidump binary into the event fields it can supply.
 
-    Args:
-        data: Raw minidump file bytes (must start with b'MDMP').
-        sentry_meta: Optional metadata from the 'sentry' multipart field
-                     (release, environment, tags, etc.).
-
-    Returns:
-        A dict suitable for validation with WebIngestIssueEvent.
+    Returns a dict suitable for validation with WebIngestIssueEvent:
+    exception (signal/exception code and the crashing frame), threads (one
+    frame per thread), debug_meta images, and the os/device contexts. Raises
+    InvalidMinidump for a file whose structure doesn't fit inside it.
     """
-    if sentry_meta is None:
-        sentry_meta = {}
-
     # The minidump library logs a noisy "PEB parsing error!" at ERROR level
     # via the root logger when memory segments are absent (normal for
     # crashpad/breakpad minidumps).  Suppress during parsing.
@@ -366,12 +368,46 @@ def minidump_to_event(data: bytes, sentry_meta: dict | None = None) -> dict:
     if debug_images:
         event["debug_meta"] = {"images": debug_images}
 
-    # Merge sentry metadata
-    if sentry_meta.get("release"):
-        event["release"] = sentry_meta["release"]
-    if sentry_meta.get("environment"):
-        event["environment"] = sentry_meta["environment"]
-    if sentry_meta.get("tags"):
-        event["tags"] = sentry_meta["tags"]
-
     return event
+
+
+# Event keys the minidump is the authority for when the SDK didn't send them.
+# An SDK that unwound the crash itself (sentry-native's in-process backend)
+# sends its own exception/threads, which beat a single frame per thread.
+_MINIDUMP_FILLS = ("exception", "threads", "debug_meta")
+
+
+def merge_sdk_event(minidump_event: dict, sdk_event: dict | None) -> dict:
+    """Combine the event an SDK sent alongside a minidump with the dump.
+
+    The SDK event carries what only the client knows (release, environment,
+    user, tags, breadcrumbs, contexts, its own event_id) and typically no
+    stack; the dump carries the crash. SDK values win wherever both have one,
+    except that the dump fills exception, threads and debug_meta when the SDK
+    left them empty, and its os/device context fields fill gaps in the SDK's.
+    """
+    if not sdk_event:
+        return minidump_event
+    event = dict(sdk_event)
+    for key in _MINIDUMP_FILLS:
+        if not event.get(key) and key in minidump_event:
+            event[key] = minidump_event[key]
+    contexts = event.get("contexts")
+    if not isinstance(contexts, dict):
+        contexts = {}
+    contexts = dict(contexts)
+    for name, value in minidump_event["contexts"].items():
+        sdk_value = contexts.get(name)
+        contexts[name] = (
+            value | sdk_value if isinstance(sdk_value, dict) else sdk_value or value
+        )
+    event["contexts"] = contexts
+    for key in ("event_id", "platform", "level"):
+        if not event.get(key):
+            event[key] = minidump_event[key]
+    return event
+
+
+def minidump_to_event(data: bytes, sdk_event: dict | None = None) -> dict:
+    """Parse a minidump and merge in the event its SDK sent with it."""
+    return merge_sdk_event(parse_minidump(data), sdk_event)

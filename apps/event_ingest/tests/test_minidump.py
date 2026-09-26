@@ -3,19 +3,24 @@ import random
 import struct
 import uuid
 
+import orjson
+import ormsgpack
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.tasks import task_backends
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.client import BOUNDARY, MULTIPART_CONTENT, encode_multipart
 from django.urls import reverse
 
 from apps.event_ingest.minidump_event import (
     InvalidMinidump,
     bound_minidump,
+    merge_sdk_event,
     minidump_to_event,
     parse_cv_record_debug_id,
+    parse_minidump,
 )
+from apps.event_ingest.minidump_upload import decode_msgpack_stream
 from apps.issue_events.models import IssueEvent
 from apps.releases.models import Release
 
@@ -412,3 +417,332 @@ class MinidumpViewTest(EventIngestTestCase):
         """GET returns 405."""
         res = await self.async_client.get(self.url)
         self.assertEqual(res.status_code, 405)
+
+
+class DecodeMsgpackStreamTest(TestCase):
+    """sentry-native appends breadcrumbs to a file as back-to-back msgpack
+    values; the decoder splits them without trusting any claimed length."""
+
+    def test_splits_concatenated_values(self):
+        values = [{"a": 1}, [1, "two", None, 3.5], "x" * 300, {"n": {"m": [True]}}]
+        data = b"".join(ormsgpack.packb(v) for v in values)
+        self.assertEqual(decode_msgpack_stream(data, 10), values)
+
+    def test_stops_at_max_values(self):
+        data = ormsgpack.packb(1) * 5
+        self.assertEqual(decode_msgpack_stream(data, 3), [1, 1, 1])
+
+    def test_keeps_values_before_a_truncated_tail(self):
+        data = ormsgpack.packb({"a": 1}) + ormsgpack.packb({"b": "long" * 10})[:-3]
+        self.assertEqual(decode_msgpack_stream(data, 10), [{"a": 1}])
+
+    def test_huge_claimed_counts_and_lengths_are_rejected_quickly(self):
+        for data in (
+            b"\xdf\xff\xff\xff\xff",  # map32 with 4 billion entries
+            b"\xdd\xff\xff\xff\xff\x01",  # array32
+            b"\xdb\xff\xff\xff\xffab",  # str32
+            b"\xc1",  # never-used byte
+        ):
+            self.assertEqual(decode_msgpack_stream(data, 10), [])
+
+    def test_random_bytes_never_raise(self):
+        rng = random.Random(0)
+        for _ in range(500):
+            decode_msgpack_stream(rng.randbytes(rng.randint(1, 64)), 10)
+
+
+class MergeSdkEventTest(TestCase):
+    def setUp(self):
+        with open(
+            "apps/event_ingest/tests/test_data/minidump_linux_x86_64.dmp", "rb"
+        ) as f:
+            self.minidump_event = parse_minidump(f.read())
+
+    def test_sdk_metadata_wins_and_dump_supplies_the_crash(self):
+        event_id = uuid.uuid4().hex
+        sdk_event = {
+            "event_id": event_id,
+            "release": "app@1.2.3",
+            "environment": "production",
+            "user": {"id": "42"},
+            "tags": {"a": "b"},
+            "contexts": {"os": {"name": "Linux", "version": "6.1", "type": "os"}},
+        }
+        event = merge_sdk_event(self.minidump_event, sdk_event)
+        self.assertEqual(event["event_id"], event_id)
+        self.assertEqual(event["release"], "app@1.2.3")
+        self.assertEqual(event["user"], {"id": "42"})
+        self.assertEqual(event["exception"], self.minidump_event["exception"])
+        self.assertEqual(event["threads"], self.minidump_event["threads"])
+        self.assertEqual(event["debug_meta"], self.minidump_event["debug_meta"])
+        self.assertEqual(event["contexts"]["os"]["version"], "6.1")
+        # The dump fills the context fields the SDK didn't send.
+        self.assertEqual(
+            event["contexts"]["device"], self.minidump_event["contexts"]["device"]
+        )
+        self.assertEqual(event["level"], "fatal")
+        self.assertEqual(event["platform"], "native")
+
+    def test_sdk_stack_beats_the_dump(self):
+        """An SDK that unwound the crash itself keeps its own stack."""
+        exception = {"values": [{"type": "SIGSEGV", "stacktrace": {"frames": []}}]}
+        event = merge_sdk_event(self.minidump_event, {"exception": exception})
+        self.assertEqual(event["exception"], exception)
+
+    def test_without_sdk_event_the_dump_is_the_event(self):
+        self.assertIs(merge_sdk_event(self.minidump_event, {}), self.minidump_event)
+
+
+def _crashpad_breadcrumbs(start: int, count: int) -> bytes:
+    return b"".join(
+        ormsgpack.packb(
+            {
+                "timestamp": f"2026-01-01T00:00:{i:02d}.000Z",
+                "message": f"crumb {i}",
+                "category": "test",
+            }
+        )
+        for i in range(start, start + count)
+    )
+
+
+class MinidumpMetadataViewTest(EventIngestTestCase):
+    """What each uploader sends next to the dump reaches the event."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.url = reverse("minidump", args=[self.project.id]) + self.params
+        with open(
+            "apps/event_ingest/tests/test_data/breakpad_linux_null_deref.dmp", "rb"
+        ) as f:
+            self.minidump_data = f.read()
+
+    def _dump(self):
+        return SimpleUploadedFile(
+            "crash.dmp", self.minidump_data, content_type="application/octet-stream"
+        )
+
+    def _post_gzipped(self, fields):
+        body = encode_multipart(BOUNDARY, fields)
+        return self.client.generic(
+            "POST",
+            self.url,
+            data=gzip.compress(body),
+            content_type=MULTIPART_CONTENT,
+            HTTP_CONTENT_ENCODING="gzip",
+        )
+
+    def _stored_event(self):
+        task_backends["default"].flush_batches()
+        self.assertEqual(IssueEvent.objects.count(), 1)
+        return IssueEvent.objects.get()
+
+    def test_crashpad_msgpack_event_and_breadcrumbs(self):
+        """sentry-native's crashpad backend: msgpack files, gzipped body."""
+        event_id = uuid.uuid4().hex
+        sdk_event = {
+            "event_id": event_id,
+            "level": "fatal",
+            "platform": "native",
+            "release": "native-app@2.0.0",
+            "environment": "production",
+            "user": {"id": "user-1"},
+            "tags": {"channel": "beta"},
+            "contexts": {"os": {"name": "Linux", "version": "6.8.0", "type": "os"}},
+            "sdk": {"name": "sentry.native", "version": "0.12.0"},
+        }
+        # Ring 2 holds the newer crumbs; they merge into timestamp order.
+        res = self._post_gzipped(
+            {
+                "upload_file_minidump": self._dump(),
+                "__sentry-event": SimpleUploadedFile(
+                    "__sentry-event", ormsgpack.packb(sdk_event)
+                ),
+                "__sentry-breadcrumb1": SimpleUploadedFile(
+                    "__sentry-breadcrumb1", _crashpad_breadcrumbs(10, 3)
+                ),
+                "__sentry-breadcrumb2": SimpleUploadedFile(
+                    "__sentry-breadcrumb2", _crashpad_breadcrumbs(0, 3)
+                ),
+                "prod": "native-app",  # crashpad's own annotations are ignored
+            }
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["id"], event_id)
+
+        event = self._stored_event()
+        self.assertEqual(event.event_id.hex, event_id)
+        self.assertEqual(event.release.version, "native-app@2.0.0")
+        self.assertEqual(event.tags["environment"], "production")
+        self.assertEqual(event.tags["channel"], "beta")
+        self.assertEqual(event.data["user"]["id"], "user-1")
+        self.assertEqual(event.data["contexts"]["os"]["version"], "6.8.0")
+        self.assertEqual(
+            [c["message"] for c in event.data["breadcrumbs"]["values"]],
+            [f"crumb {i}" for i in (0, 1, 2, 10, 11, 12)],
+        )
+        self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")
+
+    def test_electron_chunked_event(self):
+        """Electron's native uploader: the event JSON split over sentry__N."""
+        event_id = uuid.uuid4().hex
+        sdk_event = orjson.dumps(
+            {
+                "event_id": event_id,
+                "level": "fatal",
+                "platform": "native",
+                "release": "electron-app@3.1.0",
+                "environment": "staging",
+                "tags": {"event.environment": "native"},
+                "user": {"id": "user-2"},
+            }
+        ).decode()
+        third = len(sdk_event) // 3
+        res = self._post_gzipped(
+            {
+                "upload_file_minidump": self._dump(),
+                "sentry__1": sdk_event[:third],
+                "sentry__2": sdk_event[third : 2 * third],
+                "sentry__3": sdk_event[2 * third :],
+                "sentry___initialScope": orjson.dumps(
+                    {"release": "electron-app@3.0.0", "tags": {"initial": "yes"}}
+                ).decode(),
+            }
+        )
+        self.assertEqual(res.status_code, 200)
+        event = self._stored_event()
+        self.assertEqual(event.event_id.hex, event_id)
+        # The full event beats the startup scope, whose other fields remain.
+        self.assertEqual(event.release.version, "electron-app@3.1.0")
+        self.assertEqual(event.tags["environment"], "staging")
+        self.assertEqual(event.tags["initial"], "yes")
+        self.assertEqual(event.data["user"]["id"], "user-2")
+
+    def test_invalid_sdk_event_keeps_the_crash(self):
+        res = self.client.post(
+            self.url,
+            {
+                "upload_file_minidump": self._dump(),
+                "sentry": orjson.dumps(
+                    {"release": "x", "event_id": "not-a-uuid"}
+                ).decode(),
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        event = self._stored_event()
+        self.assertIsNone(event.release)
+        self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")
+
+    def test_garbage_metadata_parts_are_ignored(self):
+        res = self.client.post(
+            self.url,
+            {
+                "upload_file_minidump": self._dump(),
+                "__sentry-event": SimpleUploadedFile("__sentry-event", b"\xdf\xff"),
+                "__sentry-breadcrumb1": SimpleUploadedFile("b", b"\xc1\xc1"),
+                "sentry__1": "{not json",
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            self._stored_event().data["exception"]["values"][0]["type"], "SIGSEGV"
+        )
+
+    @override_settings(GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE=1024)
+    def test_minidump_cap_is_separate_from_the_ingest_cap(self):
+        """A dump past the event ingest cap is still accepted."""
+        self.assertGreater(len(self.minidump_data), 1024)
+        res = self._post_gzipped({"upload_file_minidump": self._dump()})
+        self.assertEqual(res.status_code, 200)
+
+    @override_settings(GLITCHTIP_MAX_MINIDUMP_SIZE=16 * 1024)
+    def test_dump_over_the_minidump_cap_is_413(self):
+        self.assertGreater(len(self.minidump_data), 16 * 1024)
+        res = self._post_gzipped({"upload_file_minidump": self._dump()})
+        self.assertEqual(res.status_code, 413)
+        res = self.client.post(self.url, {"upload_file_minidump": self._dump()})
+        self.assertEqual(res.status_code, 413)
+        self.assertEqual(IssueEvent.objects.count(), 0)
+
+
+class MinidumpEnvelopeTest(EventIngestTestCase):
+    """sentry-native's breakpad backend and sentry-electron send the crash
+    as an envelope: a stack-less event item plus an event.minidump
+    attachment. The dump fills in the crash; the event keeps its scope."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.url = reverse("event_envelope", args=[self.project.id]) + self.params
+        with open(
+            "apps/event_ingest/tests/test_data/breakpad_linux_null_deref.dmp", "rb"
+        ) as f:
+            self.minidump_data = f.read()
+
+    def _envelope(self, *items: tuple[dict, bytes]) -> bytes:
+        event_id = uuid.uuid4().hex
+        lines = [orjson.dumps({"event_id": event_id})]
+        for header, payload in items:
+            lines.append(orjson.dumps(header | {"length": len(payload)}))
+            lines.append(payload)
+        return b"\n".join(lines)
+
+    def _attachment(self):
+        return (
+            {
+                "type": "attachment",
+                "attachment_type": "event.minidump",
+                "filename": "crash.dmp",
+            },
+            self.minidump_data,
+        )
+
+    def _post(self, body):
+        res = self.client.generic(
+            "POST", self.url, data=body, content_type="application/x-sentry-envelope"
+        )
+        self.assertEqual(res.status_code, 200)
+        task_backends["default"].flush_batches()
+
+    def test_event_item_is_merged_with_the_dump(self):
+        event_id = uuid.uuid4().hex
+        sdk_event = {
+            "event_id": event_id,
+            "level": "fatal",
+            "platform": "native",
+            "release": "breakpad-app@1.0.0",
+            "user": {"id": "user-3"},
+            "breadcrumbs": [{"message": "before the crash"}],
+        }
+        self._post(
+            self._envelope(
+                ({"type": "event"}, orjson.dumps(sdk_event)), self._attachment()
+            )
+        )
+        self.assertEqual(IssueEvent.objects.count(), 1)
+        event = IssueEvent.objects.get()
+        self.assertEqual(event.event_id.hex, event_id)
+        self.assertEqual(event.release.version, "breakpad-app@1.0.0")
+        self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")
+        self.assertEqual(
+            event.data["breadcrumbs"]["values"][0]["message"], "before the crash"
+        )
+
+    def test_invalid_dump_keeps_the_event_item(self):
+        event_id = uuid.uuid4().hex
+        sdk_event = {"event_id": event_id, "release": "r@1", "message": "crash"}
+        self._post(
+            self._envelope(
+                ({"type": "event"}, orjson.dumps(sdk_event)),
+                (self._attachment()[0], b"MDMPgarbage"),
+            )
+        )
+        event = IssueEvent.objects.get()
+        self.assertEqual(event.event_id.hex, event_id)
+        self.assertNotIn("exception", event.data)
+
+    def test_dump_without_event_item_becomes_an_event(self):
+        self._post(self._envelope(self._attachment()))
+        event = IssueEvent.objects.get()
+        self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")

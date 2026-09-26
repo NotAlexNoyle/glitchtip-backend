@@ -198,7 +198,7 @@
       "issue_events": [
         {
           "event_id": "<event_id>",
-          "ip_address": null,
+          "ip_address": "93.184.216.0",
           "level": 5,
           "title": "SIGSEGV: Crash with signal SIGSEGV at address 0x400100"
         }
@@ -359,7 +359,14 @@
               "timestamp": "<timestamp>",
               "transaction": null,
               "type": 1,
-              "user": null
+              "user": {
+                "data": null,
+                "email": null,
+                "geo": null,
+                "id": null,
+                "ip_address": "93.184.216.0",
+                "username": null
+              }
             },
             "project_id": "<project_id>",
             "received": "<received>",

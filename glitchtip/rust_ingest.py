@@ -19,9 +19,8 @@ Envelopes carrying an SDK minidump attachment come back as a fallback and
 are replayed through the regular (minimal-middleware) Django ingest handler
 before any side effect happened, because the minidump-to-event conversion is
 implemented in Python (the ``minidump`` package plus the Python ingest
-schemas). Minidump ingest is in-progress groundwork that does not work end
-to end and is not supported; the handback keeps it reachable rather than
-claiming the path is finished.
+schemas). What a dump yields there is still shallow (no stack walking), so
+the handback keeps the path reachable rather than claiming it is finished.
 """
 
 import logging

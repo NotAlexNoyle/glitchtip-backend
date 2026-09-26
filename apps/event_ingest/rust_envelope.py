@@ -80,14 +80,19 @@ def frame_envelope(body: bytes, content_encoding: str | None = None) -> ParsedEn
     return parse_envelope(body, content_encoding, _max_unzipped())
 
 
-def decompress_body(body: bytes, content_encoding: str | None) -> bytes:
+def decompress_body(
+    body: bytes, content_encoding: str | None, max_size: int | None = None
+) -> bytes:
     """Decompress a full request body via gt_rust — no envelope framing.
 
     For the non-envelope endpoints that parse the raw bytes themselves. Raises
     ``ValueError`` for a garbled/unsupported stream and ``EnvelopeTooBig`` when
-    the decompressed size exceeds ``GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE``.
+    the decompressed size exceeds ``max_size`` (by default
+    ``GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE``).
     """
-    return decompress(body, content_encoding, _max_unzipped())
+    return decompress(
+        body, content_encoding, _max_unzipped() if max_size is None else max_size
+    )
 
 
 def envelope_error_response(exc: Exception) -> HttpResponse | None:

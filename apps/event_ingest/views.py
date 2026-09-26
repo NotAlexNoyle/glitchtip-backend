@@ -8,7 +8,7 @@ import sentry_sdk
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.cache import cache
-from django.core.exceptions import RequestDataTooBig
+from django.core.exceptions import RequestDataTooBig, TooManyFieldsSent
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -25,7 +25,8 @@ from glitchtip.partition_manager import UUID7Helper
 
 from .api import get_ip_address
 from .authentication import EventAuthHttpRequest, event_auth
-from .minidump_event import InvalidMinidump, minidump_to_event
+from .minidump_event import InvalidMinidump, merge_sdk_event, parse_minidump
+from .minidump_upload import sdk_event_from_upload
 from .pii_scrubber import resolve_scrubber
 from .rust_envelope import (
     EnvelopeTooBig,
@@ -80,6 +81,53 @@ def handle_supported_payload_error(
 
 
 @csrf_exempt
+def _find_minidump_attachment(items) -> bytes | None:
+    """The first ``event.minidump`` attachment's bytes, if the envelope has one."""
+    for envelope_item in items:
+        payload = envelope_item.payload
+        if payload[:4] != MINIDUMP_MAGIC:
+            continue
+        try:
+            header = ItemHeaderSchema.model_validate_json(envelope_item.header)
+        except ValidationError:
+            continue
+        if header.type == "attachment" and header.attachment_type == "event.minidump":
+            return payload
+    return None
+
+
+async def _event_with_minidump(
+    payload_bytes: bytes, minidump_bytes: bytes, path: str
+) -> WebIngestIssueEvent | None:
+    """The envelope's event item merged with its minidump, or None.
+
+    None means "ingest the event item as it is": the dump didn't parse, or
+    the merged event didn't validate. Either way the SDK's own event still
+    gets in, as it would have without a dump.
+    """
+    try:
+        sdk_event = orjson.loads(payload_bytes)
+    except orjson.JSONDecodeError:
+        return None
+    if not isinstance(sdk_event, dict):
+        return None
+    try:
+        minidump_event = await sync_to_async(parse_minidump)(minidump_bytes)
+    except InvalidMinidump as e:
+        logger.info("Rejected minidump attachment on %s: %s", path, e)
+        return None
+    except Exception as e:
+        capture_exception(e)
+        logger.error("Failed to process minidump attachment on %s", path, exc_info=e)
+        return None
+    try:
+        return WebIngestIssueEvent.model_validate(
+            merge_sdk_event(minidump_event, sdk_event)
+        )
+    except ValidationError:
+        return None
+
+
 async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
     """Django fallback for envelope ingest.
 
@@ -90,10 +138,11 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
     because turning a minidump into an event is implemented in Python (the
     ``minidump`` package plus the schemas below).
 
-    That minidump branch is groundwork, not a feature: minidump ingest does
-    not work end to end and is not supported. It is kept reachable for the
-    work to build on, so treat it as in-progress rather than as a path with
-    behavior worth preserving.
+    The dump is merged into the envelope's event item (the SDK's scope: release,
+    user, tags, breadcrumbs) or, without one, becomes an event on its own.
+    What a dump yields is still shallow — the exception, one frame per thread
+    and the module list, with no stack walking — so treat the path as
+    in-progress rather than as behavior worth preserving.
     """
     if request.method != "POST":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
@@ -153,11 +202,13 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
         return JsonResponse({"detail": "Invalid envelope header"}, status=400)
     envelope_header_event_id = envelope_header.event_id
 
-    # Track minidump attachment for SDK-based minidump submissions.
-    # If the envelope already contains a processed event or transaction,
-    # skip the minidump fallback (the SDK already sent a rich event).
-    minidump_bytes: bytes | None = None
-    event_processed = False
+    # An SDK that sends a minidump in an envelope (sentry-native's breakpad
+    # backend, sentry-electron's default minidump integration) sends the
+    # crash's event alongside it, carrying the scope but no stack. Find the
+    # dump up front so the event item can be merged with it; an envelope
+    # with a dump and no event item gets an event built from the dump alone.
+    minidump_bytes = _find_minidump_attachment(envelope.items)
+    minidump_merged = False
 
     # Loop through items. gt_rust has already split each item into its header
     # line and verbatim payload bytes (length- or newline-delimited) and stopped
@@ -228,7 +279,14 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
             try:
                 if item_header.type == "event":
                     # Heavy validation and normalization happens here
-                    item = WebIngestIssueEvent.model_validate_json(payload_bytes)
+                    item = None
+                    if minidump_bytes is not None and not minidump_merged:
+                        item = await _event_with_minidump(
+                            payload_bytes, minidump_bytes, request.path
+                        )
+                        minidump_merged = item is not None
+                    if item is None:
+                        item = WebIngestIssueEvent.model_validate_json(payload_bytes)
                     issue_type = (
                         IssueEventType.ERROR
                         if item.exception
@@ -260,7 +318,6 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
                         await ingest_event.aenqueue(
                             serialize_for_vtasks(asdict(interchange_event))
                         )
-                    event_processed = True
 
                 elif item_header.type == "transaction":
                     item = TransactionEventSchema.model_validate_json(payload_bytes)
@@ -277,7 +334,6 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
                         await ingest_transaction.aenqueue(
                             serialize_for_vtasks(asdict(interchange_event))
                         )
-                    event_processed = True
 
                 elif item_header.type in ("user_report", "feedback"):
                     if item_header.type == "feedback":
@@ -348,21 +404,13 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
                 # Decide whether to continue or break, maybe continue is okay
                 continue
 
-        else:
-            if (
-                item_header.type == "attachment"
-                and item_header.attachment_type == "event.minidump"
-                and len(payload_bytes) >= 4
-                and payload_bytes[:4] == MINIDUMP_MAGIC
-            ):
-                minidump_bytes = payload_bytes
-
-    # If we got a minidump attachment but no event was processed from the
-    # envelope, parse the minidump into a full event and enqueue it.
-    if minidump_bytes and not event_processed:
+    # A minidump no event item claimed becomes an event of its own.
+    if minidump_bytes is not None and not minidump_merged:
         try:
-            event_data = await sync_to_async(minidump_to_event)(minidump_bytes)
+            event_data = await sync_to_async(parse_minidump)(minidump_bytes)
             item = WebIngestIssueEvent.model_validate(event_data)
+            if client_ip:
+                item.user = EventUser(ip_address=client_ip)
             if item.event_id is None:
                 item.event_id = envelope_header_event_id or uuid.uuid4()
             issue_type = (
@@ -399,6 +447,80 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
     return JsonResponse({})  # Success, but maybe no specific ID to return
 
 
+def _too_big(detail: str) -> HttpResponse:
+    return HttpResponse(detail, status=413)
+
+
+def _read_minidump_upload(request, content_encoding: str | None):
+    """Parse the multipart body; return (minidump bytes, SDK event) or a response.
+
+    Sync: it spools the file part to disk and reads it back, so the async
+    view runs it in a worker thread instead of on the event loop.
+    """
+    max_size = settings.GLITCHTIP_MAX_MINIDUMP_SIZE
+    # A Content-Encoded multipart upload arrives still compressed (crashpad
+    # and Electron both gzip by default). Decompress it in Rust, capped, and
+    # swap in a plain stream before Django parses request.FILES.
+    if content_encoding:
+        compressed = request._stream.read(max_size + 1)
+        if len(compressed) > max_size:
+            return _too_big("Minidump upload too large")
+        try:
+            decompressed = decompress_body(compressed, content_encoding, max_size)
+        except EnvelopeTooBig as e:
+            return _too_big(str(e))
+        except ValueError:
+            return JsonResponse({"detail": "Invalid compressed body"}, status=400)
+        del compressed
+        request._stream = io.BytesIO(decompressed)
+        request.META["CONTENT_LENGTH"] = str(len(decompressed))
+        request.META.pop("HTTP_CONTENT_ENCODING", None)
+        del decompressed
+
+    try:
+        files = request.FILES
+        post = request.POST
+    except RequestDataTooBig as e:
+        return _too_big(str(e))
+    except TooManyFieldsSent:
+        return JsonResponse({"detail": "Too many fields"}, status=400)
+    # The file part now lives in its own buffer (or on disk past
+    # FILE_UPLOAD_MAX_MEMORY_SIZE); drop the decompressed body.
+    request._stream = io.BytesIO()
+
+    upload_file = files.get("upload_file_minidump")
+    if not upload_file:
+        return JsonResponse({"detail": "Missing upload_file_minidump"}, status=400)
+    if upload_file.size is not None and upload_file.size > max_size:
+        return _too_big("Minidump too large")
+    minidump_data = upload_file.read(max_size + 1)
+    upload_file.close()
+    if len(minidump_data) > max_size:
+        return _too_big("Minidump too large")
+    if len(minidump_data) < 4 or minidump_data[:4] != MINIDUMP_MAGIC:
+        return JsonResponse({"detail": "Invalid minidump file"}, status=400)
+    return minidump_data, sdk_event_from_upload(post, files)
+
+
+def _validate_minidump_event(
+    minidump_event: dict, sdk_event: dict, path: str
+) -> WebIngestIssueEvent:
+    """Validate the dump merged with its SDK event, or the dump alone.
+
+    The SDK event is client-supplied; if it doesn't validate, keep the crash
+    and drop the metadata rather than rejecting both.
+    """
+    try:
+        return WebIngestIssueEvent.model_validate(
+            merge_sdk_event(minidump_event, sdk_event)
+        )
+    except ValidationError as e:
+        if not sdk_event:
+            raise
+        logger.info("Dropped invalid SDK event sent with minidump on %s: %s", path, e)
+        return WebIngestIssueEvent.model_validate(minidump_event)
+
+
 @csrf_exempt
 async def minidump_view(request: EventAuthHttpRequest, project_id: int):
     """Accept Crashpad/Breakpad minidump uploads.
@@ -408,7 +530,9 @@ async def minidump_view(request: EventAuthHttpRequest, project_id: int):
 
     Fields:
         upload_file_minidump: The binary minidump file
-        sentry: Optional JSON with release, environment, tags
+        plus the SDK event, in any of the shapes minidump_upload reads
+        (crashpad's msgpack ``__sentry-event`` and breadcrumb files,
+        Electron's ``sentry__N`` chunks, or a JSON ``sentry`` field)
     """
     if request.method != "POST":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
@@ -426,57 +550,29 @@ async def minidump_view(request: EventAuthHttpRequest, project_id: int):
 
     if project is None:
         return JsonResponse({"detail": "Denied"}, status=403)
-
+    request.auth = project  # get_ip_address reads the IP-scrubbing setting
     update_first_event = project.first_event is None
 
-    # A Content-Encoded multipart upload arrives still compressed (nothing
-    # decompresses the body upstream of this view). Decompress it in Rust and
-    # swap in a plain stream before Django parses request.FILES. (Minidump
-    # uploaders rarely set Content-Encoding, so this is usually skipped.)
-    content_encoding = request_content_encoding(request)
-    if content_encoding:
-        try:
-            compressed = await sync_to_async(request._stream.read)()
-            decompressed = decompress_body(compressed, content_encoding)
-        except EnvelopeTooBig as e:
-            return HttpResponse(str(e), status=413)
-        except ValueError:
-            return JsonResponse({"detail": "Invalid compressed body"}, status=400)
-        request._stream = io.BytesIO(decompressed)
-        request.META["CONTENT_LENGTH"] = str(len(decompressed))
-        request.META.pop("HTTP_CONTENT_ENCODING", None)
+    result = await sync_to_async(_read_minidump_upload)(
+        request, request_content_encoding(request)
+    )
+    if isinstance(result, HttpResponse):
+        return result
+    minidump_data, sdk_event = result
 
-    # Extract multipart fields
-    upload_file = request.FILES.get("upload_file_minidump")
-    if not upload_file:
-        return JsonResponse({"detail": "Missing upload_file_minidump"}, status=400)
-
-    minidump_data = upload_file.read()
-    if len(minidump_data) < 4 or minidump_data[:4] != MINIDUMP_MAGIC:
-        return JsonResponse({"detail": "Invalid minidump file"}, status=400)
-
-    # Parse optional sentry metadata
-    sentry_meta = {}
-    sentry_raw = request.POST.get("sentry")
-    if sentry_raw:
-        try:
-            sentry_meta = orjson.loads(sentry_raw)
-        except orjson.JSONDecodeError:
-            pass  # Ignore malformed metadata
-
-    # Parse minidump into event
     try:
-        event_data = await sync_to_async(minidump_to_event)(minidump_data, sentry_meta)
+        minidump_event = await sync_to_async(parse_minidump)(minidump_data)
     except InvalidMinidump:
         return JsonResponse({"detail": "Invalid minidump file"}, status=400)
     except Exception as e:
         capture_exception(e)
         logger.error("Failed to parse minidump on %s", request.path, exc_info=e)
         return JsonResponse({"detail": "Failed to parse minidump"}, status=400)
+    del minidump_data
 
     # Validate and enqueue
     try:
-        item = WebIngestIssueEvent.model_validate(event_data)
+        item = _validate_minidump_event(minidump_event, sdk_event, request.path)
     except ValidationError as e:
         set_level("warning")
         capture_exception(e)
@@ -487,6 +583,13 @@ async def minidump_view(request: EventAuthHttpRequest, project_id: int):
 
     if item.event_id is None:
         item.event_id = uuid.uuid4()
+
+    client_ip = get_ip_address(request)
+    if client_ip:
+        if item.user:
+            item.user.ip_address = client_ip
+        else:
+            item.user = EventUser(ip_address=client_ip)
 
     issue_type = IssueEventType.ERROR if item.exception else IssueEventType.DEFAULT
 

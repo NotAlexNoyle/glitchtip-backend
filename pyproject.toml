@@ -47,6 +47,9 @@ dependencies = [
     "mcp[cli]>=2.1.1,<3",
     "duckdb>=1.2.0",
     "minidump>=0.0.24",
+    # Decodes the msgpack scope files crashpad uploads next to a minidump.
+    # Already installed via django-vcache; listed because we import it.
+    "ormsgpack>=1.12",
     "arro3-core~=0.8",
     "arro3-io~=0.8",
     # Matches Django major/minor
