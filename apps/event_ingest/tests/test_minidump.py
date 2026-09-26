@@ -2,6 +2,7 @@ import gzip
 import random
 import struct
 import uuid
+from unittest import mock
 
 import orjson
 import ormsgpack
@@ -91,6 +92,13 @@ class BoundMinidumpTest(TestCase):
         with self.assertRaises(InvalidMinidump):
             bound_minidump(_minidump([(3, thread_list)]))
 
+    def test_long_thread_lists_are_truncated(self):
+        threads = 5000
+        thread_list = struct.pack("<I", threads) + b"\0" * 48 * threads
+        bounded = bound_minidump(_minidump([(3, thread_list)]))
+        (rva,) = struct.unpack_from("<I", bounded, 40)
+        self.assertEqual(struct.unpack_from("<I", bounded, rva)[0], 4096)
+
     def test_unread_streams_are_marked_unused(self):
         memory_list = struct.pack("<I", 0xFFFFFFFF)
         bounded = bound_minidump(_minidump([(5, memory_list)]))
@@ -157,7 +165,7 @@ class MinidumpToEventTest(TestCase):
 
         self.assertEqual(event["platform"], "native")
         self.assertEqual(event["level"], "fatal")
-        self.assertIn("event_id", event)
+        self.assertNotIn("event_id", event)  # the caller assigns it
         self.assertIn("exception", event)
         self.assertIn("threads", event)
         self.assertIn("debug_meta", event)
@@ -445,6 +453,20 @@ class DecodeMsgpackStreamTest(TestCase):
         ):
             self.assertEqual(decode_msgpack_stream(data, 10), [])
 
+    def test_non_json_values_are_normalized(self):
+        """msgpack bin/ext would break the JSON task payload downstream."""
+        data = ormsgpack.packb({"b": b"caf\xc3\xa9"})
+        self.assertEqual(decode_msgpack_stream(data, 1), [{"b": "café"}])
+        # Non-str map keys don't decode at all; the value is skipped.
+        int_keys = ormsgpack.packb({1: "x"}, option=ormsgpack.OPT_NON_STR_KEYS)
+        self.assertEqual(decode_msgpack_stream(int_keys, 1), [])
+
+    def test_element_budget_bounds_decoded_objects(self):
+        """A one-byte empty map per element can't amplify past the budget."""
+        data = b"\xdd" + struct.pack(">I", 10_000) + b"\x80" * 10_000
+        self.assertEqual(decode_msgpack_stream(data, 1, max_elements=1000), [])
+        self.assertEqual(len(decode_msgpack_stream(data, 1)[0]), 10_000)
+
     def test_random_bytes_never_raise(self):
         rng = random.Random(0)
         for _ in range(500):
@@ -497,7 +519,7 @@ def _crashpad_breadcrumbs(start: int, count: int) -> bytes:
     return b"".join(
         ormsgpack.packb(
             {
-                "timestamp": f"2026-01-01T00:00:{i:02d}.000Z",
+                "timestamp": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}.000Z",
                 "message": f"crumb {i}",
                 "category": "test",
             }
@@ -583,6 +605,29 @@ class MinidumpMetadataViewTest(EventIngestTestCase):
             [f"crumb {i}" for i in (0, 1, 2, 10, 11, 12)],
         )
         self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")
+
+    def test_newest_breadcrumbs_are_kept(self):
+        """A ring can hold more than we keep; the newest are the ones that
+        matter, whichever ring they are in."""
+        res = self._post_gzipped(
+            {
+                "upload_file_minidump": self._dump(),
+                "__sentry-event": SimpleUploadedFile(
+                    "__sentry-event", ormsgpack.packb({"release": "r@1"})
+                ),
+                "__sentry-breadcrumb1": SimpleUploadedFile(
+                    "__sentry-breadcrumb1", _crashpad_breadcrumbs(0, 60)
+                ),
+                "__sentry-breadcrumb2": SimpleUploadedFile(
+                    "__sentry-breadcrumb2", _crashpad_breadcrumbs(60, 150)
+                ),
+            }
+        )
+        self.assertEqual(res.status_code, 200)
+        messages = [
+            c["message"] for c in self._stored_event().data["breadcrumbs"]["values"]
+        ]
+        self.assertEqual(messages, [f"crumb {i}" for i in range(110, 210)])
 
     def test_electron_chunked_event(self):
         """Electron's native uploader: the event JSON split over sentry__N."""
@@ -728,6 +773,52 @@ class MinidumpEnvelopeTest(EventIngestTestCase):
         self.assertEqual(
             event.data["breadcrumbs"]["values"][0]["message"], "before the crash"
         )
+
+    def test_event_item_without_event_id_gets_the_envelope_id(self):
+        body = self._envelope(
+            ({"type": "event"}, orjson.dumps({"level": "fatal"})), self._attachment()
+        )
+        header_id = orjson.loads(body.split(b"\n", 1)[0])["event_id"]
+        self._post(body)
+        event = IssueEvent.objects.get()
+        self.assertEqual(event.event_id.hex, header_id)
+        self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")
+
+    @mock.patch("apps.event_ingest.views.parse_minidump", wraps=parse_minidump)
+    def test_unmergeable_event_is_ingested_once_and_dump_parsed_once(self, parse):
+        """When the merged event fails validation the event item goes in as
+        sent, and the dump is neither re-parsed nor ingested a second time."""
+        sdk_event = {"event_id": uuid.uuid4().hex, "release": "r@1"}
+        with mock.patch(
+            "apps.event_ingest.views.merge_sdk_event",
+            return_value={"event_id": "not-a-uuid"},
+        ):
+            self._post(
+                self._envelope(
+                    ({"type": "event"}, orjson.dumps(sdk_event)), self._attachment()
+                )
+            )
+        self.assertEqual(parse.call_count, 1)
+        event = IssueEvent.objects.get()
+        self.assertEqual(event.event_id.hex, sdk_event["event_id"])
+        self.assertNotIn("exception", event.data)
+
+    def test_transaction_does_not_swallow_the_dump(self):
+        transaction = {
+            "type": "transaction",
+            "event_id": uuid.uuid4().hex,
+            "transaction": "/",
+            "start_timestamp": "2026-01-01T00:00:00Z",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "contexts": {"trace": {"trace_id": uuid.uuid4().hex, "span_id": "a" * 16}},
+        }
+        self._post(
+            self._envelope(
+                ({"type": "transaction"}, orjson.dumps(transaction)), self._attachment()
+            )
+        )
+        event = IssueEvent.objects.get()
+        self.assertEqual(event.data["exception"]["values"][0]["type"], "SIGSEGV")
 
     def test_invalid_dump_keeps_the_event_item(self):
         event_id = uuid.uuid4().hex

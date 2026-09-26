@@ -142,14 +142,14 @@ GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE = env.int(
 # Limits size (in bytes) of one /minidump/ upload, compressed and after
 # decompression. Separate from GLITCHTIP_MAX_UNZIPPED_PAYLOAD_SIZE because a
 # native crash dump is routinely bigger than any event: crashpad's default
-# dumps include each thread's stack memory and land at several MB, so the
-# 5 MB ingest cap turned real crashes into 413s. Only /minidump/ uses it —
-# envelopes, minidump attachments included, keep the ingest cap.
+# dumps include each thread's stack memory and land at several MB, which the
+# 5 MB event cap is too small for. Only /minidump/ uses it — envelopes,
+# minidump attachments included, keep the event cap.
 #
-# What it costs: a request holds about two copies of the dump at its peak (the
-# decompressed body while Django spools the file part to disk, then the file
-# read back plus the parser's copy of its stream directory), so budget roughly
-# 2x this per concurrent upload.
+# What it costs per concurrent upload: about 2x the dump at its peak (the
+# upload read back from disk plus the parser's patched copy), plus the
+# compressed body while a Content-Encoded upload is decompressed — so budget
+# up to 3x this in the worst case.
 GLITCHTIP_MAX_MINIDUMP_SIZE = env.int(
     "GLITCHTIP_MAX_MINIDUMP_SIZE",
     20 * 1024 * 1024,  # 20 MB

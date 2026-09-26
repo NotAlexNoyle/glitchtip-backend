@@ -32,10 +32,15 @@ logger = logging.getLogger(__name__)
 
 # The scope event and each breadcrumb ring are a few KB in practice (the
 # ring holds at most max_breadcrumbs entries, 100 by default). These caps
-# keep one upload's metadata bounded no matter what a client sends.
-MAX_EVENT_PART_SIZE = 1024 * 1024
-MAX_BREADCRUMB_PART_SIZE = 1024 * 1024
+# keep one upload's metadata bounded no matter what a client sends. Bytes
+# alone don't bound it: an empty msgpack map is one byte and a Python dict,
+# so the decoded element count per part is capped too.
+MAX_PART_SIZE = 256 * 1024
+MAX_PART_ELEMENTS = 50_000
 MAX_BREADCRUMBS = 100
+# Values decoded per breadcrumb ring before keeping the newest
+# MAX_BREADCRUMBS across both (an SDK may be configured to keep more).
+MAX_RING_VALUES = 1000
 
 # msgpack header byte -> (header length, length-field format or None).
 # The payload/children that follow are handled in _msgpack_value_end.
@@ -80,20 +85,24 @@ _CONTAINERS = {
 }
 
 
-def _msgpack_value_end(data: bytes, pos: int) -> int:
+def _msgpack_value_end(data: bytes, pos: int, budget: int) -> tuple[int, int]:
     """Offset just past the msgpack value that starts at ``pos``.
 
     ormsgpack decodes one value and ignores what follows, so splitting a
     stream of values needs each one's length. This walks headers only,
     iteratively (a nesting depth can't recurse the stack), and every step
     consumes at least one byte, so it is linear in the data it is given
-    whatever counts the data claims.
+    whatever counts the data claims. Returns the end offset and what is left
+    of ``budget``, the number of elements (headers) still allowed.
     """
     pending = 1
     end = len(data)
     while pending:
         if pos >= end:
             raise ValueError("truncated msgpack value")
+        budget -= 1
+        if budget < 0:
+            raise ValueError("too many msgpack elements")
         b = data[pos]
         pending -= 1
         if b <= 0x7F or b >= 0xE0:  # fixint
@@ -125,22 +134,37 @@ def _msgpack_value_end(data: bytes, pos: int) -> int:
             raise ValueError("invalid msgpack header byte")
     if pos > end:
         raise ValueError("truncated msgpack value")
-    return pos
+    return pos, budget
 
 
-def decode_msgpack_stream(data: bytes, max_values: int) -> list:
-    """Decode up to ``max_values`` concatenated msgpack values.
+def _json_default(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return None  # msgpack extension types have no JSON meaning
 
-    Stops quietly at the first value that doesn't decode, keeping what came
-    before it: a crash can cut the last append short.
+
+def decode_msgpack_stream(
+    data: bytes, max_values: int, max_elements: int = MAX_PART_ELEMENTS
+) -> list:
+    """Decode up to ``max_values`` concatenated msgpack values as JSON types.
+
+    msgpack can carry what JSON can't (bin, ext), and the
+    result goes into an event that is serialized as JSON downstream, so each
+    value is normalized through orjson. Stops quietly at the first value that
+    doesn't decode or would exceed ``max_elements`` in total, keeping what
+    came before it: a crash can cut the last append short.
     """
     values = []
     pos = 0
+    budget = max_elements
     while pos < len(data) and len(values) < max_values:
         try:
-            end = _msgpack_value_end(data, pos)
-            values.append(ormsgpack.unpackb(data[pos:end]))
-        except ValueError:  # includes ormsgpack.MsgpackDecodeError
+            end, budget = _msgpack_value_end(data, pos, budget)
+            value = ormsgpack.unpackb(data[pos:end])
+            values.append(orjson.loads(orjson.dumps(value, default=_json_default)))
+        except (ValueError, TypeError):
+            # ValueError covers ormsgpack.MsgpackDecodeError; TypeError covers
+            # orjson.JSONEncodeError.
             break
         pos = end
     return values
@@ -187,11 +211,11 @@ def _crashpad_breadcrumbs(files: MultiValueDict) -> list[dict]:
     """
     crumbs = []
     for name in ("__sentry-breadcrumb1", "__sentry-breadcrumb2"):
-        data = _read_part(files, name, MAX_BREADCRUMB_PART_SIZE)
+        data = _read_part(files, name, MAX_PART_SIZE)
         if data:
             crumbs.extend(
                 c
-                for c in decode_msgpack_stream(data, MAX_BREADCRUMBS)
+                for c in decode_msgpack_stream(data, MAX_RING_VALUES)
                 if isinstance(c, dict)
             )
     crumbs.sort(key=lambda c: str(c.get("timestamp") or ""))
@@ -199,7 +223,7 @@ def _crashpad_breadcrumbs(files: MultiValueDict) -> list[dict]:
 
 
 def _crashpad_event(files: MultiValueDict) -> dict | None:
-    data = _read_part(files, "__sentry-event", MAX_EVENT_PART_SIZE)
+    data = _read_part(files, "__sentry-event", MAX_PART_SIZE)
     if not data:
         return None
     values = decode_msgpack_stream(data, 1)

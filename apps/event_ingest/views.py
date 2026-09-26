@@ -10,6 +10,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import RequestDataTooBig, TooManyFieldsSent
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
+from django.http.multipartparser import MultiPartParserError
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from ninja.errors import AuthenticationError
@@ -80,7 +81,6 @@ def handle_supported_payload_error(
     )
 
 
-@csrf_exempt
 def _find_minidump_attachment(items) -> bytes | None:
     """The first ``event.minidump`` attachment's bytes, if the envelope has one."""
     for envelope_item in items:
@@ -96,29 +96,32 @@ def _find_minidump_attachment(items) -> bytes | None:
     return None
 
 
-async def _event_with_minidump(
-    payload_bytes: bytes, minidump_bytes: bytes, path: str
-) -> WebIngestIssueEvent | None:
-    """The envelope's event item merged with its minidump, or None.
+async def _parse_minidump_attachment(minidump_bytes: bytes, path: str) -> dict | None:
+    """The dump's event fields, or None (logged) when it doesn't parse."""
+    try:
+        return await sync_to_async(parse_minidump)(minidump_bytes)
+    except InvalidMinidump as e:
+        logger.info("Rejected minidump attachment on %s: %s", path, e)
+    except Exception as e:
+        capture_exception(e)
+        logger.error("Failed to process minidump attachment on %s", path, exc_info=e)
+    return None
 
-    None means "ingest the event item as it is": the dump didn't parse, or
-    the merged event didn't validate. Either way the SDK's own event still
-    gets in, as it would have without a dump.
+
+def _merge_event_item(
+    payload_bytes: bytes, minidump_event: dict
+) -> WebIngestIssueEvent | None:
+    """The envelope's event item merged with its dump, or None.
+
+    None means "ingest the event item as it is": the merged event didn't
+    validate, so the SDK's own event still gets in, as it would have
+    without a dump.
     """
     try:
         sdk_event = orjson.loads(payload_bytes)
     except orjson.JSONDecodeError:
         return None
     if not isinstance(sdk_event, dict):
-        return None
-    try:
-        minidump_event = await sync_to_async(parse_minidump)(minidump_bytes)
-    except InvalidMinidump as e:
-        logger.info("Rejected minidump attachment on %s: %s", path, e)
-        return None
-    except Exception as e:
-        capture_exception(e)
-        logger.error("Failed to process minidump attachment on %s", path, exc_info=e)
         return None
     try:
         return WebIngestIssueEvent.model_validate(
@@ -128,6 +131,7 @@ async def _event_with_minidump(
         return None
 
 
+@csrf_exempt
 async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
     """Django fallback for envelope ingest.
 
@@ -208,7 +212,10 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
     # dump up front so the event item can be merged with it; an envelope
     # with a dump and no event item gets an event built from the dump alone.
     minidump_bytes = _find_minidump_attachment(envelope.items)
-    minidump_merged = False
+    # Parsed at most once, lazily; claimed by the first event item ingested.
+    minidump_event: dict | None = None
+    minidump_parsed = False
+    minidump_claimed = False
 
     # Loop through items. gt_rust has already split each item into its header
     # line and verbatim payload bytes (length- or newline-delimited) and stopped
@@ -280,13 +287,17 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
                 if item_header.type == "event":
                     # Heavy validation and normalization happens here
                     item = None
-                    if minidump_bytes is not None and not minidump_merged:
-                        item = await _event_with_minidump(
-                            payload_bytes, minidump_bytes, request.path
-                        )
-                        minidump_merged = item is not None
+                    if minidump_bytes is not None and not minidump_claimed:
+                        if not minidump_parsed:
+                            minidump_parsed = True
+                            minidump_event = await _parse_minidump_attachment(
+                                minidump_bytes, request.path
+                            )
+                        if minidump_event is not None:
+                            item = _merge_event_item(payload_bytes, minidump_event)
                     if item is None:
                         item = WebIngestIssueEvent.model_validate_json(payload_bytes)
+                    minidump_claimed = True
                     issue_type = (
                         IssueEventType.ERROR
                         if item.exception
@@ -405,39 +416,40 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
                 continue
 
     # A minidump no event item claimed becomes an event of its own.
-    if minidump_bytes is not None and not minidump_merged:
-        try:
-            event_data = await sync_to_async(parse_minidump)(minidump_bytes)
-            item = WebIngestIssueEvent.model_validate(event_data)
-            if client_ip:
-                item.user = EventUser(ip_address=client_ip)
-            if item.event_id is None:
+    if minidump_bytes is not None and not minidump_claimed:
+        if not minidump_parsed:
+            minidump_event = await _parse_minidump_attachment(
+                minidump_bytes, request.path
+            )
+        if minidump_event is not None:
+            try:
+                item = WebIngestIssueEvent.model_validate(minidump_event)
+                if client_ip:
+                    item.user = EventUser(ip_address=client_ip)
                 item.event_id = envelope_header_event_id or uuid.uuid4()
-            issue_type = (
-                IssueEventType.ERROR if item.exception else IssueEventType.DEFAULT
-            )
-            primary_id = UUID7Helper.from_datetime()
-            interchange_event = IngestTaskMessage(
-                project_id=project_id,
-                organization_id=project.organization_id,
-                payload=scrubber.scrub_event(item.dict() | {"type": issue_type}),
-                received=timezone.now(),
-                update_first_event=update_first_event,
-                uuid=primary_id.hex,
-            )
-            if await cache.aadd("uuid" + item.event_id.hex, True):
-                await ingest_event.aenqueue(
-                    serialize_for_vtasks(asdict(interchange_event))
+                issue_type = (
+                    IssueEventType.ERROR if item.exception else IssueEventType.DEFAULT
                 )
-        except InvalidMinidump as e:
-            logger.info("Rejected minidump attachment on %s: %s", request.path, e)
-        except Exception as e:
-            capture_exception(e)
-            logger.error(
-                "Failed to process minidump attachment on %s",
-                request.path,
-                exc_info=e,
-            )
+                primary_id = UUID7Helper.from_datetime()
+                interchange_event = IngestTaskMessage(
+                    project_id=project_id,
+                    organization_id=project.organization_id,
+                    payload=scrubber.scrub_event(item.dict() | {"type": issue_type}),
+                    received=timezone.now(),
+                    update_first_event=update_first_event,
+                    uuid=primary_id.hex,
+                )
+                if await cache.aadd("uuid" + item.event_id.hex, True):
+                    await ingest_event.aenqueue(
+                        serialize_for_vtasks(asdict(interchange_event))
+                    )
+            except Exception as e:
+                capture_exception(e)
+                logger.error(
+                    "Failed to process minidump attachment on %s",
+                    request.path,
+                    exc_info=e,
+                )
 
     # Final Response
     # Return event_id from envelope header if it exists, as it might relate
@@ -445,6 +457,11 @@ async def event_envelope_view(request: EventAuthHttpRequest, project_id: int):
     if envelope_header.event_id:
         return JsonResponse({"id": envelope_header.event_id.hex})
     return JsonResponse({})  # Success, but maybe no specific ID to return
+
+
+# Body bytes allowed past GLITCHTIP_MAX_MINIDUMP_SIZE for multipart framing
+# and the metadata parts minidump_upload reads (each capped well below this).
+_MINIDUMP_BODY_ALLOWANCE = 2 * 1024 * 1024
 
 
 def _too_big(detail: str) -> HttpResponse:
@@ -458,6 +475,14 @@ def _read_minidump_upload(request, content_encoding: str | None):
     view runs it in a worker thread instead of on the event loop.
     """
     max_size = settings.GLITCHTIP_MAX_MINIDUMP_SIZE
+    # Refuse an oversized body before Django spools it to disk. The allowance
+    # covers the multipart framing and the SDK metadata parts next to the dump.
+    try:
+        content_length = int(request.META.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        content_length = 0
+    if content_length > max_size + _MINIDUMP_BODY_ALLOWANCE:
+        return _too_big("Minidump upload too large")
     # A Content-Encoded multipart upload arrives still compressed (crashpad
     # and Electron both gzip by default). Decompress it in Rust, capped, and
     # swap in a plain stream before Django parses request.FILES.
@@ -484,6 +509,8 @@ def _read_minidump_upload(request, content_encoding: str | None):
         return _too_big(str(e))
     except TooManyFieldsSent:
         return JsonResponse({"detail": "Too many fields"}, status=400)
+    except MultiPartParserError:
+        return JsonResponse({"detail": "Invalid multipart body"}, status=400)
     # The file part now lives in its own buffer (or on disk past
     # FILE_UPLOAD_MAX_MEMORY_SIZE); drop the decompressed body.
     request._stream = io.BytesIO()
@@ -572,7 +599,9 @@ async def minidump_view(request: EventAuthHttpRequest, project_id: int):
 
     # Validate and enqueue
     try:
-        item = _validate_minidump_event(minidump_event, sdk_event, request.path)
+        item = await sync_to_async(_validate_minidump_event)(
+            minidump_event, sdk_event, request.path
+        )
     except ValidationError as e:
         set_level("warning")
         capture_exception(e)
