@@ -142,7 +142,7 @@ test-latest:
     - if: $CI_PIPELINE_SOURCE != "schedule"
 
 # Integration lane: the full suite again, against a production-shaped database
-# (16 hash buckets, two weeks of past partitions) with guards that unit tests
+# (16 hash buckets, weeks of past partitions) with guards that unit tests
 # can't express. First guard: every statement on a partitioned table must be
 # narrowed by organization and by time -- see glitchtip/test_utils/partition_guard.py.
 # CI only; nothing here runs in production.
@@ -151,8 +151,6 @@ test-integration:
   # Exploratory: master already has unpruned call sites. Drop this once they
   # are fixed or allowlisted, so a new one fails the pipeline.
   allow_failure: true
-  variables:
-    GLITCHTIP_PARTITION_GUARD_REPORT: partition_guard.jsonl
   script:
     - uv sync --frozen --no-install-project
     - python -c "import duckdb; c=duckdb.connect(); c.install_extension('httpfs'); c.install_extension('aws'); c.close()"
