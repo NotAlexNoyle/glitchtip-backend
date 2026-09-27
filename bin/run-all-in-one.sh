@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
 set -e
 
-# INFO by default: this is the only serving entrypoint, and the settings
-# default (WARNING) is meant for management commands.
-export LOG_LEVEL=${LOG_LEVEL:-INFO}
+# LOG_LEVEL is left to the settings default (WARNING). At INFO the task
+# worker logs every ingest batch, and with SENTRY_ENABLE_LOGS each of those
+# lines is also shipped to self-monitoring. Set LOG_LEVEL=INFO to see task
+# lifecycle and scheduler election.
 
 . "$(dirname "$0")/tune-malloc.sh"
 
