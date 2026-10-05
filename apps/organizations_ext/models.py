@@ -567,3 +567,19 @@ class OrganizationSocialApp(models.Model):
         "the organization's own login page. Settable here only — the "
         "organization API never writes it.",
     )
+
+
+class OrgIdKey(models.Model):
+    """The key public org ids are encrypted with; see ``public_id``.
+
+    One row, created by migration and never at request time. Losing or
+    replacing it changes every public org id.
+    """
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    key = models.CharField(max_length=64)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(id=1), name="orgidkey_single_row")
+        ]
