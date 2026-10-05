@@ -44,7 +44,11 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
 
     def set_mocks(self, m, org_users=None):
         m.get(self.url + "/api/0/", payload={"user": {"username": "foo"}})
-        m.get(self.url + self.importer.organization_url, payload={"id": 1})
+        # A public id: past int4, so it can't be stored as a primary key.
+        m.get(
+            self.url + self.importer.organization_url,
+            payload={"id": "97975398662490", "slug": self.org_name, "name": "Org"},
+        )
         m.get(self.url + self.importer.organization_users_url, payload=org_users or [])
         m.get(self.url + self.importer.projects_url, payload=[test_project])
         m.get(self.url + "/api/0/projects/org/project/keys/", payload=[test_key])
@@ -240,6 +244,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         self.assertTrue(Team.objects.filter(slug="team").exists())
         self.assertTrue(
             Project.objects.filter(
+                organization__slug=self.org_name,
                 slug=test_project["slug"],
                 teams__slug="team",
                 projectkey__public_key=test_key["public"],

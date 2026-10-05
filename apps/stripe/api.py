@@ -17,6 +17,7 @@ from apps.organizations_ext.models import (
     get_current_period_dates,
     get_event_counts,
 )
+from apps.organizations_ext.public_id import OrgPublicId, OrgPublicIdIn
 from apps.organizations_ext.tasks import check_organization_throttle
 from apps.projects.models import (
     IssueEventProjectHourlyStatistic,
@@ -159,10 +160,11 @@ class PriceIDSchema(CamelSchema):
 
 
 class SubscriptionIn(PriceIDSchema):
-    organization: str
+    organization: OrgPublicIdIn
 
 
-class CreateSubscriptionResponse(SubscriptionIn):
+class CreateSubscriptionResponse(PriceIDSchema):
+    organization: OrgPublicId
     subscription: StripeSubscriptionSchema
 
 
@@ -294,10 +296,9 @@ async def stripe_billing_portal_session(
 
 @router.post("subscriptions/", response=CreateSubscriptionResponse, by_alias=True)
 async def stripe_create_subscription(request: AuthHttpRequest, payload: SubscriptionIn):
-    org_id = int(payload.organization)
     organization = await aget_object_or_404(
         Organization.objects.select_related("owner__organization_user__user"),
-        id=org_id,
+        id=payload.organization,
         organization_users__role=OrganizationUserRole.OWNER,
         organization_users__user=request.auth.user_id,
     )
@@ -351,7 +352,7 @@ async def stripe_create_subscription(request: AuthHttpRequest, payload: Subscrip
     await check_organization_throttle.aenqueue(organization.id)
     return {
         "price": price.stripe_id,
-        "organization": str(organization.id),
+        "organization": organization.id,
         "subscription": subscription,
     }
 

@@ -29,6 +29,7 @@ from apps.mcp.serializers import (
     serialize_project,
 )
 from apps.mcp.server import _check_scopes, _parse_datetime
+from apps.organizations_ext.public_id import encode
 from glitchtip.partition_manager import UUID7Helper
 from glitchtip.test_utils.issue import amake_issue, make_issue
 
@@ -557,7 +558,7 @@ class SerializerTest(TestCase):
 
     def test_serialize_organization(self):
         result = serialize_organization(self.organization)
-        self.assertEqual(result["id"], str(self.organization.id))
+        self.assertEqual(result["id"], str(encode(self.organization.id)))
         self.assertEqual(result["name"], self.organization.name)
         self.assertEqual(result["slug"], self.organization.slug)
         self.assertIn("dateCreated", result)

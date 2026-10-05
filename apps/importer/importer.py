@@ -8,11 +8,8 @@ from django.db.models import Q
 from django.urls import reverse
 
 from apps.organizations_ext.constants import OrganizationUserRole
-from apps.organizations_ext.models import OrganizationUser
-from apps.organizations_ext.resources import (
-    OrganizationResource,
-    OrganizationUserResource,
-)
+from apps.organizations_ext.models import Organization, OrganizationUser
+from apps.organizations_ext.resources import OrganizationUserResource
 from apps.projects.models import Project
 from apps.projects.resources import ProjectKeyResource, ProjectResource
 from apps.teams.resources import TeamResource
@@ -156,12 +153,14 @@ class GlitchTipImporter:
         return urljoin(current_url, path_and_query)
 
     async def import_organization(self):
-        resource = OrganizationResource()
         data = await self.get(self.url + self.organization_url)
-        self.organization_id = data["id"]  # TODO unsafe for web usage
-        dataset = tablib.Dataset()
-        dataset.dict = [data]
-        await sync_to_async(resource.import_data)(dataset, raise_errors=True)
+        # Matched by slug: the remote "id" is a public id, not a primary key
+        # this database could reuse.
+        organization, _ = await Organization.objects.aget_or_create(
+            slug=self.organization_slug,
+            defaults={"name": data.get("name") or self.organization_slug},
+        )
+        self.organization_id = organization.id
 
     async def import_organization_users(self):
         resource = OrganizationUserResource()

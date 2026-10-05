@@ -10,30 +10,26 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import ROLES, Scopes
 from apps.organizations_ext.models import Organization, OrganizationUser
+from apps.organizations_ext.public_id import NO_ORG_ID, parse
 from glitchtip.base_models import OrgScopedModel, SoftDeleteModel
 
 from .authentication import AuthHttpRequest
-
-# Organization.id is an int4 AutoField, this is the upper bound.
-MAX_ORG_ID = 2**31 - 1
-NO_ORG_ID = 0
 
 ORG_NOT_FOUND = "Organization not found."
 
 
 async def resolve_org_id(segment: str) -> int:
-    """The org id a path segment names: all digits is an id, anything else a slug.
+    """The org id a path segment names: all digits is a public id, anything
+    else a slug.
 
     An id costs no query; a slug costs one lookup. A miss is ``NO_ORG_ID``, so
-    the gate treats it like any org the caller isn't in.
+    the gate treats it like any org the caller isn't in. A raw internal id is a
+    miss too: it decodes to a value that, all but never, is an org the caller
+    is in.
     """
     # isdigit() alone accepts non-ASCII digits such as "²", which int() rejects.
     if segment.isascii() and segment.isdigit():
-        # One spelling per id: a leading zero (or "0" itself) names no org.
-        if segment[0] == "0" or len(segment) > len(str(MAX_ORG_ID)):
-            return NO_ORG_ID
-        org_id = int(segment)
-        return org_id if org_id <= MAX_ORG_ID else NO_ORG_ID
+        return parse(segment)
     org_id = await (
         Organization.objects.filter(slug=segment, is_deleted=False)
         .values_list("id", flat=True)

@@ -4,13 +4,14 @@ from apps.issue_events.utils import get_entries
 from apps.logs.api import LogEventRow
 from apps.logs.constants import LogLevel
 from apps.organizations_ext.models import Organization
+from apps.organizations_ext.public_id import encode
 from apps.performance.models import TransactionGroup
 from apps.projects.models import Project
 
 
 def serialize_organization(org: Organization) -> dict:
     return {
-        "id": str(org.id),
+        "id": str(encode(org.id)),
         "name": org.name,
         "slug": org.slug,
         "dateCreated": org.created.isoformat(),
@@ -28,7 +29,7 @@ def serialize_project(project: Project) -> dict:
     }
     if hasattr(project, "organization") and project.organization:
         result["organization"] = {
-            "id": str(project.organization.id),
+            "id": str(encode(project.organization.id)),
             "slug": project.organization.slug,
             "name": project.organization.name,
         }
@@ -210,7 +211,7 @@ def serialize_monitor(monitor) -> dict:
         "created": monitor.created.isoformat(),
         "expectedStatus": monitor.expected_status,
         "expectedBody": monitor.expected_body,
-        "organizationId": monitor.organization_id,
+        "organizationId": str(encode(monitor.organization_id)),
     }
     if monitor.project_id:
         result["projectId"] = str(monitor.project_id)

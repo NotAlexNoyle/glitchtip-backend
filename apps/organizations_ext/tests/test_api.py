@@ -4,6 +4,7 @@ from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.organizations_ext.models import OrganizationOwner, OrganizationUser
+from apps.organizations_ext.public_id import encode
 
 
 class OrganizationsAPITestCase(TestCase):
@@ -31,7 +32,8 @@ class OrganizationsAPITestCase(TestCase):
         team = await baker.amake("teams.Team", organization=self.organization)
         url = reverse("api:get_organization", args=[self.organization.slug])
         res = await self.async_client.get(url)
-        self.assertIsInstance(res.json()["id"], str)
+        self.assertEqual(res.json()["id"], str(encode(self.organization.id)))
+        self.assertNotEqual(res.json()["id"], str(self.organization.id))
         self.assertContains(res, self.organization.name)
         self.assertContains(res, project.name)
         data = res.json()

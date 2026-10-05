@@ -12,6 +12,7 @@ from ninja import ModelSchema
 from ninja.errors import ValidationError
 from pydantic import ConfigDict, model_validator
 
+from apps.organizations_ext.public_id import OrgPublicId
 from glitchtip.schema import CamelSchema
 from glitchtip.url_validation import is_ip_blocked
 
@@ -135,7 +136,7 @@ class MonitorSchema(CamelSchema, ModelSchema):
     project_name: str | None = None
     env_name: str | None = None
     checks: list[MonitorCheckSchema]
-    organization_id: int
+    organization_id: OrgPublicId
     monitor_type: MonitorType
 
     class Meta:

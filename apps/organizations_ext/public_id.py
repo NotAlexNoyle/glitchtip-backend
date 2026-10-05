@@ -20,10 +20,12 @@ import asyncio
 import functools
 import hashlib
 import logging
+from typing import Annotated
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,39 @@ def encode(internal: int) -> int:
 def decode(public: int) -> int:
     """The internal organization id a public id names, or ``NO_ORG_ID``."""
     return decode_with(_get_aes(), public)
+
+
+_MAX_DIGITS = len(str(_V1_LIMIT - 1))
+
+
+def parse(text: str) -> int:
+    """The internal id a public id as written on the wire names, or ``NO_ORG_ID``."""
+    # isdigit() alone accepts non-ASCII digits such as "²", which int() rejects.
+    # One spelling per id: a leading zero (or "0" itself) names no org. The
+    # length cap keeps int() off strings past its 4300-digit limit.
+    if (
+        not (text.isascii() and text.isdigit())
+        or text[0] == "0"
+        or len(text) > _MAX_DIGITS
+    ):
+        return NO_ORG_ID
+    return decode(int(text))
+
+
+def _parse_input(value: object) -> int:
+    return parse(value) if isinstance(value, str) else NO_ORG_ID
+
+
+# Response field: an internal id, sent as its public id string.
+OrgPublicId = Annotated[
+    int, PlainSerializer(lambda internal: str(encode(internal)), return_type=str)
+]
+# Request field: a public id string, validated to the internal id. A miss is
+# NO_ORG_ID rather than a 422, so the lookup it feeds 404s like any other org
+# the caller can't reach.
+OrgPublicIdIn = Annotated[
+    int, BeforeValidator(_parse_input), WithJsonSchema({"type": "string"})
+]
 
 
 def make_aes(key_hex: str) -> Cipher:
