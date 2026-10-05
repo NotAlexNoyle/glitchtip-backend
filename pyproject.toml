@@ -30,6 +30,9 @@ dependencies = [
     # wrappers, plus the import Django's stock postgresql backend performs.
     # No database I/O flows through psycopg
     "psycopg~=3.1",
+    # Public org ids (apps/organizations_ext/public_id.py) use only AES-ECB,
+    # which has been stable across majors, so no upper bound.
+    "cryptography>=50.0",
     "django-ninja~=1.6",
     "boto3~=1.34",
     "orjson~=3.9",

@@ -211,6 +211,7 @@ from django.conf import settings
 from django.contrib.staticfiles import finders
 from django.db import close_old_connections
 
+from apps.organizations_ext import public_id
 from glitchtip.async_db import recycle_async_connections
 
 
@@ -297,6 +298,61 @@ async def _recycle_db_connections():
             await asyncio.shield(sync_to_async(close_old_connections)())
     except Exception:
         logger.exception("Failed to recycle DB connections for MCP request")
+
+
+class LoadOrgIdKey:
+    """Load the public org id key before anything in this process needs it.
+
+    Encoding an org id from async code cannot load the key itself: that would
+    be a sync ORM call inside the event loop. So it is loaded here, on lifespan
+    startup, before the inner apps (the embedded task worker among them) see
+    the startup message.
+
+    This is an ASGI wrapper rather than Django middleware because MCP requests
+    never pass through Django middleware, and MCP serializers encode org ids.
+    It must sit outside the vtasks wrapper, which consumes lifespan without
+    forwarding it.
+
+    A failed load is logged and startup continues, so ingest keeps working. A
+    request that needs an org id then fails loudly. Requests retry the load,
+    at most every ``RETRY_SECONDS``, which also covers servers that never send
+    lifespan.
+    """
+
+    RETRY_SECONDS = 5.0
+
+    def __init__(self, app):
+        self.app = app
+        self._next_attempt = 0.0
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            receive = self._load_on_startup(receive)
+        elif not public_id.key_loaded():
+            now = asyncio.get_running_loop().time()
+            if now >= self._next_attempt:
+                self._next_attempt = now + self.RETRY_SECONDS
+                await _load_org_id_key()
+        await self.app(scope, receive, send)
+
+    def _load_on_startup(self, receive):
+        async def wrapped():
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await _load_org_id_key()
+            return message
+
+        return wrapped
+
+
+async def _load_org_id_key():
+    try:
+        await public_id.load_key()
+    except Exception:
+        logger.exception("Could not load the public org id key")
+    finally:
+        # Outside a request nothing else returns this connection.
+        await _recycle_db_connections()
 
 
 if settings.GLITCHTIP_ENABLE_MCP:
@@ -494,6 +550,8 @@ except ImportError:
     # Graceful fallback if granian can't be imported (custom installations
     # serving this app under another ASGI server)
     pass
+
+application = LoadOrgIdKey(application)
 
 # Outermost so lifespan startup reaches it at all (the vtasks wrapper consumes
 # lifespan without forwarding it inward): a pod receiving no HTTP traffic still

@@ -10,13 +10,10 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.constants import ROLES, Scopes
 from apps.organizations_ext.models import Organization, OrganizationUser
+from apps.organizations_ext.public_id import MAX_ORG_ID, NO_ORG_ID
 from glitchtip.base_models import OrgScopedModel, SoftDeleteModel
 
 from .authentication import AuthHttpRequest
-
-# Organization.id is an int4 AutoField, this is the upper bound.
-MAX_ORG_ID = 2**31 - 1
-NO_ORG_ID = 0
 
 ORG_NOT_FOUND = "Organization not found."
 
