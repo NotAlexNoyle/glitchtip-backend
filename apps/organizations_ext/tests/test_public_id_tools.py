@@ -1,6 +1,3 @@
-from io import StringIO
-
-from django.core.management import CommandError, call_command
 from django.test import TestCase
 from django.urls import reverse
 from model_bakery import baker
