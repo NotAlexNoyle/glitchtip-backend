@@ -20,6 +20,7 @@ from .models import (
     get_current_period_dates,
     get_event_counts,
 )
+from .public_id import encode, matching_ids
 from .resources import OrganizationResource, OrganizationUserResource
 
 ORGANIZATION_LIST_FILTER = (
@@ -47,10 +48,17 @@ class OrganizationSubscriptionInline(admin.StackedInline):
 class OrganizationAdmin(BaseOrganizationAdmin, ImportExportModelAdmin):
     list_display = [
         "name",
+        "id",
+        "public_id",
         "is_active",
         "is_accepting_events",
     ]
+    # Support matches what a customer reports (the public id) against what
+    # logs and SQL show (the internal id), so both are shown and searchable.
+    search_fields = ["name", "slug"]
     readonly_fields = (
+        "id",
+        "public_id",
         "created",
         "issue_events",
         "transaction_events",
@@ -76,6 +84,19 @@ class OrganizationAdmin(BaseOrganizationAdmin, ImportExportModelAdmin):
         if settings.BILLING_ENABLED:
             inlines.append(OrganizationSubscriptionInline)
         return inlines
+
+    @admin.display(description="Public id")
+    def public_id(self, obj):
+        return str(encode(obj.id))
+
+    def get_search_results(self, request, queryset, search_term):
+        results, may_have_duplicates = super().get_search_results(
+            request, queryset, search_term
+        )
+        if ids := matching_ids(search_term):
+            # OR'd into the same query rather than run as a second one.
+            results |= queryset.filter(id__in=ids)
+        return results, may_have_duplicates
 
     def _get_event_counts(self, obj):
         """Cached per-request event counts for the detail page."""

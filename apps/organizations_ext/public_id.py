@@ -158,6 +158,21 @@ def _parse_input(value: object) -> int:
     return parse(value) if isinstance(value, str) else NO_ORG_ID
 
 
+def matching_ids(text: str) -> set[int]:
+    """Every internal id a pasted id could mean, for support tools.
+
+    Customers see public ids; logs and SQL show internal ones. A term is read
+    both ways. A raw id almost never decodes into range, so this is nearly
+    always one id, but both are returned when it isn't.
+    """
+    text = text.strip()
+    ids = {parse(text)}
+    if text.isascii() and text.isdigit() and text[0] != "0" and len(text) <= 10:
+        ids.add(int(text) if int(text) <= MAX_ORG_ID else NO_ORG_ID)
+    ids.discard(NO_ORG_ID)
+    return ids
+
+
 # Response field: an internal id, sent as its public id string.
 OrgPublicId = Annotated[
     int, PlainSerializer(lambda internal: str(encode(internal)), return_type=str)
