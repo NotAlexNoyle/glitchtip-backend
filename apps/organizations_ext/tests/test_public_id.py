@@ -11,6 +11,7 @@ from apps.organizations_ext.models import OrgIdKey
 from apps.organizations_ext.public_id import (
     MAX_ORG_ID,
     NO_ORG_ID,
+    SecretKey,
     decode_with,
     encode_with,
     ff1_decrypt,
@@ -71,7 +72,7 @@ class FF1TestCase(SimpleTestCase):
 class PublicIdTestCase(SimpleTestCase):
     def setUp(self):
         stable = json.loads(STABLE_VALUES.read_text())
-        self.aes = make_aes(stable["key"])
+        self.aes = make_aes(SecretKey(stable["key"]))
         self.pairs = stable["pairs"]
 
     def test_stable_values(self):
@@ -97,10 +98,15 @@ class PublicIdTestCase(SimpleTestCase):
         with mock.patch.object(public_id, "MAX_ORG_ID", 2**48 - 1):
             self.assertEqual(decode_with(self.aes, public), to_zero)
 
+    def test_encode_refuses_non_org_ids(self):
+        for internal in (0, -1, MAX_ORG_ID + 1):
+            with self.subTest(internal=internal), self.assertRaises(ValueError):
+                public_id.encode(internal)
+
     def test_bad_key_is_refused(self):
         for key in ("", "ab" * 16, "zz" * 32):
             with self.subTest(key=key), self.assertRaises(ImproperlyConfigured):
-                make_aes(key)
+                make_aes(SecretKey(key))
 
 
 @override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
@@ -114,7 +120,9 @@ class KeyLoadingTestCase(TestCase):
     async def test_loads_the_migration_created_key(self):
         row = await OrgIdKey.objects.aget()
         await public_id.load_key()
-        self.assertEqual(public_id.encode(42), encode_with(make_aes(row.key), 42))
+        self.assertEqual(
+            public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
+        )
 
     async def test_missing_row_fails_without_creating_one(self):
         await OrgIdKey.objects.all().adelete()
@@ -129,7 +137,9 @@ class KeyLoadingTestCase(TestCase):
 
     def test_sync_code_loads_on_first_use(self):
         row = OrgIdKey.objects.get()
-        self.assertEqual(public_id.encode(42), encode_with(make_aes(row.key), 42))
+        self.assertEqual(
+            public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
+        )
 
 
 @override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
