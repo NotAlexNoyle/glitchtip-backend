@@ -1,19 +1,11 @@
 """Public organization ids.
 
-Organizations keep their sequential int4 primary key for every query, foreign
-key and partition. What the API shows is that key encrypted with NIST FF1
-(SP 800-38G) over 48 binary digits, so a public id reveals neither how many
-orgs exist nor when one was created, and still fits a JSON number.
-
-Changing the bit width, the cipher, the tweak or the key changes every public
-id, so treat all four as permanent. Values in [2**48, 2**53) are reserved for
-future id versions: a new key or cipher would issue ids from that range, and
-``decode`` would pick the version by range, so ids already handed out keep
-working.
-
-The key is one ``OrgIdKey`` row, created by migration. It is loaded once per
-process into a module cache: from the ASGI lifespan (``glitchtip.asgi``), or
-on first use in sync code such as admin views and management commands.
+Org primary keys stay sequential int4; the API shows them FF1-encrypted (NIST
+SP 800-38G) over 48 bits, hiding org count and creation order while staying
+JSON-number safe. The bit width, cipher, tweak and key are permanent: changing
+any one changes every public id. [2**48, 2**53) is reserved for a future
+version that ``decode`` would pick by range; ``parse``'s digit cap must grow
+with it.
 """
 
 import asyncio
@@ -142,8 +134,7 @@ def decode_with(aes: Cipher, public: int) -> int:
 @functools.lru_cache(maxsize=4096)
 def encode(internal: int) -> int:
     """The public id for an internal organization id."""
-    # encode_with takes any value so tests can reach the edges; anything
-    # outside int4 here is a caller bug and would not decode back.
+    # Anything outside int4 is a caller bug and would not decode back.
     if not 1 <= internal <= MAX_ORG_ID:
         raise ValueError(f"Not an organization id: {internal!r}")
     return encode_with(_get_aes(), internal)
@@ -177,12 +168,7 @@ def _parse_input(value: object) -> int:
 
 
 def matching_ids(text: str) -> set[int]:
-    """Every internal id a pasted id could mean, for support tools.
-
-    Customers see public ids; logs and SQL show internal ones. A term is read
-    both ways. A raw id almost never decodes into range, so this is nearly
-    always one id, but both are returned when it isn't.
-    """
+    """Internal ids a pasted term could mean, read as a public id and as a raw one."""
     text = text.strip()
     ids = {parse(text)}
     if text.isascii() and text.isdigit() and text[0] != "0" and len(text) <= 10:
@@ -229,10 +215,7 @@ def key_fingerprint() -> str | None:
 
 
 def _test_key() -> SecretKey | None:
-    # TransactionTestCase flushes delete the key row, so tests read the key
-    # from settings instead.
-    # The test key is public, so it may sit in a local. None (as the row-backed
-    # tests override it) means read the row.
+    # None (row-backed tests override it so) means read the row.
     if settings.TESTING:
         test_hex = getattr(settings, "PUBLIC_ORG_ID_TEST_KEY", None)
         if test_hex is not None:
@@ -300,9 +283,7 @@ def _get_aes() -> Cipher:
         except RuntimeError:
             load_key_sync()
         else:
-            # A sync ORM call here would raise SynchronousOnlyOperation, which
-            # says nothing about why. The ASGI layer loads the key before any
-            # request; reaching this means that load failed or was skipped.
+            # Rather than a sync ORM call's unhelpful SynchronousOnlyOperation.
             raise ImproperlyConfigured(
                 "The public org id key is not loaded in this process. "
                 "await apps.organizations_ext.public_id.load_key() first; "

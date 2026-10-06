@@ -301,22 +301,12 @@ async def _recycle_db_connections():
 
 
 class LoadOrgIdKey:
-    """Load the public org id key before anything in this process needs it.
-
-    Encoding an org id from async code cannot load the key itself: that would
-    be a sync ORM call inside the event loop. So it is loaded here, on lifespan
-    startup, before the inner apps (the embedded task worker among them) see
-    the startup message.
-
-    This is an ASGI wrapper rather than Django middleware because MCP requests
-    never pass through Django middleware, and MCP serializers encode org ids.
-    It must sit outside the vtasks wrapper, which consumes lifespan without
-    forwarding it.
-
-    A failed load is logged and startup continues, so ingest keeps working. A
-    request that needs an org id then fails loudly. Requests retry the load,
-    at most every ``RETRY_SECONDS``, which also covers servers that never send
-    lifespan.
+    """Load the public org id key on lifespan startup, before the inner apps
+    (the task worker among them) start: async code can't load it without a sync
+    ORM call. An ASGI wrapper because MCP skips Django middleware, and outside
+    the vtasks wrapper, which swallows lifespan. A failed load is logged so
+    ingest still starts; requests retry it every ``RETRY_SECONDS``, which also
+    covers servers without lifespan.
     """
 
     RETRY_SECONDS = 5.0

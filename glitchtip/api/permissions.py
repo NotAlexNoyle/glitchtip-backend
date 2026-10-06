@@ -22,10 +22,10 @@ async def resolve_org_id(segment: str) -> int:
     """The org id a path segment names: all digits is a public id, anything
     else a slug.
 
-    An id costs no query; a slug costs one lookup. A miss is ``NO_ORG_ID``, so
-    the gate treats it like any org the caller isn't in. A raw internal id is a
-    miss too: it decodes to a value that, all but never, is an org the caller
-    is in.
+    A public id costs no query; a slug, or digits that are not a public id,
+    cost one lookup. A miss is ``NO_ORG_ID``, so the gate treats it like any
+    org the caller isn't in. A raw internal id almost never decodes to an org
+    the caller is in.
     """
     org_id = parse(segment)
 
@@ -152,7 +152,7 @@ def org_scoped(scopes: list[Scopes], model: type[OrgScopedModel]):
     Only ``qs`` is gated; ``Model.objects`` in the view is not. (List routes
     use ``org_scoped_list``, which gates the queryset the view returns.)
 
-    ``organization_slug`` may carry the org's id or its slug (see
+    ``organization_slug`` may carry the org's public id or its slug (see
     ``resolve_org_id``); the name predates ids.
     """
     required, roles = _resolve_roles(scopes)

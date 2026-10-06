@@ -7,8 +7,6 @@ from apps.organizations_ext.resources import OrganizationResource
 
 
 class PublicIdSupportToolsTestCase(TestCase):
-    """Support matches a customer's public id to the internal id logs show."""
-
     @classmethod
     def setUpTestData(cls):
         cls.org = baker.make("organizations_ext.Organization", name="Acme Corp")

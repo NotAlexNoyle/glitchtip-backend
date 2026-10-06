@@ -93,8 +93,8 @@ class PublicIdTestCase(SimpleTestCase):
                 self.assertEqual(decode_with(self.aes, public), NO_ORG_ID)
 
     def test_zero_is_never_a_public_id(self):
-        # The internal value FF1 maps to 0. No key puts it inside int4 in any
-        # practical search, so widen the range to reach it.
+        # The internal value FF1 maps to 0. Under this key it falls outside
+        # int4, as it does for nearly every key, so widen the range to reach it.
         to_zero = public_id._unpermute(self.aes, 0)
         public = encode_with(self.aes, to_zero)
         self.assertNotEqual(public, 0)
@@ -134,7 +134,6 @@ class KeyLoadingTestCase(TestCase):
         self.assertFalse(await OrgIdKey.objects.aexists())
 
     async def test_unloaded_key_in_event_loop_raises(self):
-        """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
         with self.assertRaisesMessage(ImproperlyConfigured, "not loaded"):
             public_id.encode(42)
 
@@ -178,8 +177,6 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
         self.assertEqual(loaded_at_startup, [True])
 
     async def test_lifespan_prints_key_fingerprint(self):
-        """Printed, not logged at info, so the default WARNING level shows it."""
-
         async def inner(scope, receive, send):
             await receive()
             await receive()

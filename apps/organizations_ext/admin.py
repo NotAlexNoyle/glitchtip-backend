@@ -53,8 +53,6 @@ class OrganizationAdmin(BaseOrganizationAdmin, ImportExportModelAdmin):
         "is_active",
         "is_accepting_events",
     ]
-    # Support matches what a customer reports (the public id) against what
-    # logs and SQL show (the internal id), so both are shown and searchable.
     search_fields = ["name", "slug"]
     readonly_fields = (
         "id",
