@@ -568,6 +568,9 @@ class SerializerTest(TestCase):
         self.assertEqual(result["id"], str(self.project.id))
         self.assertEqual(result["name"], self.project.name)
         self.assertIn("slug", result)
+        self.assertEqual(
+            result["organization"]["id"], str(encode(self.organization.id))
+        )
 
     def test_serialize_issue(self):
         now = timezone.now()
@@ -630,6 +633,7 @@ class SerializerTest(TestCase):
         self.assertEqual(result["name"], "Uptime Check")
         self.assertEqual(result["url"], "https://example.com")
         self.assertEqual(result["interval"], 60)
+        self.assertEqual(result["organizationId"], str(encode(self.organization.id)))
 
 
 class ParseDatetimeTest(TestCase):
