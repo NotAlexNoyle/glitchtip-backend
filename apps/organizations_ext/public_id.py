@@ -40,6 +40,22 @@ _TWEAK = b"org"
 _aes: Cipher | None = None
 
 
+class SecretKey:
+    """The key's hex, kept out of tracebacks.
+
+    Sentry records every frame's locals and Django's DEBUG page shows them;
+    both render objects with ``repr``, so a frame holding this shows no key.
+    """
+
+    __slots__ = ("hex",)
+
+    def __init__(self, key_hex: str):
+        self.hex = key_hex
+
+    def __repr__(self) -> str:
+        return "SecretKey(<redacted>)"
+
+
 def ff1_encrypt(aes: Cipher, tweak: bytes, radix: int, n: int, x: int) -> int:
     """FF1-encrypt ``x``, read as an ``n``-digit numeral string in ``radix``.
 
@@ -128,6 +144,10 @@ def decode_with(aes: Cipher, public: int) -> int:
 @functools.lru_cache(maxsize=4096)
 def encode(internal: int) -> int:
     """The public id for an internal organization id."""
+    # encode_with takes any value so tests can reach the edges; anything
+    # outside int4 here is a caller bug and would not decode back.
+    if not 1 <= internal <= MAX_ORG_ID:
+        raise ValueError(f"Not an organization id: {internal!r}")
     return encode_with(_get_aes(), internal)
 
 
@@ -185,30 +205,36 @@ OrgPublicIdIn = Annotated[
 ]
 
 
-def make_aes(key_hex: str) -> Cipher:
+def make_aes(secret: SecretKey) -> Cipher:
+    # Never bind the raw key to a local: the raise below would carry it.
     try:
-        key = bytes.fromhex(key_hex)
+        if len(bytes.fromhex(secret.hex)) != 32:
+            raise ValueError
     except ValueError:
-        key = b""
-    if len(key) != 32:
-        raise ImproperlyConfigured("The public org id key must be 64 hex characters.")
-    return Cipher(algorithms.AES(key), modes.ECB())
+        raise ImproperlyConfigured(
+            "The public org id key must be 64 hex characters."
+        ) from None
+    return Cipher(algorithms.AES(bytes.fromhex(secret.hex)), modes.ECB())
 
 
-def _install(key_hex: str) -> None:
+def _install(secret: SecretKey) -> None:
     global _aes
-    _aes = make_aes(key_hex)
+    _aes = make_aes(secret)
     encode.cache_clear()
     decode.cache_clear()
-    fingerprint = hashlib.sha256(key_hex.encode()).hexdigest()[:8]
+    fingerprint = hashlib.sha256(secret.hex.encode()).hexdigest()[:8]
     logger.info("Public org id key loaded, fingerprint %s", fingerprint)
 
 
-def _test_key() -> str | None:
+def _test_key() -> SecretKey | None:
     # TransactionTestCase flushes delete the key row, so tests read the key
     # from settings instead.
+    # The test key is public, so it may sit in a local. None (as the row-backed
+    # tests override it) means read the row.
     if settings.TESTING:
-        return getattr(settings, "PUBLIC_ORG_ID_TEST_KEY", None)
+        test_hex = getattr(settings, "PUBLIC_ORG_ID_TEST_KEY", None)
+        if test_hex is not None:
+            return SecretKey(test_hex)
     return None
 
 
@@ -226,9 +252,11 @@ async def load_key() -> None:
 
     key = _test_key()
     if key is None:
-        key = await OrgIdKey.objects.values_list("key", flat=True).afirst()
-        if key is None:
+        key_hex = await OrgIdKey.objects.values_list("key", flat=True).afirst()
+        if key_hex is None:
             raise ImproperlyConfigured(_MISSING_KEY)
+        key = SecretKey(key_hex)
+        del key_hex
     _install(key)
 
 
@@ -237,9 +265,11 @@ def load_key_sync() -> None:
 
     key = _test_key()
     if key is None:
-        key = OrgIdKey.objects.values_list("key", flat=True).first()
-        if key is None:
+        key_hex = OrgIdKey.objects.values_list("key", flat=True).first()
+        if key_hex is None:
             raise ImproperlyConfigured(_MISSING_KEY)
+        key = SecretKey(key_hex)
+        del key_hex
     _install(key)
 
 

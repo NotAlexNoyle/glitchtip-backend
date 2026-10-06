@@ -297,7 +297,7 @@ async def _recycle_db_connections():
         finally:
             await asyncio.shield(sync_to_async(close_old_connections)())
     except Exception:
-        logger.exception("Failed to recycle DB connections for MCP request")
+        logger.exception("Failed to recycle DB connections")
 
 
 class LoadOrgIdKey:
@@ -351,7 +351,8 @@ async def _load_org_id_key():
     except Exception:
         logger.exception("Could not load the public org id key")
     finally:
-        # Outside a request nothing else returns this connection.
+        # Lifespan has no request to return this connection, and a retry
+        # runs before the inner app, so return it here either way.
         await _recycle_db_connections()
 
 

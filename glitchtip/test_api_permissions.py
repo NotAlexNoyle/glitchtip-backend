@@ -418,6 +418,13 @@ class OrgScopedGateTestCase(TestCase):
         )
         alert = baker.make("alerts.ProjectAlert", project=project)
         Organization.objects.filter(pk=deleted.pk).update(is_deleted=True)
+        # Under 15 digits, so "0" + its public id still fits the length cap
+        # and only the leading zero rule stops the user, who owns it.
+        short = baker.make(
+            "organizations_ext.Organization",
+            id=next(i for i in range(10**6, 10**7) if len(str(encode(i))) < 15),
+        )
+        short.add_user(self.user, OrganizationUserRole.OWNER)
 
         cases = [
             ("deleted org by id", public(deleted)),
@@ -428,7 +435,7 @@ class OrgScopedGateTestCase(TestCase):
             ("id past 48 bits", str(2**48)),
             # The user owns self.org, so only the encoding stops them.
             ("raw internal id", str(self.org.id)),
-            ("leading zero", f"0{public(self.org)}"),
+            ("leading zero", f"0{public(short)}"),
             # int() refuses strings past 4300 digits.
             ("huge id", "1" * 5000),
         ]
