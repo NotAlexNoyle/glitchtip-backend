@@ -142,6 +142,10 @@ def decode_with(aes: Cipher, public: int) -> int:
 @functools.lru_cache(maxsize=4096)
 def encode(internal: int) -> int:
     """The public id for an internal organization id."""
+    # encode_with takes any value so tests can reach the edges; anything
+    # outside int4 here is a caller bug and would not decode back.
+    if not 1 <= internal <= MAX_ORG_ID:
+        raise ValueError(f"Not an organization id: {internal!r}")
     return encode_with(_get_aes(), internal)
 
 
@@ -175,8 +179,12 @@ def _install(secret: SecretKey) -> None:
 def _test_key() -> SecretKey | None:
     # TransactionTestCase flushes delete the key row, so tests read the key
     # from settings instead.
-    if settings.TESTING and hasattr(settings, "PUBLIC_ORG_ID_TEST_KEY"):
-        return SecretKey(settings.PUBLIC_ORG_ID_TEST_KEY)
+    # The test key is public, so it may sit in a local. None (as the row-backed
+    # tests override it) means read the row.
+    if settings.TESTING:
+        test_hex = getattr(settings, "PUBLIC_ORG_ID_TEST_KEY", None)
+        if test_hex is not None:
+            return SecretKey(test_hex)
     return None
 
 
