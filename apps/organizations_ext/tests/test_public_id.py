@@ -1,4 +1,7 @@
+import hashlib
+import io
 import json
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -173,6 +176,19 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
 
         await self.run_lifespan(inner)
         self.assertEqual(loaded_at_startup, [True])
+
+    async def test_lifespan_prints_key_fingerprint(self):
+        """Printed, not logged at info, so the default WARNING level shows it."""
+
+        async def inner(scope, receive, send):
+            await receive()
+            await receive()
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await self.run_lifespan(inner)
+        fingerprint = hashlib.sha256(("11" * 32).encode()).hexdigest()[:8]
+        self.assertIn(f"Public org id key fingerprint: {fingerprint}", out.getvalue())
 
     async def test_failed_lifespan_load_still_starts(self):
         await OrgIdKey.objects.all().adelete()

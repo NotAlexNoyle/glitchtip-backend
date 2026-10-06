@@ -350,6 +350,13 @@ async def _load_org_id_key():
         await public_id.load_key()
     except Exception:
         logger.exception("Could not load the public org id key")
+    else:
+        # Printed like the banner: the default WARNING level hides info, and
+        # operators compare this value before and after a database move.
+        print(
+            f"Public org id key fingerprint: {public_id.key_fingerprint()}",
+            flush=True,
+        )
     finally:
         # Lifespan has no request to return this connection, and a retry
         # runs before the inner app, so return it here either way.

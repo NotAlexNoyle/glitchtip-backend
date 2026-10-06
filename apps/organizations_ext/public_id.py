@@ -19,15 +19,12 @@ on first use in sync code such as admin views and management commands.
 import asyncio
 import functools
 import hashlib
-import logging
 from typing import Annotated
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
-
-logger = logging.getLogger(__name__)
 
 # Organization.id is an int4 AutoField, this is the upper bound.
 MAX_ORG_ID = 2**31 - 1
@@ -38,6 +35,7 @@ _V1_LIMIT = 2**PUBLIC_ID_BITS
 _TWEAK = b"org"
 
 _aes: Cipher | None = None
+_fingerprint: str | None = None
 
 
 class SecretKey:
@@ -218,12 +216,16 @@ def make_aes(secret: SecretKey) -> Cipher:
 
 
 def _install(secret: SecretKey) -> None:
-    global _aes
+    global _aes, _fingerprint
     _aes = make_aes(secret)
     encode.cache_clear()
     decode.cache_clear()
-    fingerprint = hashlib.sha256(secret.hex.encode()).hexdigest()[:8]
-    logger.info("Public org id key loaded, fingerprint %s", fingerprint)
+    _fingerprint = hashlib.sha256(secret.hex.encode()).hexdigest()[:8]
+
+
+def key_fingerprint() -> str | None:
+    """A short hash of the loaded key, to compare across a database move."""
+    return _fingerprint
 
 
 def _test_key() -> SecretKey | None:
@@ -279,8 +281,9 @@ def key_loaded() -> bool:
 
 def clear_key() -> None:
     """Forget the cached key. For tests."""
-    global _aes
+    global _aes, _fingerprint
     _aes = None
+    _fingerprint = None
     encode.cache_clear()
     decode.cache_clear()
 
