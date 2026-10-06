@@ -29,7 +29,7 @@ async def resolve_org_id(segment: str) -> int:
     """
     org_id = parse(segment)
 
-    if not (org_id == NO_ORG_ID):
+    if org_id != NO_ORG_ID:
         return org_id
 
     org_id = await (
