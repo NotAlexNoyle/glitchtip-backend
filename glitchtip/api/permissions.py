@@ -27,9 +27,11 @@ async def resolve_org_id(segment: str) -> int:
     miss too: it decodes to a value that, all but never, is an org the caller
     is in.
     """
-    # isdigit() alone accepts non-ASCII digits such as "²", which int() rejects.
-    if segment.isascii() and segment.isdigit():
-        return parse(segment)
+    org_id = parse(segment)
+
+    if not (org_id == NO_ORG_ID):
+        return org_id
+
     org_id = await (
         Organization.objects.filter(slug=segment, is_deleted=False)
         .values_list("id", flat=True)
