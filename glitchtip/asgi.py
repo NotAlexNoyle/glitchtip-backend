@@ -209,7 +209,12 @@ class MCPDjangoDispatcher:
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.staticfiles import finders
-from django.db import close_old_connections
+from django.db import (
+    InterfaceError,
+    OperationalError,
+    ProgrammingError,
+    close_old_connections,
+)
 
 from apps.organizations_ext import public_id
 from glitchtip.async_db import recycle_async_connections
@@ -324,6 +329,10 @@ class LoadPublicIdKey:
     Each attempt gives up after ``LOAD_TIMEOUT_SECONDS``. Startup awaits it,
     and an unreachable database would otherwise hold startup for the whole
     pool timeout, failing the readiness probe.
+
+    A failing load logs one line naming the likely cause, then stays quiet
+    until it succeeds: every worker retries, and a traceback per attempt
+    would bury the cause.
     """
 
     RETRY_SECONDS = 1.0
@@ -333,6 +342,7 @@ class LoadPublicIdKey:
     def __init__(self, app):
         self.app = app
         self._retry: asyncio.Task | None = None
+        self._failing = False
         public_id.set_load_trigger(self._start_retry)
 
     async def __call__(self, scope, receive, send):
@@ -341,7 +351,7 @@ class LoadPublicIdKey:
         elif (
             not public_id.key_loaded()
             and not self._retrying()
-            and not await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS)
+            and not await self._load()
         ):
             self._start_retry()
         await self.app(scope, receive, send)
@@ -350,7 +360,7 @@ class LoadPublicIdKey:
         async def wrapped():
             message = await receive()
             if message["type"] == "lifespan.startup":
-                if not await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS):
+                if not await self._load():
                     self._start_retry()
             elif message["type"] == "lifespan.shutdown" and self._retrying():
                 self._retry.cancel()
@@ -372,23 +382,55 @@ class LoadPublicIdKey:
         delay = self.RETRY_SECONDS
         while not public_id.key_loaded():
             await asyncio.sleep(delay)
-            if await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS):
+            if await self._load():
                 return
             delay = min(delay * 2, self.RETRY_MAX_SECONDS)
 
+    async def _load(self) -> bool:
+        timeout = self.LOAD_TIMEOUT_SECONDS
+        try:
+            await asyncio.wait_for(public_id.load_key(), timeout)
+        except Exception as exc:
+            if not self._failing:
+                self._failing = True
+                if cause := _load_failure_cause(exc, timeout):
+                    logger.warning(
+                        "Public ids are unavailable until their key loads: %s. "
+                        "Retrying in the background.",
+                        cause,
+                    )
+                else:
+                    # Unexpected, so worth its traceback, once.
+                    logger.exception(
+                        "Could not load the public id key. Retrying in the background."
+                    )
+            return False
+        finally:
+            # Neither lifespan nor the retry task has a request to return this
+            # connection, and a request's attempt runs before the inner app, so
+            # return it here either way.
+            await _recycle_db_connections()
+        if self._failing:
+            self._failing = False
+            logger.info("Public id key loaded; public ids are available again.")
+        return True
 
-async def _load_public_id_key(timeout: float) -> bool:
-    try:
-        await asyncio.wait_for(public_id.load_key(), timeout)
-    except Exception:
-        logger.exception("Could not load the public id key")
-        return False
-    finally:
-        # Neither lifespan nor the retry task has a request to return this
-        # connection, and a request's attempt runs before the inner app, so
-        # return it here either way.
-        await _recycle_db_connections()
-    return True
+
+_UNDEFINED_TABLE = "42P01"
+
+
+def _load_failure_cause(exc: Exception, timeout: float) -> str | None:
+    """Why the key failed to load, when it is one of the expected reasons."""
+    if isinstance(exc, ProgrammingError) and (
+        # Django's wrapper chains the driver's error, which carries the code.
+        getattr(exc.__cause__, "sqlstate", None) == _UNDEFINED_TABLE
+    ):
+        return "its table does not exist yet; run `manage.py migrate`"
+    if isinstance(exc, TimeoutError):
+        return f"the database did not answer within {timeout:g}s"
+    if isinstance(exc, (OperationalError, InterfaceError)):
+        return "the database is unreachable"
+    return None
 
 
 if settings.GLITCHTIP_ENABLE_MCP:

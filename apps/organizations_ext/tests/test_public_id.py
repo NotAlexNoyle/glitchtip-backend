@@ -1,11 +1,12 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 from unittest import mock
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.core.exceptions import ImproperlyConfigured
-from django.db import OperationalError
+from django.db import OperationalError, ProgrammingError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 
 from apps.organizations_ext import public_id
@@ -177,6 +178,9 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         PublicIdKey.objects.get_or_create(id=1, defaults={"key": "11" * 32})
         public_id.clear_key()
         self.addCleanup(public_id.clear_key)
+        # Test settings disable WARNING and below; these tests assert on it.
+        self.addCleanup(logging.disable, logging.root.manager.disable)
+        logging.disable(logging.NOTSET)
 
     async def run_lifespan(self, inner):
         messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
@@ -211,7 +215,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             mock.patch.object(
                 public_id, "load_key", side_effect=OperationalError("down")
             ),
-            self.assertLogs("glitchtip.asgi", "ERROR"),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
         ):
             await self.run_lifespan(inner)
         self.assertEqual(received, ["lifespan.startup", "lifespan.shutdown"])
@@ -250,11 +254,29 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         with (
             mock.patch.object(public_id, "load_key", down_twice),
             mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
-            self.assertLogs("glitchtip.asgi", "ERROR"),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
         ):
             await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
         self.assertTrue(public_id.key_loaded())
         self.assertEqual(len(attempts), 3)
+
+    async def test_repeated_failures_log_one_line_naming_the_cause(self):
+        class UndefinedTable(Exception):
+            sqlstate = "42P01"
+
+        def no_table():
+            raise ProgrammingError("relation does not exist") from UndefinedTable()
+
+        wrapper = LoadPublicIdKey(None)
+        with (
+            mock.patch.object(public_id, "load_key", side_effect=no_table),
+            self.assertLogs("glitchtip.asgi", "WARNING") as logs,
+        ):
+            for _ in range(3):
+                self.assertFalse(await wrapper._load())
+        [record] = logs.records
+        self.assertIn("manage.py migrate", record.getMessage())
+        self.assertIsNone(record.exc_info)
 
     async def test_hung_load_does_not_hold_startup(self):
         async def hang():
@@ -269,7 +291,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         with (
             mock.patch.object(public_id, "load_key", hang),
             mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
-            self.assertLogs("glitchtip.asgi", "ERROR"),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
         ):
             # Bounded here too, so a regression fails instead of hanging.
             await asyncio.wait_for(self.run_lifespan(inner), 5)
