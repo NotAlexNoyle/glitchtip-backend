@@ -7,7 +7,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 
 from apps.organizations_ext import public_id
-from apps.organizations_ext.models import OrgIdKey
+from apps.organizations_ext.models import PublicIdKey
 from apps.organizations_ext.public_id import (
     MAX_ORG_ID,
     NO_ORG_ID,
@@ -18,7 +18,7 @@ from apps.organizations_ext.public_id import (
     ff1_encrypt,
     make_aes,
 )
-from glitchtip.asgi import LoadOrgIdKey
+from glitchtip.asgi import LoadPublicIdKey
 
 STABLE_VALUES = Path(__file__).with_name("public_id_stable_values.json")
 ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -92,7 +92,7 @@ class PublicIdTestCase(SimpleTestCase):
     def test_zero_is_never_a_public_id(self):
         # The internal value FF1 maps to 0. No key puts it inside int4 in any
         # practical search, so widen the range to reach it.
-        to_zero = public_id._unpermute(self.aes, 0)
+        to_zero = public_id._unpermute(self.aes, public_id._ORG_TWEAK, 0)
         public = encode_with(self.aes, to_zero)
         self.assertNotEqual(public, 0)
         with mock.patch.object(public_id, "MAX_ORG_ID", 2**48 - 1):
@@ -111,24 +111,24 @@ class PublicIdTestCase(SimpleTestCase):
 
 @override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
 class KeyLoadingTestCase(TestCase):
-    """The production path: the key comes from the OrgIdKey row."""
+    """The production path: the key comes from the PublicIdKey row."""
 
     def setUp(self):
         public_id.clear_key()
         self.addCleanup(public_id.clear_key)
 
     async def test_loads_the_migration_created_key(self):
-        row = await OrgIdKey.objects.aget()
+        row = await PublicIdKey.objects.aget()
         await public_id.load_key()
         self.assertEqual(
             public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
         )
 
     async def test_missing_row_fails_without_creating_one(self):
-        await OrgIdKey.objects.all().adelete()
+        await PublicIdKey.objects.all().adelete()
         with self.assertRaises(ImproperlyConfigured):
             await public_id.load_key()
-        self.assertFalse(await OrgIdKey.objects.aexists())
+        self.assertFalse(await PublicIdKey.objects.aexists())
 
     async def test_unloaded_key_in_event_loop_raises(self):
         """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
@@ -136,19 +136,19 @@ class KeyLoadingTestCase(TestCase):
             public_id.encode(42)
 
     def test_sync_code_loads_on_first_use(self):
-        row = OrgIdKey.objects.get()
+        row = PublicIdKey.objects.get()
         self.assertEqual(
             public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
         )
 
 
 @override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
-class LoadOrgIdKeyTestCase(TransactionTestCase):
+class LoadPublicIdKeyTestCase(TransactionTestCase):
     """Through the ASGI wrapper. Transactional: it recycles DB connections."""
 
     def setUp(self):
         # Earlier TransactionTestCase flushes may have deleted the row.
-        OrgIdKey.objects.get_or_create(id=1, defaults={"key": "11" * 32})
+        PublicIdKey.objects.get_or_create(id=1, defaults={"key": "11" * 32})
         public_id.clear_key()
         self.addCleanup(public_id.clear_key)
 
@@ -161,7 +161,7 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
         async def send(_message):
             pass
 
-        await LoadOrgIdKey(inner)({"type": "lifespan"}, receive, send)
+        await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
 
     async def test_lifespan_loads_key_before_inner_startup(self):
         loaded_at_startup = []
@@ -175,7 +175,7 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
         self.assertEqual(loaded_at_startup, [True])
 
     async def test_failed_lifespan_load_still_starts(self):
-        await OrgIdKey.objects.all().adelete()
+        await PublicIdKey.objects.all().adelete()
         received = []
 
         async def inner(scope, receive, send):
@@ -196,5 +196,5 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
             encoded.append(public_id.encode(42))
 
         scope = {"type": "http", "path": "/mcp"}
-        await LoadOrgIdKey(inner)(scope, None, None)
+        await LoadPublicIdKey(inner)(scope, None, None)
         self.assertEqual(len(encoded), 1)

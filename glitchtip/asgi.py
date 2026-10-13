@@ -300,8 +300,8 @@ async def _recycle_db_connections():
         logger.exception("Failed to recycle DB connections")
 
 
-class LoadOrgIdKey:
-    """Load the public org id key before anything in this process needs it.
+class LoadPublicIdKey:
+    """Load the public id key before anything in this process needs it.
 
     Encoding an org id from async code cannot load the key itself: that would
     be a sync ORM call inside the event loop. So it is loaded here, on lifespan
@@ -332,24 +332,24 @@ class LoadOrgIdKey:
             now = asyncio.get_running_loop().time()
             if now >= self._next_attempt:
                 self._next_attempt = now + self.RETRY_SECONDS
-                await _load_org_id_key()
+                await _load_public_id_key()
         await self.app(scope, receive, send)
 
     def _load_on_startup(self, receive):
         async def wrapped():
             message = await receive()
             if message["type"] == "lifespan.startup":
-                await _load_org_id_key()
+                await _load_public_id_key()
             return message
 
         return wrapped
 
 
-async def _load_org_id_key():
+async def _load_public_id_key():
     try:
         await public_id.load_key()
     except Exception:
-        logger.exception("Could not load the public org id key")
+        logger.exception("Could not load the public id key")
     finally:
         # Lifespan has no request to return this connection, and a retry
         # runs before the inner app, so return it here either way.
@@ -552,7 +552,7 @@ except ImportError:
     # serving this app under another ASGI server)
     pass
 
-application = LoadOrgIdKey(application)
+application = LoadPublicIdKey(application)
 
 # Outermost so lifespan startup reaches it at all (the vtasks wrapper consumes
 # lifespan without forwarding it inward): a pod receiving no HTTP traffic still

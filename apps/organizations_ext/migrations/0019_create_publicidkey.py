@@ -4,19 +4,19 @@ from django.db import migrations
 
 
 def create_key(apps, schema_editor):
-    """Create the public org id key, once.
+    """Create the public id key, once.
 
     Must survive squashes: a fresh database gets its key from here, and
     nothing else creates one.
     """
-    OrgIdKey = apps.get_model("organizations_ext", "OrgIdKey")
-    if not OrgIdKey.objects.exists():
-        OrgIdKey.objects.create(id=1, key=secrets.token_hex(32))
+    PublicIdKey = apps.get_model("organizations_ext", "PublicIdKey")
+    if not PublicIdKey.objects.exists():
+        PublicIdKey.objects.create(id=1, key=secrets.token_hex(32))
 
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("organizations_ext", "0018_orgidkey"),
+        ("organizations_ext", "0018_publicidkey"),
     ]
 
     operations = [

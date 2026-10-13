@@ -11,7 +11,7 @@ future id versions: a new key or cipher would issue ids from that range, and
 ``decode`` would pick the version by range, so ids already handed out keep
 working.
 
-The key is one ``OrgIdKey`` row, created by migration. It is loaded once per
+The key is one ``PublicIdKey`` row, created by migration. It is loaded once per
 process into a module cache: from the ASGI lifespan (``glitchtip.asgi``), or
 on first use in sync code such as admin views and management commands.
 """
@@ -33,7 +33,9 @@ NO_ORG_ID = 0
 
 PUBLIC_ID_BITS = 48
 _V1_LIMIT = 2**PUBLIC_ID_BITS
-_TWEAK = b"org"
+# One key serves every kind of public id; the tweak keeps each kind's ids
+# independent of the others'. Never change these bytes.
+_ORG_TWEAK = b"org"
 
 _aes: Cipher | None = None
 
@@ -113,28 +115,28 @@ def _ff1(aes: Cipher, tweak: bytes, radix: int, n: int, x: int, decrypt: bool):
     return a * radix**v + b
 
 
-def _permute(aes: Cipher, x: int) -> int:
-    return ff1_encrypt(aes, _TWEAK, 2, PUBLIC_ID_BITS, x)
+def _permute(aes: Cipher, tweak: bytes, x: int) -> int:
+    return ff1_encrypt(aes, tweak, 2, PUBLIC_ID_BITS, x)
 
 
-def _unpermute(aes: Cipher, y: int) -> int:
-    return ff1_decrypt(aes, _TWEAK, 2, PUBLIC_ID_BITS, y)
+def _unpermute(aes: Cipher, tweak: bytes, y: int) -> int:
+    return ff1_decrypt(aes, tweak, 2, PUBLIC_ID_BITS, y)
 
 
 def encode_with(aes: Cipher, internal: int) -> int:
     # 0 is not a valid public id (a path segment can't start with "0"). Internal
     # id 0 never exists, so its image is free to stand in for whichever id
     # would have encrypted to 0.
-    public = _permute(aes, internal)
-    return public if public != 0 else _permute(aes, 0)
+    public = _permute(aes, _ORG_TWEAK, internal)
+    return public if public != 0 else _permute(aes, _ORG_TWEAK, 0)
 
 
 def decode_with(aes: Cipher, public: int) -> int:
     if not 0 < public < _V1_LIMIT:
         return NO_ORG_ID
-    internal = _unpermute(aes, public)
+    internal = _unpermute(aes, _ORG_TWEAK, public)
     if internal == 0:
-        internal = _unpermute(aes, 0)
+        internal = _unpermute(aes, _ORG_TWEAK, 0)
     return internal if 1 <= internal <= MAX_ORG_ID else NO_ORG_ID
 
 
@@ -162,7 +164,7 @@ def make_aes(secret: SecretKey) -> Cipher:
             raise ValueError
     except ValueError:
         raise ImproperlyConfigured(
-            "The public org id key must be 64 hex characters."
+            "The public id key must be 64 hex characters."
         ) from None
     return Cipher(algorithms.AES(bytes.fromhex(secret.hex)), modes.ECB())
 
@@ -173,7 +175,7 @@ def _install(secret: SecretKey) -> None:
     encode.cache_clear()
     decode.cache_clear()
     fingerprint = hashlib.sha256(secret.hex.encode()).hexdigest()[:8]
-    logger.info("Public org id key loaded, fingerprint %s", fingerprint)
+    logger.info("Public id key loaded, fingerprint %s", fingerprint)
 
 
 def _test_key() -> SecretKey | None:
@@ -189,8 +191,8 @@ def _test_key() -> SecretKey | None:
 
 
 _MISSING_KEY = (
-    "The public org id key row is missing. Run `manage.py migrate`; if this "
-    "database was restored with loaddata, restore organizations_ext.OrgIdKey "
+    "The public id key row is missing. Run `manage.py migrate`; if this "
+    "database was restored with loaddata, restore organizations_ext.PublicIdKey "
     "from the source database instead of creating a new key, or every public "
     "org id changes."
 )
@@ -198,11 +200,11 @@ _MISSING_KEY = (
 
 async def load_key() -> None:
     """Load the key into this process's cache. Raises if the row is missing."""
-    from .models import OrgIdKey
+    from .models import PublicIdKey
 
     key = _test_key()
     if key is None:
-        key_hex = await OrgIdKey.objects.values_list("key", flat=True).afirst()
+        key_hex = await PublicIdKey.objects.values_list("key", flat=True).afirst()
         if key_hex is None:
             raise ImproperlyConfigured(_MISSING_KEY)
         key = SecretKey(key_hex)
@@ -211,11 +213,11 @@ async def load_key() -> None:
 
 
 def load_key_sync() -> None:
-    from .models import OrgIdKey
+    from .models import PublicIdKey
 
     key = _test_key()
     if key is None:
-        key_hex = OrgIdKey.objects.values_list("key", flat=True).first()
+        key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
         if key_hex is None:
             raise ImproperlyConfigured(_MISSING_KEY)
         key = SecretKey(key_hex)
@@ -251,7 +253,7 @@ def _get_aes() -> Cipher:
             # says nothing about why. The ASGI layer loads the key before any
             # request; reaching this means that load failed or was skipped.
             raise ImproperlyConfigured(
-                "The public org id key is not loaded in this process. "
+                "The public id key is not loaded in this process. "
                 "await apps.organizations_ext.public_id.load_key() first; "
                 "check the startup log for why it failed."
             )

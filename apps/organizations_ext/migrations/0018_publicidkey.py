@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name="OrgIdKey",
+            name="PublicIdKey",
             fields=[
                 (
                     "id",
@@ -21,7 +21,7 @@ class Migration(migrations.Migration):
             options={
                 "constraints": [
                     models.CheckConstraint(
-                        condition=models.Q(("id", 1)), name="orgidkey_single_row"
+                        condition=models.Q(("id", 1)), name="publicidkey_single_row"
                     )
                 ],
             },
