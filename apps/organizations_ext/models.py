@@ -569,11 +569,13 @@ class OrganizationSocialApp(models.Model):
     )
 
 
-class OrgIdKey(models.Model):
-    """The key public org ids are encrypted with; see ``public_id``.
+class PublicIdKey(models.Model):
+    """The key public ids are encrypted with; see ``public_id``.
 
-    One row, created by migration and never at request time. Losing or
-    replacing it changes every public org id.
+    One row, shared by every kind of public id: each kind encrypts under its
+    own FF1 tweak, so a second kind needs no second key. Created by migration,
+    or by the first process that finds it missing, so a restore without this
+    row gets a new key. Losing or replacing it changes every public id.
     """
 
     id = models.PositiveSmallIntegerField(primary_key=True, default=1)
@@ -581,5 +583,5 @@ class OrgIdKey(models.Model):
 
     class Meta:
         constraints = [
-            models.CheckConstraint(condition=Q(id=1), name="orgidkey_single_row")
+            models.CheckConstraint(condition=Q(id=1), name="publicidkey_single_row")
         ]

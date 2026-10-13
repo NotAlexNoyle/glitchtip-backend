@@ -1593,9 +1593,9 @@ if TESTING:
     }
     SESSION_ENGINE = "django.contrib.sessions.backends.cache"
     STORAGES = global_settings.STORAGES
-    # Read instead of the OrgIdKey row, which TransactionTestCase flushes
-    # delete. Ignored outside tests.
-    PUBLIC_ORG_ID_TEST_KEY = "00" * 32
+    # Read instead of the PublicIdKey row: the test clients skip the ASGI
+    # layer that loads it. Ignored outside tests; there is no key setting.
+    PUBLIC_ID_TEST_KEY = "00" * 32
     # Tests import glitchtip.asgi, which indexes STATIC_ROOT; a test run has not
     # collected static and does not serve it. The module is ours because
     # ServeStatic warns with a stacklevel that attributes it to the caller.
