@@ -6,11 +6,16 @@ JSON-number safe. The bit width, cipher, tweak and key are permanent: changing
 any one changes every public id. [2**48, 2**53) is reserved for a future
 version that ``decode`` would pick by range; ``parse``'s digit cap must grow
 with it.
+
+The key is one ``PublicIdKey`` row, made by migrate or by the first process
+to find it missing, and cached per process.
 """
 
 import asyncio
 import functools
 import hashlib
+import secrets
+from collections.abc import Callable
 from typing import Annotated
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -24,10 +29,14 @@ NO_ORG_ID = 0
 
 PUBLIC_ID_BITS = 48
 _V1_LIMIT = 2**PUBLIC_ID_BITS
-_TWEAK = b"org"
+# One key serves every kind of public id; the tweak keeps each kind's ids
+# independent of the others'. Never change these bytes.
+_ORG_TWEAK = b"org"
 
 _aes: Cipher | None = None
 _fingerprint: str | None = None
+# Set by glitchtip.asgi.LoadPublicIdKey: starts its background retry.
+_load_trigger: Callable[[], None] | None = None
 
 
 class SecretKey:
@@ -105,28 +114,28 @@ def _ff1(aes: Cipher, tweak: bytes, radix: int, n: int, x: int, decrypt: bool):
     return a * radix**v + b
 
 
-def _permute(aes: Cipher, x: int) -> int:
-    return ff1_encrypt(aes, _TWEAK, 2, PUBLIC_ID_BITS, x)
+def _permute(aes: Cipher, tweak: bytes, x: int) -> int:
+    return ff1_encrypt(aes, tweak, 2, PUBLIC_ID_BITS, x)
 
 
-def _unpermute(aes: Cipher, y: int) -> int:
-    return ff1_decrypt(aes, _TWEAK, 2, PUBLIC_ID_BITS, y)
+def _unpermute(aes: Cipher, tweak: bytes, y: int) -> int:
+    return ff1_decrypt(aes, tweak, 2, PUBLIC_ID_BITS, y)
 
 
 def encode_with(aes: Cipher, internal: int) -> int:
     # 0 is not a valid public id (a path segment can't start with "0"). Internal
     # id 0 never exists, so its image is free to stand in for whichever id
     # would have encrypted to 0.
-    public = _permute(aes, internal)
-    return public if public != 0 else _permute(aes, 0)
+    public = _permute(aes, _ORG_TWEAK, internal)
+    return public if public != 0 else _permute(aes, _ORG_TWEAK, 0)
 
 
 def decode_with(aes: Cipher, public: int) -> int:
     if not 0 < public < _V1_LIMIT:
         return NO_ORG_ID
-    internal = _unpermute(aes, public)
+    internal = _unpermute(aes, _ORG_TWEAK, public)
     if internal == 0:
-        internal = _unpermute(aes, 0)
+        internal = _unpermute(aes, _ORG_TWEAK, 0)
     return internal if 1 <= internal <= MAX_ORG_ID else NO_ORG_ID
 
 
@@ -196,7 +205,7 @@ def make_aes(secret: SecretKey) -> Cipher:
             raise ValueError
     except ValueError:
         raise ImproperlyConfigured(
-            "The public org id key must be 64 hex characters."
+            "The public id key must be 64 hex characters."
         ) from None
     return Cipher(algorithms.AES(bytes.fromhex(secret.hex)), modes.ECB())
 
@@ -215,47 +224,55 @@ def key_fingerprint() -> str | None:
 
 
 def _test_key() -> SecretKey | None:
-    # None (row-backed tests override it so) means read the row.
+    # Tests only: their clients skip the ASGI layer that loads the row, and a
+    # key setting elsewhere could change every id. None means read the row.
     if settings.TESTING:
-        test_hex = getattr(settings, "PUBLIC_ORG_ID_TEST_KEY", None)
+        test_hex = getattr(settings, "PUBLIC_ID_TEST_KEY", None)
         if test_hex is not None:
             return SecretKey(test_hex)
     return None
 
 
-_MISSING_KEY = (
-    "The public org id key row is missing. Run `manage.py migrate`; if this "
-    "database was restored with loaddata, restore organizations_ext.OrgIdKey "
-    "from the source database instead of creating a new key, or every public "
-    "org id changes."
-)
+# Several processes can find the row missing at once. ON CONFLICT lets one
+# insert win, and every loader, the winner included, uses what the re-read
+# returns, so all of them agree on one key. Two statements, because one
+# statement's snapshot can miss a row a concurrent winner commits.
+async def _read_or_create_key() -> SecretKey:
+    from .models import PublicIdKey
+
+    key_hex = await PublicIdKey.objects.values_list("key", flat=True).afirst()
+    if key_hex is None:
+        await PublicIdKey.objects.abulk_create(
+            [PublicIdKey(id=1, key=secrets.token_hex(32))], ignore_conflicts=True
+        )
+        key_hex = await PublicIdKey.objects.values_list("key", flat=True).afirst()
+    return SecretKey(key_hex)
+
+
+def _read_or_create_key_sync() -> SecretKey:
+    from .models import PublicIdKey
+
+    key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
+    if key_hex is None:
+        PublicIdKey.objects.bulk_create(
+            [PublicIdKey(id=1, key=secrets.token_hex(32))], ignore_conflicts=True
+        )
+        key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
+    return SecretKey(key_hex)
 
 
 async def load_key() -> None:
-    """Load the key into this process's cache. Raises if the row is missing."""
-    from .models import OrgIdKey
-
-    key = _test_key()
-    if key is None:
-        key_hex = await OrgIdKey.objects.values_list("key", flat=True).afirst()
-        if key_hex is None:
-            raise ImproperlyConfigured(_MISSING_KEY)
-        key = SecretKey(key_hex)
-        del key_hex
-    _install(key)
+    """Load the key into this process's cache, creating the row if missing."""
+    _install(_test_key() or await _read_or_create_key())
 
 
 def load_key_sync() -> None:
-    from .models import OrgIdKey
+    _install(_test_key() or _read_or_create_key_sync())
 
-    key = _test_key()
-    if key is None:
-        key_hex = OrgIdKey.objects.values_list("key", flat=True).first()
-        if key_hex is None:
-            raise ImproperlyConfigured(_MISSING_KEY)
-        key = SecretKey(key_hex)
-        del key_hex
-    _install(key)
+
+def set_load_trigger(trigger: Callable[[], None]) -> None:
+    global _load_trigger
+    _load_trigger = trigger
 
 
 def key_loaded() -> bool:
@@ -283,10 +300,13 @@ def _get_aes() -> Cipher:
         except RuntimeError:
             load_key_sync()
         else:
-            # Rather than a sync ORM call's unhelpful SynchronousOnlyOperation.
+            # Not a sync ORM call (SynchronousOnlyOperation), nor a blocking
+            # one that stalls the loop: start the background load instead.
+            if _load_trigger is not None:
+                _load_trigger()
             raise ImproperlyConfigured(
-                "The public org id key is not loaded in this process. "
-                "await apps.organizations_ext.public_id.load_key() first; "
-                "check the startup log for why it failed."
+                "The public id key is not loaded in this process yet; it is "
+                "loading in the background. Async code outside a server can "
+                "await apps.organizations_ext.public_id.load_key() first."
             )
     return _aes

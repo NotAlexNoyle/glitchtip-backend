@@ -1,16 +1,19 @@
+import asyncio
 import hashlib
 import io
 import json
+import logging
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.core.exceptions import ImproperlyConfigured
+from django.db import OperationalError, ProgrammingError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 
 from apps.organizations_ext import public_id
-from apps.organizations_ext.models import OrgIdKey
+from apps.organizations_ext.models import PublicIdKey
 from apps.organizations_ext.public_id import (
     MAX_ORG_ID,
     NO_ORG_ID,
@@ -21,7 +24,7 @@ from apps.organizations_ext.public_id import (
     ff1_encrypt,
     make_aes,
 )
-from glitchtip.asgi import LoadOrgIdKey
+from glitchtip.asgi import LoadPublicIdKey
 
 STABLE_VALUES = Path(__file__).with_name("public_id_stable_values.json")
 ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -95,7 +98,7 @@ class PublicIdTestCase(SimpleTestCase):
     def test_zero_is_never_a_public_id(self):
         # The internal value FF1 maps to 0. Under this key it falls outside
         # int4, as it does for nearly every key, so widen the range to reach it.
-        to_zero = public_id._unpermute(self.aes, 0)
+        to_zero = public_id._unpermute(self.aes, public_id._ORG_TWEAK, 0)
         public = encode_with(self.aes, to_zero)
         self.assertNotEqual(public, 0)
         with mock.patch.object(public_id, "MAX_ORG_ID", 2**48 - 1):
@@ -112,47 +115,82 @@ class PublicIdTestCase(SimpleTestCase):
                 make_aes(SecretKey(key))
 
 
-@override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
+class TestKeySettingTestCase(SimpleTestCase):
+    @override_settings(TESTING=False, PUBLIC_ID_TEST_KEY="00" * 32)
+    def test_ignored_outside_tests(self):
+        """No setting may choose the key outside tests."""
+        self.assertIsNone(public_id._test_key())
+
+
+@override_settings(PUBLIC_ID_TEST_KEY=None)
 class KeyLoadingTestCase(TestCase):
-    """The production path: the key comes from the OrgIdKey row."""
+    """The production path: the key comes from the PublicIdKey row."""
 
     def setUp(self):
         public_id.clear_key()
         self.addCleanup(public_id.clear_key)
 
-    async def test_loads_the_migration_created_key(self):
-        row = await OrgIdKey.objects.aget()
+    async def test_loads_the_key_row(self):
         await public_id.load_key()
+        row = await PublicIdKey.objects.aget()
         self.assertEqual(
             public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
         )
 
-    async def test_missing_row_fails_without_creating_one(self):
-        await OrgIdKey.objects.all().adelete()
-        with self.assertRaises(ImproperlyConfigured):
-            await public_id.load_key()
-        self.assertFalse(await OrgIdKey.objects.aexists())
+    async def test_missing_row_is_recreated(self):
+        await PublicIdKey.objects.all().adelete()
+        await public_id.load_key()
+        row = await PublicIdKey.objects.aget()
+        self.assertEqual(
+            public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
+        )
 
-    async def test_unloaded_key_in_event_loop_raises(self):
-        with self.assertRaisesMessage(ImproperlyConfigured, "not loaded"):
+    def test_concurrent_loaders_agree_on_one_key(self):
+        """A loader that loses the insert race uses the winner's key."""
+        PublicIdKey.objects.all().delete()
+
+        def winner_inserts_first(_nbytes):
+            # Runs after this loader's read missed, before its insert.
+            PublicIdKey.objects.create(id=1, key="aa" * 32)
+            return "bb" * 32
+
+        with mock.patch.object(
+            public_id.secrets, "token_hex", side_effect=winner_inserts_first
+        ):
+            key = public_id._read_or_create_key_sync()
+        self.assertEqual(key.hex, "aa" * 32)
+        self.assertEqual(
+            list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
+        )
+
+    async def test_unloaded_key_in_event_loop_starts_a_load(self):
+        """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
+        trigger = mock.Mock()
+        with (
+            mock.patch.object(public_id, "_load_trigger", trigger),
+            self.assertRaisesMessage(ImproperlyConfigured, "not loaded"),
+        ):
             public_id.encode(42)
+        trigger.assert_called_once_with()
 
     def test_sync_code_loads_on_first_use(self):
-        row = OrgIdKey.objects.get()
-        self.assertEqual(
-            public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
-        )
+        encoded = public_id.encode(42)
+        row = PublicIdKey.objects.get()
+        self.assertEqual(encoded, encode_with(make_aes(SecretKey(row.key)), 42))
 
 
-@override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
-class LoadOrgIdKeyTestCase(TransactionTestCase):
+@override_settings(PUBLIC_ID_TEST_KEY=None)
+class LoadPublicIdKeyTestCase(TransactionTestCase):
     """Through the ASGI wrapper. Transactional: it recycles DB connections."""
 
     def setUp(self):
         # Earlier TransactionTestCase flushes may have deleted the row.
-        OrgIdKey.objects.get_or_create(id=1, defaults={"key": "11" * 32})
+        PublicIdKey.objects.get_or_create(id=1, defaults={"key": "11" * 32})
         public_id.clear_key()
         self.addCleanup(public_id.clear_key)
+        # Test settings disable WARNING and below; these tests assert on it.
+        self.addCleanup(logging.disable, logging.root.manager.disable)
+        logging.disable(logging.NOTSET)
 
     async def run_lifespan(self, inner):
         messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
@@ -163,7 +201,7 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
         async def send(_message):
             pass
 
-        await LoadOrgIdKey(inner)({"type": "lifespan"}, receive, send)
+        await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
 
     async def test_lifespan_loads_key_before_inner_startup(self):
         loaded_at_startup = []
@@ -185,20 +223,100 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
         with redirect_stdout(out):
             await self.run_lifespan(inner)
         fingerprint = hashlib.sha256(("11" * 32).encode()).hexdigest()[:8]
-        self.assertIn(f"Public org id key fingerprint: {fingerprint}", out.getvalue())
+        self.assertIn(f"Public id key fingerprint: {fingerprint}", out.getvalue())
 
     async def test_failed_lifespan_load_still_starts(self):
-        await OrgIdKey.objects.all().adelete()
         received = []
 
         async def inner(scope, receive, send):
             received.append((await receive())["type"])
             received.append((await receive())["type"])
 
-        with self.assertLogs("glitchtip.asgi", "ERROR"):
+        with (
+            mock.patch.object(
+                public_id, "load_key", side_effect=OperationalError("down")
+            ),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
+        ):
             await self.run_lifespan(inner)
         self.assertEqual(received, ["lifespan.startup", "lifespan.shutdown"])
         self.assertFalse(public_id.key_loaded())
+
+    async def test_failed_startup_load_recovers_without_a_request(self):
+        """Startup fails (database down, or migrate not run yet), then the key
+        loads with no HTTP request to prompt it."""
+        load_key = public_id.load_key
+        attempts = []
+
+        async def down_twice():
+            attempts.append(1)
+            if len(attempts) <= 2:
+                raise OperationalError("down")
+            await load_key()
+
+        messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+
+        async def receive():
+            if attempts:
+                # Hold shutdown back until the retry had its chance.
+                for _ in range(500):
+                    if public_id.key_loaded():
+                        break
+                    await asyncio.sleep(0.01)
+            return next(messages)
+
+        async def inner(scope, receive, send):
+            await receive()
+            await receive()
+
+        async def send(_message):
+            pass
+
+        with (
+            mock.patch.object(public_id, "load_key", down_twice),
+            mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
+        ):
+            await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
+        self.assertTrue(public_id.key_loaded())
+        self.assertEqual(len(attempts), 3)
+
+    async def test_repeated_failures_log_one_line_naming_the_cause(self):
+        class UndefinedTable(Exception):
+            sqlstate = "42P01"
+
+        def no_table():
+            raise ProgrammingError("relation does not exist") from UndefinedTable()
+
+        wrapper = LoadPublicIdKey(None)
+        with (
+            mock.patch.object(public_id, "load_key", side_effect=no_table),
+            self.assertLogs("glitchtip.asgi", "WARNING") as logs,
+        ):
+            for _ in range(3):
+                self.assertFalse(await wrapper._load())
+        [record] = logs.records
+        self.assertIn("manage.py migrate", record.getMessage())
+        self.assertIsNone(record.exc_info)
+
+    async def test_hung_load_does_not_hold_startup(self):
+        async def hang():
+            await asyncio.sleep(3600)
+
+        started = []
+
+        async def inner(scope, receive, send):
+            started.append((await receive())["type"])
+            await receive()
+
+        with (
+            mock.patch.object(public_id, "load_key", hang),
+            mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
+        ):
+            # Bounded here too, so a regression fails instead of hanging.
+            await asyncio.wait_for(self.run_lifespan(inner), 5)
+        self.assertEqual(started, ["lifespan.startup"])
 
     async def test_request_with_cold_cache_can_encode(self):
         """Covers servers without lifespan, and apps Django middleware never
@@ -209,5 +327,5 @@ class LoadOrgIdKeyTestCase(TransactionTestCase):
             encoded.append(public_id.encode(42))
 
         scope = {"type": "http", "path": "/mcp"}
-        await LoadOrgIdKey(inner)(scope, None, None)
+        await LoadPublicIdKey(inner)(scope, None, None)
         self.assertEqual(len(encoded), 1)
