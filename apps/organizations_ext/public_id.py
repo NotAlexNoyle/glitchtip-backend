@@ -11,15 +11,17 @@ future id versions: a new key or cipher would issue ids from that range, and
 ``decode`` would pick the version by range, so ids already handed out keep
 working.
 
-The key is one ``PublicIdKey`` row, created by migration. It is loaded once per
-process into a module cache: from the ASGI lifespan (``glitchtip.asgi``), or
-on first use in sync code such as admin views and management commands.
+The key is one ``PublicIdKey`` row, created by migration, or by the first
+process that finds it missing. It is loaded once per process into a module
+cache: from the ASGI lifespan (``glitchtip.asgi``), or on first use in sync
+code such as admin views and management commands.
 """
 
 import asyncio
 import functools
 import hashlib
 import logging
+import secrets
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.conf import settings
@@ -190,39 +192,41 @@ def _test_key() -> SecretKey | None:
     return None
 
 
-_MISSING_KEY = (
-    "The public id key row is missing. Run `manage.py migrate`; if this "
-    "database was restored with loaddata, restore organizations_ext.PublicIdKey "
-    "from the source database instead of creating a new key, or every public "
-    "org id changes."
-)
+# Several processes can find the row missing at once. ON CONFLICT lets one
+# insert win, and every loader, the winner included, uses what the re-read
+# returns, so all of them agree on one key. Two statements, because one
+# statement's snapshot can miss a row a concurrent winner commits.
+async def _read_or_create_key() -> SecretKey:
+    from .models import PublicIdKey
+
+    key_hex = await PublicIdKey.objects.values_list("key", flat=True).afirst()
+    if key_hex is None:
+        await PublicIdKey.objects.abulk_create(
+            [PublicIdKey(id=1, key=secrets.token_hex(32))], ignore_conflicts=True
+        )
+        key_hex = await PublicIdKey.objects.values_list("key", flat=True).afirst()
+    return SecretKey(key_hex)
+
+
+def _read_or_create_key_sync() -> SecretKey:
+    from .models import PublicIdKey
+
+    key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
+    if key_hex is None:
+        PublicIdKey.objects.bulk_create(
+            [PublicIdKey(id=1, key=secrets.token_hex(32))], ignore_conflicts=True
+        )
+        key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
+    return SecretKey(key_hex)
 
 
 async def load_key() -> None:
-    """Load the key into this process's cache. Raises if the row is missing."""
-    from .models import PublicIdKey
-
-    key = _test_key()
-    if key is None:
-        key_hex = await PublicIdKey.objects.values_list("key", flat=True).afirst()
-        if key_hex is None:
-            raise ImproperlyConfigured(_MISSING_KEY)
-        key = SecretKey(key_hex)
-        del key_hex
-    _install(key)
+    """Load the key into this process's cache, creating the row if missing."""
+    _install(_test_key() or await _read_or_create_key())
 
 
 def load_key_sync() -> None:
-    from .models import PublicIdKey
-
-    key = _test_key()
-    if key is None:
-        key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
-        if key_hex is None:
-            raise ImproperlyConfigured(_MISSING_KEY)
-        key = SecretKey(key_hex)
-        del key_hex
-    _install(key)
+    _install(_test_key() or _read_or_create_key_sync())
 
 
 def key_loaded() -> bool:

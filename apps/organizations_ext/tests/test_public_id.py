@@ -4,6 +4,7 @@ from unittest import mock
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.core.exceptions import ImproperlyConfigured
+from django.db import OperationalError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 
 from apps.organizations_ext import public_id
@@ -117,18 +118,38 @@ class KeyLoadingTestCase(TestCase):
         public_id.clear_key()
         self.addCleanup(public_id.clear_key)
 
-    async def test_loads_the_migration_created_key(self):
-        row = await PublicIdKey.objects.aget()
+    async def test_loads_the_key_row(self):
         await public_id.load_key()
+        row = await PublicIdKey.objects.aget()
         self.assertEqual(
             public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
         )
 
-    async def test_missing_row_fails_without_creating_one(self):
+    async def test_missing_row_is_recreated(self):
         await PublicIdKey.objects.all().adelete()
-        with self.assertRaises(ImproperlyConfigured):
-            await public_id.load_key()
-        self.assertFalse(await PublicIdKey.objects.aexists())
+        await public_id.load_key()
+        row = await PublicIdKey.objects.aget()
+        self.assertEqual(
+            public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
+        )
+
+    def test_concurrent_loaders_agree_on_one_key(self):
+        """A loader that loses the insert race uses the winner's key."""
+        PublicIdKey.objects.all().delete()
+
+        def winner_inserts_first(_nbytes):
+            # Runs after this loader's read missed, before its insert.
+            PublicIdKey.objects.create(id=1, key="aa" * 32)
+            return "bb" * 32
+
+        with mock.patch.object(
+            public_id.secrets, "token_hex", side_effect=winner_inserts_first
+        ):
+            key = public_id._read_or_create_key_sync()
+        self.assertEqual(key.hex, "aa" * 32)
+        self.assertEqual(
+            list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
+        )
 
     async def test_unloaded_key_in_event_loop_raises(self):
         """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
@@ -136,10 +157,9 @@ class KeyLoadingTestCase(TestCase):
             public_id.encode(42)
 
     def test_sync_code_loads_on_first_use(self):
+        encoded = public_id.encode(42)
         row = PublicIdKey.objects.get()
-        self.assertEqual(
-            public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
-        )
+        self.assertEqual(encoded, encode_with(make_aes(SecretKey(row.key)), 42))
 
 
 @override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
@@ -175,14 +195,18 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         self.assertEqual(loaded_at_startup, [True])
 
     async def test_failed_lifespan_load_still_starts(self):
-        await PublicIdKey.objects.all().adelete()
         received = []
 
         async def inner(scope, receive, send):
             received.append((await receive())["type"])
             received.append((await receive())["type"])
 
-        with self.assertLogs("glitchtip.asgi", "ERROR"):
+        with (
+            mock.patch.object(
+                public_id, "load_key", side_effect=OperationalError("down")
+            ),
+            self.assertLogs("glitchtip.asgi", "ERROR"),
+        ):
             await self.run_lifespan(inner)
         self.assertEqual(received, ["lifespan.startup", "lifespan.shutdown"])
         self.assertFalse(public_id.key_loaded())
