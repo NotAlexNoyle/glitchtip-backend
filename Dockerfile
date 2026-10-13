@@ -1,4 +1,4 @@
-FROM python:3.14 AS build-python
+FROM python:3.15 AS build-python
 ARG IS_CI
 ENV PYTHONUNBUFFERED=1 \
   UV_COMPILE_BYTECODE=1 \
@@ -12,7 +12,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY pyproject.toml uv.lock /code/
 RUN uv sync --frozen --no-install-project $(test "$IS_CI" = "True" && echo "--no-dev")
 
-FROM python:3.14-slim
+FROM python:3.15-slim
 ARG GLITCHTIP_VERSION=local
 ENV GLITCHTIP_VERSION ${GLITCHTIP_VERSION}
 ENV PYTHONUNBUFFERED=1
