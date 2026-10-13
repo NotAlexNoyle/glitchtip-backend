@@ -272,14 +272,18 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         async def send(_message):
             pass
 
+        out = io.StringIO()
         with (
             mock.patch.object(public_id, "load_key", down_twice),
             mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
             self.assertLogs("glitchtip.asgi", "WARNING"),
+            redirect_stdout(out),
         ):
             await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
         self.assertTrue(public_id.key_loaded())
         self.assertEqual(len(attempts), 3)
+        # The operator's sign that the retry recovered.
+        self.assertIn("Public id key fingerprint:", out.getvalue())
 
     async def test_repeated_failures_log_one_line_naming_the_cause(self):
         class UndefinedTable(Exception):

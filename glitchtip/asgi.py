@@ -392,11 +392,10 @@ class LoadPublicIdKey:
             # connection, and a request's attempt runs before the inner app, so
             # return it here either way.
             await _recycle_db_connections()
-        if self._failing:
-            self._failing = False
-            logger.info("Public id key loaded; public ids are available again.")
+        self._failing = False
         # Printed like the banner: the default WARNING level hides info, and
-        # operators compare this value before and after a database move.
+        # operators compare this value before and after a database move. After
+        # a failed load, it is also the sign that public ids work again.
         print(
             f"Public id key fingerprint: {public_id.key_fingerprint()}",
             flush=True,
