@@ -185,12 +185,13 @@ def _install(secret: SecretKey) -> None:
 
 
 def _test_key() -> SecretKey | None:
-    # TransactionTestCase flushes delete the key row, so tests read the key
-    # from settings instead.
-    # The test key is public, so it may sit in a local. None (as the row-backed
-    # tests override it) means read the row.
+    # Async test clients call Django directly, skipping the ASGI layer that
+    # loads the row, so tests read a key from settings instead. Only tests: a
+    # setting that picks the key would be a way to change every public id by
+    # accident. The test key is public, so it may sit in a local. None (as
+    # the row-backed tests override it) means read the row.
     if settings.TESTING:
-        test_hex = getattr(settings, "PUBLIC_ORG_ID_TEST_KEY", None)
+        test_hex = getattr(settings, "PUBLIC_ID_TEST_KEY", None)
         if test_hex is not None:
             return SecretKey(test_hex)
     return None

@@ -112,7 +112,14 @@ class PublicIdTestCase(SimpleTestCase):
                 make_aes(SecretKey(key))
 
 
-@override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
+class TestKeySettingTestCase(SimpleTestCase):
+    @override_settings(TESTING=False, PUBLIC_ID_TEST_KEY="00" * 32)
+    def test_ignored_outside_tests(self):
+        """No setting may choose the key outside tests."""
+        self.assertIsNone(public_id._test_key())
+
+
+@override_settings(PUBLIC_ID_TEST_KEY=None)
 class KeyLoadingTestCase(TestCase):
     """The production path: the key comes from the PublicIdKey row."""
 
@@ -169,7 +176,7 @@ class KeyLoadingTestCase(TestCase):
         self.assertEqual(encoded, encode_with(make_aes(SecretKey(row.key)), 42))
 
 
-@override_settings(PUBLIC_ORG_ID_TEST_KEY=None)
+@override_settings(PUBLIC_ID_TEST_KEY=None)
 class LoadPublicIdKeyTestCase(TransactionTestCase):
     """Through the ASGI wrapper. Transactional: it recycles DB connections."""
 
