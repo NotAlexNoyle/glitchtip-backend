@@ -317,9 +317,14 @@ class LoadPublicIdKey:
     request that needs an org id then fails loudly. Requests retry the load,
     at most every ``RETRY_SECONDS``, which also covers servers that never send
     lifespan.
+
+    Each attempt gives up after ``LOAD_TIMEOUT_SECONDS``. Startup awaits it,
+    and an unreachable database would otherwise hold startup for the whole
+    pool timeout, failing the readiness probe.
     """
 
     RETRY_SECONDS = 5.0
+    LOAD_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, app):
         self.app = app
@@ -332,22 +337,22 @@ class LoadPublicIdKey:
             now = asyncio.get_running_loop().time()
             if now >= self._next_attempt:
                 self._next_attempt = now + self.RETRY_SECONDS
-                await _load_public_id_key()
+                await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS)
         await self.app(scope, receive, send)
 
     def _load_on_startup(self, receive):
         async def wrapped():
             message = await receive()
             if message["type"] == "lifespan.startup":
-                await _load_public_id_key()
+                await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS)
             return message
 
         return wrapped
 
 
-async def _load_public_id_key():
+async def _load_public_id_key(timeout: float):
     try:
-        await public_id.load_key()
+        await asyncio.wait_for(public_id.load_key(), timeout)
     except Exception:
         logger.exception("Could not load the public id key")
     finally:

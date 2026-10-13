@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from unittest import mock
@@ -210,6 +211,25 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             await self.run_lifespan(inner)
         self.assertEqual(received, ["lifespan.startup", "lifespan.shutdown"])
         self.assertFalse(public_id.key_loaded())
+
+    async def test_hung_load_does_not_hold_startup(self):
+        async def hang():
+            await asyncio.sleep(3600)
+
+        started = []
+
+        async def inner(scope, receive, send):
+            started.append((await receive())["type"])
+            await receive()
+
+        with (
+            mock.patch.object(public_id, "load_key", hang),
+            mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
+            self.assertLogs("glitchtip.asgi", "ERROR"),
+        ):
+            # Bounded here too, so a regression fails instead of hanging.
+            await asyncio.wait_for(self.run_lifespan(inner), 5)
+        self.assertEqual(started, ["lifespan.startup"])
 
     async def test_request_with_cold_cache_can_encode(self):
         """Covers servers without lifespan, and apps Django middleware never
