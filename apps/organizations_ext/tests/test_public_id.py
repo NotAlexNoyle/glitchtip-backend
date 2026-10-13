@@ -152,10 +152,15 @@ class KeyLoadingTestCase(TestCase):
             list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
         )
 
-    async def test_unloaded_key_in_event_loop_raises(self):
+    async def test_unloaded_key_in_event_loop_starts_a_load(self):
         """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
-        with self.assertRaisesMessage(ImproperlyConfigured, "not loaded"):
+        trigger = mock.Mock()
+        with (
+            mock.patch.object(public_id, "_load_trigger", trigger),
+            self.assertRaisesMessage(ImproperlyConfigured, "not loaded"),
+        ):
             public_id.encode(42)
+        trigger.assert_called_once_with()
 
     def test_sync_code_loads_on_first_use(self):
         encoded = public_id.encode(42)
@@ -211,6 +216,45 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             await self.run_lifespan(inner)
         self.assertEqual(received, ["lifespan.startup", "lifespan.shutdown"])
         self.assertFalse(public_id.key_loaded())
+
+    async def test_failed_startup_load_recovers_without_a_request(self):
+        """Startup fails (database down, or migrate not run yet), then the key
+        loads with no HTTP request to prompt it."""
+        load_key = public_id.load_key
+        attempts = []
+
+        async def down_twice():
+            attempts.append(1)
+            if len(attempts) <= 2:
+                raise OperationalError("down")
+            await load_key()
+
+        messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+
+        async def receive():
+            if attempts:
+                # Hold shutdown back until the retry had its chance.
+                for _ in range(500):
+                    if public_id.key_loaded():
+                        break
+                    await asyncio.sleep(0.01)
+            return next(messages)
+
+        async def inner(scope, receive, send):
+            await receive()
+            await receive()
+
+        async def send(_message):
+            pass
+
+        with (
+            mock.patch.object(public_id, "load_key", down_twice),
+            mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
+            self.assertLogs("glitchtip.asgi", "ERROR"),
+        ):
+            await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
+        self.assertTrue(public_id.key_loaded())
+        self.assertEqual(len(attempts), 3)
 
     async def test_hung_load_does_not_hold_startup(self):
         async def hang():

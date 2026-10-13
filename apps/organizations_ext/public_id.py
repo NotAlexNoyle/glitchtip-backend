@@ -22,6 +22,7 @@ import functools
 import hashlib
 import logging
 import secrets
+from collections.abc import Callable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.conf import settings
@@ -40,6 +41,9 @@ _V1_LIMIT = 2**PUBLIC_ID_BITS
 _ORG_TWEAK = b"org"
 
 _aes: Cipher | None = None
+# Set by the ASGI layer, which owns loading in a server (see
+# glitchtip.asgi.LoadPublicIdKey): starts its background retry.
+_load_trigger: Callable[[], None] | None = None
 
 
 class SecretKey:
@@ -229,6 +233,11 @@ def load_key_sync() -> None:
     _install(_test_key() or _read_or_create_key_sync())
 
 
+def set_load_trigger(trigger: Callable[[], None]) -> None:
+    global _load_trigger
+    _load_trigger = trigger
+
+
 def key_loaded() -> bool:
     return _aes is not None
 
@@ -253,12 +262,14 @@ def _get_aes() -> Cipher:
         except RuntimeError:
             load_key_sync()
         else:
-            # A sync ORM call here would raise SynchronousOnlyOperation, which
-            # says nothing about why. The ASGI layer loads the key before any
-            # request; reaching this means that load failed or was skipped.
+            # A sync ORM call here would raise SynchronousOnlyOperation, and
+            # blocking the loop on a thread would stall every request on it.
+            # Start the background load instead, so a later call succeeds.
+            if _load_trigger is not None:
+                _load_trigger()
             raise ImproperlyConfigured(
-                "The public id key is not loaded in this process. "
-                "await apps.organizations_ext.public_id.load_key() first; "
-                "check the startup log for why it failed."
+                "The public id key is not loaded in this process yet; it is "
+                "loading in the background. Async code outside a server can "
+                "await apps.organizations_ext.public_id.load_key() first."
             )
     return _aes

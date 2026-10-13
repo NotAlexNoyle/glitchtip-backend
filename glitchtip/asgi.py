@@ -313,52 +313,82 @@ class LoadPublicIdKey:
     It must sit outside the vtasks wrapper, which consumes lifespan without
     forwarding it.
 
-    A failed load is logged and startup continues, so ingest keeps working. A
-    request that needs an org id then fails loudly. Requests retry the load,
-    at most every ``RETRY_SECONDS``, which also covers servers that never send
-    lifespan.
+    A failed load is logged and startup continues, so ingest keeps working.
+    A background task then retries, backing off from ``RETRY_SECONDS`` to
+    ``RETRY_MAX_SECONDS``, until the key loads: the database may come up, or
+    migrate may run, long after this process started, and a pod with no
+    HTTP traffic still runs the task worker. On servers that never send
+    lifespan, the first request makes the first attempt, and async code
+    that needs the key early starts the retry through ``public_id``.
 
     Each attempt gives up after ``LOAD_TIMEOUT_SECONDS``. Startup awaits it,
     and an unreachable database would otherwise hold startup for the whole
     pool timeout, failing the readiness probe.
     """
 
-    RETRY_SECONDS = 5.0
+    RETRY_SECONDS = 1.0
+    RETRY_MAX_SECONDS = 10.0
     LOAD_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, app):
         self.app = app
-        self._next_attempt = 0.0
+        self._retry: asyncio.Task | None = None
+        public_id.set_load_trigger(self._start_retry)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
-            receive = self._load_on_startup(receive)
-        elif not public_id.key_loaded():
-            now = asyncio.get_running_loop().time()
-            if now >= self._next_attempt:
-                self._next_attempt = now + self.RETRY_SECONDS
-                await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS)
+            receive = self._lifespan_receive(receive)
+        elif (
+            not public_id.key_loaded()
+            and not self._retrying()
+            and not await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS)
+        ):
+            self._start_retry()
         await self.app(scope, receive, send)
 
-    def _load_on_startup(self, receive):
+    def _lifespan_receive(self, receive):
         async def wrapped():
             message = await receive()
             if message["type"] == "lifespan.startup":
-                await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS)
+                if not await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS):
+                    self._start_retry()
+            elif message["type"] == "lifespan.shutdown" and self._retrying():
+                self._retry.cancel()
             return message
 
         return wrapped
 
+    def _retrying(self) -> bool:
+        return self._retry is not None and not self._retry.done()
 
-async def _load_public_id_key(timeout: float):
+    def _start_retry(self) -> None:
+        if not self._retrying():
+            # Held on self: the loop keeps only a weak reference to a task.
+            self._retry = asyncio.get_running_loop().create_task(
+                self._retry_until_loaded()
+            )
+
+    async def _retry_until_loaded(self):
+        delay = self.RETRY_SECONDS
+        while not public_id.key_loaded():
+            await asyncio.sleep(delay)
+            if await _load_public_id_key(self.LOAD_TIMEOUT_SECONDS):
+                return
+            delay = min(delay * 2, self.RETRY_MAX_SECONDS)
+
+
+async def _load_public_id_key(timeout: float) -> bool:
     try:
         await asyncio.wait_for(public_id.load_key(), timeout)
     except Exception:
         logger.exception("Could not load the public id key")
+        return False
     finally:
-        # Lifespan has no request to return this connection, and a retry
-        # runs before the inner app, so return it here either way.
+        # Neither lifespan nor the retry task has a request to return this
+        # connection, and a request's attempt runs before the inner app, so
+        # return it here either way.
         await _recycle_db_connections()
+    return True
 
 
 if settings.GLITCHTIP_ENABLE_MCP:
