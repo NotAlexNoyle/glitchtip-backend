@@ -277,6 +277,51 @@ class OverageAPITestCase(TestCase):
         self.assertEqual(self.sub.metered_period_end, period[1])
         add.assert_not_awaited()
 
+    def test_enable_over_quota_bills_from_now(self):
+        """Usage accepted before the opt-in is not billed: the cycle's mark
+        moves up to it before the flag is set, and the status says so."""
+        now = timezone.now().replace(microsecond=0)
+        self.sub.metered_item_id = "si_1"
+        self.sub.metered_period_start = now - timedelta(days=5)
+        self.sub.metered_period_end = now + timedelta(days=25)
+        self.sub.save()
+        counts = AsyncMock(return_value=EventCounts(issue_event_count=150_000))
+        with (
+            patch("apps.organizations_ext.tasks.get_event_counts", new=counts),
+            patch("apps.stripe.api.get_event_counts", new=counts),
+            patch(
+                "apps.stripe.api.check_organization_throttle",
+                new=MagicMock(aenqueue=AsyncMock()),
+            ),
+        ):
+            res = self._configure({"enabled": True, "capCents": 2000})
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertEqual(body["overageUnits"], 0)
+        self.assertEqual(body["overageCostCents"], 0)
+        self.org.refresh_from_db()
+        self.assertTrue(self.org.metered_billing_enabled)
+        self.assertEqual(self.org.overage_cycle_quota, 150_000)
+
+    def test_enable_refused_while_the_billing_window_is_unknown(self):
+        # Billing can't start "from now" without knowing which cycle now is in.
+        self.sub.metered_item_id = "si_1"
+        self.sub.save(update_fields=["metered_item_id"])
+        with (
+            patch(
+                "apps.stripe.models.fetch_subscription",
+                new=AsyncMock(side_effect=StripeError("unreachable", status=503)),
+            ),
+            patch(
+                "apps.stripe.api.check_organization_throttle",
+                new=MagicMock(aenqueue=AsyncMock()),
+            ),
+        ):
+            res = self._configure({"enabled": True, "capCents": 2000})
+        self.assertEqual(res.status_code, 503)
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.metered_billing_enabled)
+
     def test_enable_card_error_returns_402(self):
         # A declined card surfaces Stripe's message to the owner, not a 500.
         declined = StripeError("Your card was declined.", status=402, type="card_error")
@@ -394,6 +439,8 @@ class OverageAPITestCase(TestCase):
         # The org's own subscription carrying the item is the normal re-enable
         # state, not a second subscription.
         self.sub.metered_item_id = "si_old"
+        self.sub.metered_period_start = self.sub.current_period_start
+        self.sub.metered_period_end = self.sub.current_period_end
         self.sub.save()
         self.other_subscriptions.return_value = [
             self._stripe_subscription("sub_1", metered=True),

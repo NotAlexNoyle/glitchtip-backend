@@ -26,6 +26,7 @@ from apps.stripe.overage import (
     billable_units,
     cycle_quota,
     overage_active,
+    reported_units,
     units_for_budget,
 )
 from apps.stripe.utils import billing_window, has_metered_window
@@ -323,7 +324,9 @@ async def _report_overage(
         await cache.adelete(lock_key)
 
 
-async def _cycle_quota(org: Organization, cycle_start, plan_events: int) -> int:
+async def _cycle_quota(
+    org: Organization, cycle_start, plan_events: int, floor: int = 0
+) -> int:
     """Hold and return the quota this cycle's overage is measured against.
 
     See :func:`apps.stripe.overage.cycle_quota` for what the mark is for. Kept
@@ -342,9 +345,15 @@ async def _cycle_quota(org: Organization, cycle_start, plan_events: int) -> int:
     that changed under the organization. An upgrade raises the mark, so
     overage accrued under the smaller plan is forgiven for the cycle -- the
     customer-favouring direction -- and the meter takes the lower restatement.
+    ``floor`` raises the mark further; see :func:`bill_from_now`.
     """
+    target = max(plan_events, floor)
     quota = cycle_quota(org, cycle_start, plan_events)
-    if org.overage_cycle_start == cycle_start and quota == org.overage_cycle_quota:
+    if (
+        org.overage_cycle_start == cycle_start
+        and quota == org.overage_cycle_quota
+        and quota >= target
+    ):
         return quota
     quota_field = models.PositiveBigIntegerField()
     await Organization.objects.filter(id=org.id).aupdate(
@@ -353,10 +362,10 @@ async def _cycle_quota(org: Organization, cycle_start, plan_events: int) -> int:
                 overage_cycle_start=cycle_start,
                 then=Greatest(
                     F("overage_cycle_quota"),
-                    Value(plan_events, output_field=quota_field),
+                    Value(target, output_field=quota_field),
                 ),
             ),
-            default=Value(plan_events, output_field=quota_field),
+            default=Value(target, output_field=quota_field),
         ),
         overage_cycle_start=cycle_start,
     )
@@ -367,6 +376,52 @@ async def _cycle_quota(org: Organization, cycle_start, plan_events: int) -> int:
         "overage_cycle_start", "overage_cycle_quota"
     ).aget(id=org.id)
     return cycle_quota(org, cycle_start, plan_events)
+
+
+async def bill_from_now(org: Organization, was_billing: bool) -> bool:
+    """Exclude usage accepted so far this cycle from overage billing, other
+    than what is billable already.
+
+    Called before overage is switched on or its cap raised. Events accepted
+    while it was off, or past the cap, came in under the free throttle ramp,
+    so billing starts from this moment rather than reaching back over the
+    cycle. The cycle's quota mark is raised to current usage less what is
+    already billable: units reported while overage was on stay billed (or
+    toggling off and on would restate the month lower), and only what the
+    throttle let through for free is dropped. The mark resets with the cycle.
+
+    ``was_billing`` is whether the sweep was reporting for ``org`` before this
+    request, in which case usage up to the old cap is billable whether or not
+    it has been reported yet. Returns False when the metered item's window is
+    unknown or stale: the cycle that usage falls in can't be told, and a mark
+    on the wrong cycle would bill all of it.
+    """
+    sub = org.stripe_primary_subscription
+    measured_at = timezone.now()
+    await _refresh_metered_period(sub, measured_at)
+    if not has_metered_window(sub):
+        return False
+    start, end = billing_window(sub)
+    if not _in_window(measured_at, start, end):
+        return False
+    plan_events = sub.price.product.events or settings.GLITCHTIP_FREE_TIER_EVENTS
+    usage = (await get_event_counts(org.id, start, end)).total_event_count
+    quota = await _cycle_quota(org, start, plan_events)
+    if was_billing:
+        billed = billable_units(
+            max(0, usage - quota),
+            units_for_budget(org.overage_spend_cap_cents),
+            org.overage_last_reported_units,
+            org.overage_last_reported_at,
+            start,
+            end,
+        )
+    else:
+        billed = reported_units(
+            org.overage_last_reported_units, org.overage_last_reported_at, start, end
+        )
+    await _cycle_quota(org, start, plan_events, floor=usage - billed)
+    return True
 
 
 async def _check_and_update_throttle(org: Organization):

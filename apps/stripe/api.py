@@ -17,7 +17,7 @@ from apps.organizations_ext.models import (
     get_current_period_dates,
     get_event_counts,
 )
-from apps.organizations_ext.tasks import check_organization_throttle
+from apps.organizations_ext.tasks import bill_from_now, check_organization_throttle
 from apps.projects.models import (
     IssueEventProjectHourlyStatistic,
     LogProjectHourlyStatistic,
@@ -56,6 +56,7 @@ from .overage import (
 from .utils import (
     billing_window,
     compute_cycle,
+    has_metered_window,
     metered_item_period,
     select_subscription_items,
     unix_to_datetime,
@@ -670,13 +671,18 @@ async def configure_overage(
     can't re-bill reported usage and toggling never moves the window. Dormant
     means nothing further is reported, not that the period bills zero: the
     figure already filed with Stripe this period is still invoiced, and the
-    status response says so in ``reported_cost_cents``. Either way a throttle
-    re-check is enqueued so the new headroom (or block) takes effect promptly.
+    status response says so in ``reported_cost_cents``. Enabling or raising
+    the cap bills from that moment only (see ``bill_from_now``). Either way a
+    throttle re-check is enqueued so the new headroom (or block) takes effect
+    promptly.
     """
     org = await aget_object_or_404(
         qs.select_related("stripe_primary_subscription__price__product")
     )
     sub = org.stripe_primary_subscription
+    # The sweep's own test for whether it reports, read before this request
+    # changes anything.
+    was_billing = overage_active(org) and has_metered_window(sub)
 
     if payload.enabled:
         if not overage_eligible(sub):
@@ -789,6 +795,14 @@ async def configure_overage(
             return JsonResponse(
                 {"detail": "Could not enable on-demand billing. Please try again."},
                 status=502,
+            )
+        # Before the flag or cap changes, so no check can bill under the new
+        # settings what was accepted under the old ones. A lowered cap creates
+        # no new headroom, so has nothing to exclude.
+        if not lowering_cap and not await bill_from_now(org, was_billing):
+            return JsonResponse(
+                {"detail": "Could not enable on-demand billing. Please try again."},
+                status=503,
             )
         org.metered_billing_enabled = True
         org.overage_spend_cap_cents = payload.cap_cents

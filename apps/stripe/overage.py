@@ -89,11 +89,13 @@ def units_for_budget(cap_cents: int) -> int:
 def cycle_quota(org, cycle_start, plan_events: int) -> int:
     """The quota overage is measured against in the cycle starting ``cycle_start``.
 
-    The largest quota the plan has held during the cycle, from the record the
-    throttle sweep keeps on the organization, or the plan's own when the record
-    is on another cycle. Measured against the current quota alone, a mid-cycle
-    downgrade would turn usage that was within quota when it happened into
-    billable overage; the smaller quota applies from the next cycle instead.
+    The record the throttle sweep keeps on the organization, or the plan's own
+    quota when the record is on another cycle. The record is the largest quota
+    the plan has held during the cycle: measured against the current quota
+    alone, a mid-cycle downgrade would turn usage that was within quota when it
+    happened into billable overage; the smaller quota applies from the next
+    cycle instead. Switching overage on or raising its cap raises the record to
+    the usage accepted so far but not billable, so billing starts from then.
     """
     if org.overage_cycle_start == cycle_start:
         return max(org.overage_cycle_quota, plan_events)

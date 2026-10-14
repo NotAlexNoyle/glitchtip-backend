@@ -329,7 +329,9 @@ class Organization(OrgScopedModel, SharedBaseModel, OrganizationBase):
     )
     # The quota overage is measured against for the current cycle: the largest
     # the plan has held during it, so a mid-cycle downgrade can't turn usage
-    # that was within quota when it happened into billable overage.
+    # that was within quota when it happened into billable overage. Raised
+    # further when overage is switched on, so it bills from then and not for
+    # events the throttle already let through (see bill_from_now).
     overage_cycle_start = models.DateTimeField(
         null=True,
         blank=True,
