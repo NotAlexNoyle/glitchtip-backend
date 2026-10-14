@@ -23,10 +23,12 @@ import hashlib
 import logging
 import secrets
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connections, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -218,11 +220,26 @@ def _read_or_create_key_sync() -> SecretKey:
 
     key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
     if key_hex is None:
+        if transaction.get_connection().in_atomic_block:
+            # Inside the caller's transaction the insert and the re-read see
+            # only each other, and a rollback would leave this process with a
+            # key no other process has. Create it on a connection of its own.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_read_or_create_key_own_connection).result()
         PublicIdKey.objects.bulk_create(
             [PublicIdKey(id=1, key=secrets.token_hex(32))], ignore_conflicts=True
         )
         key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
     return SecretKey(key_hex)
+
+
+def _read_or_create_key_own_connection() -> SecretKey:
+    # A new thread gets a new connection, in autocommit, outside any
+    # transaction of the thread that started it.
+    try:
+        return _read_or_create_key_sync()
+    finally:
+        connections.close_all()
 
 
 async def load_key() -> None:

@@ -7,7 +7,7 @@ from unittest import mock
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.core.exceptions import ImproperlyConfigured
-from django.db import OperationalError, ProgrammingError
+from django.db import OperationalError, ProgrammingError, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 
 from apps.organizations_ext import public_id
@@ -143,24 +143,6 @@ class KeyLoadingTestCase(TestCase):
             public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
         )
 
-    def test_concurrent_loaders_agree_on_one_key(self):
-        """A loader that loses the insert race uses the winner's key."""
-        PublicIdKey.objects.all().delete()
-
-        def winner_inserts_first(_nbytes):
-            # Runs after this loader's read missed, before its insert.
-            PublicIdKey.objects.create(id=1, key="aa" * 32)
-            return "bb" * 32
-
-        with mock.patch.object(
-            public_id.secrets, "token_hex", side_effect=winner_inserts_first
-        ):
-            key = public_id._read_or_create_key_sync()
-        self.assertEqual(key.hex, "aa" * 32)
-        self.assertEqual(
-            list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
-        )
-
     async def test_unloaded_key_in_event_loop_starts_a_load(self):
         """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
         trigger = mock.Mock()
@@ -200,6 +182,37 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             pass
 
         await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
+
+    def test_concurrent_loaders_agree_on_one_key(self):
+        """A loader that loses the insert race uses the winner's key."""
+        PublicIdKey.objects.all().delete()
+
+        def winner_inserts_first(_nbytes):
+            # Runs after this loader's read missed, before its insert.
+            PublicIdKey.objects.create(id=1, key="aa" * 32)
+            return "bb" * 32
+
+        with mock.patch.object(
+            public_id.secrets, "token_hex", side_effect=winner_inserts_first
+        ):
+            key = public_id._read_or_create_key_sync()
+        self.assertEqual(key.hex, "aa" * 32)
+        self.assertEqual(
+            list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
+        )
+
+    def test_key_created_inside_a_rolled_back_transaction_is_kept(self):
+        """The row a loader creates inside a caller's transaction outlives it."""
+
+        class Rollback(Exception):
+            pass
+
+        PublicIdKey.objects.all().delete()
+        with self.assertRaises(Rollback), transaction.atomic():
+            encoded = public_id.encode(42)
+            raise Rollback
+        row = PublicIdKey.objects.get()
+        self.assertEqual(encoded, encode_with(make_aes(SecretKey(row.key)), 42))
 
     async def test_lifespan_loads_key_before_inner_startup(self):
         loaded_at_startup = []
