@@ -214,6 +214,7 @@ from django.db import (
     OperationalError,
     ProgrammingError,
     close_old_connections,
+    connections,
 )
 
 from apps.organizations_ext import public_id
@@ -302,7 +303,7 @@ async def _recycle_db_connections():
         finally:
             await asyncio.shield(sync_to_async(close_old_connections)())
     except Exception:
-        logger.exception("Failed to recycle DB connections")
+        logger.exception("Failed to recycle DB connections for MCP request")
 
 
 class LoadPublicIdKey:
@@ -326,9 +327,12 @@ class LoadPublicIdKey:
     lifespan, the first request makes the first attempt, and async code
     that needs the key early starts the retry through ``public_id``.
 
-    Each attempt gives up after ``LOAD_TIMEOUT_SECONDS``. Startup awaits it,
-    and an unreachable database would otherwise hold startup for the whole
-    pool timeout, failing the readiness probe.
+    Each attempt runs on a thread of its own and is waited on for at most
+    ``LOAD_TIMEOUT_SECONDS``. Startup awaits it, and a hung database would
+    otherwise hold startup indefinitely, failing the readiness probe. The
+    thread cannot be cancelled, so it is the shared sync_to_async thread that
+    must stay out of it: a query stuck there would hold every later call
+    queued behind it, the connection cleanup included.
 
     A failing load logs one line naming the likely cause, then stays quiet
     until it succeeds: every worker retries, and a traceback per attempt
@@ -342,6 +346,7 @@ class LoadPublicIdKey:
     def __init__(self, app):
         self.app = app
         self._retry: asyncio.Task | None = None
+        self._attempt: asyncio.Future | None = None
         self._failing = False
         public_id.set_load_trigger(self._start_retry)
 
@@ -388,8 +393,17 @@ class LoadPublicIdKey:
 
     async def _load(self) -> bool:
         timeout = self.LOAD_TIMEOUT_SECONDS
+        # One attempt at a time. A timed-out attempt holds its thread until the
+        # database answers, so the next try waits on it rather than starting
+        # another: a fresh thread per retry would drain the default executor,
+        # which the loop's DNS lookups (getaddrinfo) share.
+        if self._attempt is None or self._attempt.done():
+            self._attempt = asyncio.ensure_future(
+                sync_to_async(_load_key_in_thread, thread_sensitive=False)()
+            )
         try:
-            await asyncio.wait_for(public_id.load_key(), timeout)
+            # Shielded: a timeout stops this wait, not the attempt.
+            await asyncio.wait_for(asyncio.shield(self._attempt), timeout)
         except Exception as exc:
             if not self._failing:
                 self._failing = True
@@ -405,15 +419,21 @@ class LoadPublicIdKey:
                         "Could not load the public id key. Retrying in the background."
                     )
             return False
-        finally:
-            # Neither lifespan nor the retry task has a request to return this
-            # connection, and a request's attempt runs before the inner app, so
-            # return it here either way.
-            await _recycle_db_connections()
         if self._failing:
             self._failing = False
             logger.info("Public id key loaded; public ids are available again.")
         return True
+
+
+def _load_key_in_thread() -> None:
+    # On a thread of its own, not the one every thread-sensitive sync_to_async
+    # call shares: a hung database then stalls only this attempt, and a
+    # timeout really frees startup. The connection is this thread's, so it is
+    # returned here, however the load ends.
+    try:
+        public_id.load_key_sync()
+    finally:
+        connections.close_all()
 
 
 _UNDEFINED_TABLE = "42P01"

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -220,7 +221,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
 
         with (
             mock.patch.object(
-                public_id, "load_key", side_effect=OperationalError("down")
+                public_id, "load_key_sync", side_effect=OperationalError("down")
             ),
             self.assertLogs("glitchtip.asgi", "WARNING"),
         ):
@@ -231,14 +232,14 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
     async def test_failed_startup_load_recovers_without_a_request(self):
         """Startup fails (database down, or migrate not run yet), then the key
         loads with no HTTP request to prompt it."""
-        load_key = public_id.load_key
+        load_key_sync = public_id.load_key_sync
         attempts = []
 
-        async def down_twice():
+        def down_twice():
             attempts.append(1)
             if len(attempts) <= 2:
                 raise OperationalError("down")
-            await load_key()
+            load_key_sync()
 
         messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
 
@@ -259,7 +260,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             pass
 
         with (
-            mock.patch.object(public_id, "load_key", down_twice),
+            mock.patch.object(public_id, "load_key_sync", down_twice),
             mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
             self.assertLogs("glitchtip.asgi", "WARNING"),
         ):
@@ -276,7 +277,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
 
         wrapper = LoadPublicIdKey(None)
         with (
-            mock.patch.object(public_id, "load_key", side_effect=no_table),
+            mock.patch.object(public_id, "load_key_sync", side_effect=no_table),
             self.assertLogs("glitchtip.asgi", "WARNING") as logs,
         ):
             for _ in range(3):
@@ -286,8 +287,12 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         self.assertIsNone(record.exc_info)
 
     async def test_hung_load_does_not_hold_startup(self):
-        async def hang():
-            await asyncio.sleep(3600)
+        """A hung database blocks a thread inside the driver, not a coroutine:
+        the hang must tie up a real thread for this test to mean anything."""
+        release = threading.Event()
+
+        def hang():
+            release.wait(30)
 
         started = []
 
@@ -295,14 +300,41 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             started.append((await receive())["type"])
             await receive()
 
-        with (
-            mock.patch.object(public_id, "load_key", hang),
-            mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
-            self.assertLogs("glitchtip.asgi", "WARNING"),
-        ):
-            # Bounded here too, so a regression fails instead of hanging.
-            await asyncio.wait_for(self.run_lifespan(inner), 5)
+        try:
+            with (
+                mock.patch.object(public_id, "load_key_sync", hang),
+                mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
+                self.assertLogs("glitchtip.asgi", "WARNING"),
+            ):
+                # Bounded here too, so a regression fails instead of hanging.
+                await asyncio.wait_for(self.run_lifespan(inner), 5)
+        finally:
+            # Before this test's loop closes, which waits for its threads.
+            release.set()
         self.assertEqual(started, ["lifespan.startup"])
+
+    async def test_retry_waits_on_a_hung_attempt(self):
+        """A retry joins the attempt still in flight instead of starting a
+        thread of its own, so a hung database cannot drain the executor."""
+        release = threading.Event()
+        calls = []
+
+        def hang():
+            calls.append(1)
+            release.wait(30)
+
+        wrapper = LoadPublicIdKey(None)
+        try:
+            with (
+                mock.patch.object(public_id, "load_key_sync", hang),
+                mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
+                self.assertLogs("glitchtip.asgi", "WARNING"),
+            ):
+                for _ in range(3):
+                    self.assertFalse(await wrapper._load())
+        finally:
+            release.set()
+        self.assertEqual(len(calls), 1)
 
     async def test_request_with_cold_cache_can_encode(self):
         """Covers servers without lifespan, and apps Django middleware never
