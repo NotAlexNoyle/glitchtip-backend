@@ -8,6 +8,7 @@ from django.utils import timezone
 from freezegun import freeze_time
 from model_bakery import baker
 
+from apps.organizations_ext.constants import OrganizationUserRole
 from apps.organizations_ext.models import Organization
 from apps.organizations_ext.public_id import encode
 from apps.stripe.constants import SubscriptionStatus
@@ -81,6 +82,41 @@ class StripeAPITestCase(TestCase):
         )
         self.assertEqual(res.status_code, 200)
 
+    @patch("apps.stripe.api.create_session")
+    async def test_create_stripe_session_refuses_second_paid_subscription(
+        self, mock_create_session
+    ):
+        """Checkout creates a new subscription rather than changing the
+        existing one, so a paid org buying through it would pay two base
+        plans. Free and canceled subscriptions cost nothing to leave behind."""
+        mock_create_session.return_value = {"url": "test"}
+        paid_price = await baker.amake(
+            "stripe.StripePrice", product=self.product, price=15
+        )
+        url = reverse("api:create_stripe_session", args=[self.organization.slug])
+        cases = [
+            ("active paid", paid_price, SubscriptionStatus.ACTIVE, 400),
+            ("canceled paid", paid_price, SubscriptionStatus.CANCELED, 200),
+            ("active free", self.price, SubscriptionStatus.ACTIVE, 200),
+        ]
+        for label, price, status, expected in cases:
+            with self.subTest(label):
+                mock_create_session.reset_mock()
+                sub = await baker.amake(
+                    "stripe.StripeSubscription",
+                    organization=self.organization,
+                    price=price,
+                    status=status,
+                )
+                res = await self.async_client.post(
+                    url,
+                    {"price": paid_price.stripe_id},
+                    content_type="application/json",
+                )
+                await sub.adelete()
+                self.assertEqual(res.status_code, expected)
+                self.assertEqual(mock_create_session.called, expected == 200)
+
     async def test_list_stripe_products_excludes_archived(self):
         """A retired plan stays in the DB for its grandfathered subscriptions
         but must not be offered. is_public is a separate axis: a current price
@@ -151,6 +187,71 @@ class StripeAPITestCase(TestCase):
         res = await self.async_client.post(url, {}, content_type="application/json")
         self.assertEqual(res.status_code, 200)
         mock_create_portal_session.assert_called_once()
+
+    @patch("apps.stripe.api.create_portal_session", new_callable=AsyncMock)
+    @patch("apps.stripe.api.create_session", new_callable=AsyncMock)
+    async def test_return_urls_use_the_slug(self, mock_session, mock_portal):
+        """Stripe sends the user back to a frontend route, which takes the slug
+        even when the API path named the organization by id."""
+        mock_session.return_value = {"url": "test"}
+        mock_portal.return_value = {"url": "test"}
+        org_id = self.organization.id
+        await self.async_client.post(
+            reverse("api:create_stripe_session", args=[org_id]),
+            {"price": self.price.stripe_id},
+            content_type="application/json",
+        )
+        await self.async_client.post(
+            reverse("api:stripe_billing_portal_session", args=[org_id]),
+            {},
+            content_type="application/json",
+        )
+        self.assertEqual(mock_session.call_args.args[2], self.organization.slug)
+        self.assertEqual(mock_portal.call_args.args[1], self.organization.slug)
+
+    @patch("apps.stripe.api.create_portal_session", new_callable=AsyncMock)
+    @patch("apps.stripe.api.create_session", new_callable=AsyncMock)
+    async def test_billing_changes_are_owner_only(self, mock_session, mock_portal):
+        manager = await baker.amake("users.user")
+        await self.organization.aadd_user(manager, OrganizationUserRole.MANAGER)
+        await self.async_client.aforce_login(manager)
+        slug = self.organization.slug
+        for name, data in (
+            ("create_stripe_session", {"price": self.price.stripe_id}),
+            ("stripe_billing_portal_session", {}),
+            ("configure_overage", {"enabled": False}),
+        ):
+            with self.subTest(name):
+                res = await self.async_client.post(
+                    reverse(f"api:{name}", args=[slug]),
+                    data,
+                    content_type="application/json",
+                )
+                self.assertEqual(res.status_code, 403)
+        mock_session.assert_not_called()
+        mock_portal.assert_not_called()
+
+    async def test_non_member_gets_no_subscription(self):
+        await baker.amake(
+            "stripe.StripeSubscription",
+            organization=self.organization,
+            status=SubscriptionStatus.ACTIVE,
+        )
+        outsider = await baker.amake("users.user")
+        await self.async_client.aforce_login(outsider)
+        url = reverse("api:get_stripe_subscription", args=[self.organization.slug])
+        res = await self.async_client.get(url)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), None)
+
+    def test_reads_require_org_read_on_tokens(self):
+        token = baker.make("api_tokens.APIToken", user=self.user)
+        headers = {"HTTP_AUTHORIZATION": f"Bearer {token.token}"}
+        url = reverse("api:get_overage_status", args=[self.organization.slug])
+        token.add_permission("event:read")
+        self.assertEqual(self.client.get(url, **headers).status_code, 403)
+        token.add_permission("org:read")
+        self.assertEqual(self.client.get(url, **headers).status_code, 200)
 
     @patch("apps.stripe.api.create_subscription")
     async def test_stripe_create_subscription(self, mock_create_subscription):
