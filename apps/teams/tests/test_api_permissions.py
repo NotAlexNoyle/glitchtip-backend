@@ -2,6 +2,7 @@ from django.urls import reverse
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
+from apps.organizations_ext.public_id import encode
 from glitchtip.test_utils.test_case import APIPermissionTestCase
 
 
@@ -126,7 +127,9 @@ class TeamAPIPermissionTests(APIPermissionTestCase):
     def test_member_to_team_by_org_id(self):
         self.set_user_role(OrganizationUserRole.MANAGER)
         self.auth_token.add_permission("team:write")
-        url = self.member_team_url(organization_id_or_slug=self.organization.id)
+        url = self.member_team_url(
+            organization_id_or_slug=str(encode(self.organization.id))
+        )
         self.assertPostReqStatusCode(url, {}, 201)
         self.assertDeleteReqStatusCode(url, 200)
 
@@ -137,7 +140,7 @@ class TeamAPIPermissionTests(APIPermissionTestCase):
         stranger = stranger_org.add_user(baker.make("users.User"))
         self.set_user_role(OrganizationUserRole.OWNER)
         self.auth_token.add_permission("team:write")
-        for org in [stranger_org.slug, stranger_org.id]:
+        for org in [stranger_org.slug, str(encode(stranger_org.id))]:
             with self.subTest(org=org):
                 url = reverse(
                     "api:add_member_to_team",

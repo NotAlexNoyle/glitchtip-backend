@@ -5,6 +5,7 @@ from django.urls import reverse
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
+from apps.organizations_ext.public_id import encode
 from apps.projects.models import Project
 from glitchtip.test_utils.aiohttp_mock import basic_auth_credentials
 from glitchtip.test_utils.test_case import GlitchTipTestCaseMixin
@@ -289,7 +290,7 @@ class AlertAPITestCase(GlitchTipTestCaseMixin, TestCase):
         alert = await baker.amake("alerts.ProjectAlert", project=self.project)
 
         for method, url, status in self.alert_write_requests(
-            alert, self.organization.id
+            alert, str(encode(self.organization.id))
         ):
             with self.subTest(url=url):
                 res = await self.alert_write(method, url)
@@ -302,7 +303,7 @@ class AlertAPITestCase(GlitchTipTestCaseMixin, TestCase):
         )
         alert = await baker.amake("alerts.ProjectAlert", project=other_project)
 
-        for org in [other_org.slug, other_org.id]:
+        for org in [other_org.slug, str(encode(other_org.id))]:
             for method, url, _ in self.alert_write_requests(alert, org):
                 with self.subTest(url=url):
                     res = await self.alert_write(method, url)

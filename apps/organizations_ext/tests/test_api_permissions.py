@@ -2,6 +2,7 @@ from django.urls import reverse
 from model_bakery import baker
 
 from apps.organizations_ext.constants import OrganizationUserRole
+from apps.organizations_ext.public_id import encode
 from glitchtip.test_utils.test_case import APIPermissionTestCase
 
 
@@ -135,7 +136,8 @@ class OrganizationMemberAPIPermissionTests(APIPermissionTestCase):
         self.set_user_role(OrganizationUserRole.MANAGER)
         self.auth_token.add_permission("member:admin")
         url = reverse(
-            "api:get_organization_member", args=[self.organization.id, other.pk]
+            "api:get_organization_member",
+            args=[str(encode(self.organization.id)), other.pk],
         )
         self.assertDeleteReqStatusCode(url, 204)
 
@@ -144,7 +146,7 @@ class OrganizationMemberAPIPermissionTests(APIPermissionTestCase):
         stranger = stranger_org.add_user(baker.make("users.User"))
         stranger_org.add_user(baker.make("users.User"))  # not the last member
         self.auth_token.add_permission("member:admin")
-        for org in [stranger_org.slug, stranger_org.id]:
+        for org in [stranger_org.slug, str(encode(stranger_org.id))]:
             with self.subTest(org=org):
                 url = reverse("api:get_organization_member", args=[org, stranger.pk])
                 self.assertDeleteReqStatusCode(url, 404)

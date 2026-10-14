@@ -195,7 +195,7 @@ class StripeAPITestCase(TestCase):
         even when the API path named the organization by id."""
         mock_session.return_value = {"url": "test"}
         mock_portal.return_value = {"url": "test"}
-        org_id = self.organization.id
+        org_id = str(encode(self.organization.id))
         await self.async_client.post(
             reverse("api:create_stripe_session", args=[org_id]),
             {"price": self.price.stripe_id},

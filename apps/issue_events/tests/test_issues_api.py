@@ -28,6 +28,7 @@ from ..models import Issue, IssueEvent, IssueIndex
 from ..tasks import update_issues_task
 
 logger = logging.getLogger(__name__)
+from apps.organizations_ext.public_id import encode
 
 
 def get_issue_url(issue_id: int) -> str:
@@ -2264,7 +2265,7 @@ class ShortIdAPITestCase(GlitchTestCase):
         issue = await amake_issue(project=self.app_project, short_id=42)
 
         res = await self.async_client.get(
-            self.lookup_url("MY-APP-1A", self.organization.id)
+            self.lookup_url("MY-APP-1A", str(encode(self.organization.id)))
         )
 
         self.assertEqual(res.status_code, 200)
@@ -2279,7 +2280,7 @@ class ShortIdAPITestCase(GlitchTestCase):
         )
         await amake_issue(project=stranger_project, short_id=42)
 
-        for org in [stranger_org.slug, stranger_org.id]:
+        for org in [stranger_org.slug, str(encode(stranger_org.id))]:
             with self.subTest(org=org):
                 res = await self.async_client.get(self.lookup_url("MY-APP-1A", org))
                 self.assertEqual(res.status_code, 404)
@@ -2300,7 +2301,9 @@ class ShortIdAPITestCase(GlitchTestCase):
         self.client.force_login(self.user)
 
         with self.assertNumQueries(1):
-            res = self.client.get(self.lookup_url("MY-APP-1A", self.organization.id))
+            res = self.client.get(
+                self.lookup_url("MY-APP-1A", str(encode(self.organization.id)))
+            )
         self.assertEqual(res.status_code, 200)
 
         with self.assertNumQueries(2):  # + the slug lookup
@@ -2453,7 +2456,7 @@ class ProjectBulkUpdateAPITestCase(GlitchTestCase):
         issues = [await amake_issue(project=self.project) for _ in range(51)]
         self.url = reverse(
             "api:list_project_issues",
-            args=[str(self.organization.id), self.project.slug],
+            args=[str(encode(self.organization.id)), self.project.slug],
         )
 
         await self.put_and_run_task("", {"status": "resolved"})

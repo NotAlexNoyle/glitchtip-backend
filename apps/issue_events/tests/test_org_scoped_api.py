@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from django.urls import reverse
 from model_bakery import baker
 
+from apps.organizations_ext.public_id import encode
 from glitchtip.test_utils.issue import amake_issue
 from glitchtip.test_utils.test_case import GlitchTestCase
 
@@ -63,7 +64,9 @@ class OrgScopedIssueRouteTests(GlitchTestCase):
 
     async def test_member_with_nothing_matching_is_not_a_404(self):
         # No issue 0, so every route finds nothing; a member is not refused.
-        for method, name, args, data, query in self.routes(self.organization.id, 0):
+        for method, name, args, data, query in self.routes(
+            str(encode(self.organization.id)), 0
+        ):
             with self.subTest(name):
                 res = await self.request(method, name, args, data, query)
                 self.assertIn(res.status_code, (200, 202))
@@ -84,7 +87,9 @@ class OrgScopedIssueRouteTests(GlitchTestCase):
     async def test_bulk_delete_deletes_and_enqueues(self, task):
         task.aenqueue = AsyncMock()
         issues = [await amake_issue(project=self.project) for _ in range(2)]
-        res = await self.request("DELETE", "delete_issues", [self.organization.id])
+        res = await self.request(
+            "DELETE", "delete_issues", [str(encode(self.organization.id))]
+        )
         self.assertEqual(res.status_code, 200)
         ids = [issue.id for issue in issues]
         self.assertEqual(
@@ -100,7 +105,10 @@ class OrgScopedIssueRouteTests(GlitchTestCase):
         for _ in range(51):  # one past the batch handled inline
             await amake_issue(project=self.project)
         res = await self.request(
-            "PUT", "update_issues", [self.organization.id], {"status": "resolved"}
+            "PUT",
+            "update_issues",
+            [str(encode(self.organization.id))],
+            {"status": "resolved"},
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(

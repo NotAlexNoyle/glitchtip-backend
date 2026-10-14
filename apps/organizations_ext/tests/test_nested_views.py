@@ -2,6 +2,7 @@ from django.test import TestCase
 from django.urls import reverse
 from model_bakery import baker
 
+from apps.organizations_ext.public_id import encode
 from glitchtip.test_utils.test_case import GlitchTipTestCaseMixin
 
 
@@ -10,7 +11,7 @@ class OrganizationProjectsViewTestCase(GlitchTipTestCaseMixin, TestCase):
         self.create_logged_in_user()
         self.async_client.force_login(self.user)
         self.url = reverse(
-            "api:list_organization_projects", args=[self.organization.id]
+            "api:list_organization_projects", args=[str(encode(self.organization.id))]
         )
 
     def test_organization_projects_list(self):
