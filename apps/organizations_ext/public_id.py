@@ -14,7 +14,9 @@ working.
 The key is one ``PublicIdKey`` row, created by migration, or by the first
 process that finds it missing. It is loaded once per process into a module
 cache: from the ASGI lifespan (``glitchtip.asgi``), or on first use in sync
-code such as admin views and management commands.
+code such as admin views and management commands. Servers read the row again
+every few minutes, so a restore that replaces it reaches every process
+without a restart.
 """
 
 import asyncio
@@ -43,6 +45,8 @@ _V1_LIMIT = 2**PUBLIC_ID_BITS
 _ORG_TWEAK = b"org"
 
 _aes: Cipher | None = None
+# Of the installed key, to tell a re-read of the same row from a new key.
+_key_digest: bytes | None = None
 # Set by the ASGI layer, which owns loading in a server (see
 # glitchtip.asgi.LoadPublicIdKey): starts its background retry.
 _load_trigger: Callable[[], None] | None = None
@@ -148,21 +152,37 @@ def decode_with(aes: Cipher, public: int) -> int:
     return internal if 1 <= internal <= MAX_ORG_ID else NO_ORG_ID
 
 
-# Bounded because decode takes path segments, which anyone can vary.
-@functools.lru_cache(maxsize=4096)
 def encode(internal: int) -> int:
     """The public id for an internal organization id."""
     # encode_with takes any value so tests can reach the edges; anything
     # outside int4 here is a caller bug and would not decode back.
     if not 1 <= internal <= MAX_ORG_ID:
         raise ValueError(f"Not an organization id: {internal!r}")
-    return encode_with(_get_aes(), internal)
+    return _encode_cached(_get_aes(), internal)
+
+
+def decode(public: int) -> int:
+    """The internal organization id a public id names, or ``NO_ORG_ID``."""
+    return _decode_cached(_get_aes(), public)
+
+
+# Keyed by the cipher too: a key can be replaced while other threads encode,
+# and a result one of them computed under the old key must never answer for
+# the new one. Bounded because decode takes path segments, which anyone can
+# vary.
+@functools.lru_cache(maxsize=4096)
+def _encode_cached(aes: Cipher, internal: int) -> int:
+    return encode_with(aes, internal)
 
 
 @functools.lru_cache(maxsize=4096)
-def decode(public: int) -> int:
-    """The internal organization id a public id names, or ``NO_ORG_ID``."""
-    return decode_with(_get_aes(), public)
+def _decode_cached(aes: Cipher, public: int) -> int:
+    return decode_with(aes, public)
+
+
+def _clear_caches() -> None:
+    _encode_cached.cache_clear()
+    _decode_cached.cache_clear()
 
 
 def make_aes(secret: SecretKey) -> Cipher:
@@ -178,12 +198,23 @@ def make_aes(secret: SecretKey) -> Cipher:
 
 
 def _install(secret: SecretKey) -> None:
-    global _aes
+    global _aes, _key_digest
+    digest = hashlib.sha256(secret.hex.encode()).digest()
+    if digest == _key_digest:
+        return
+    replaced = _key_digest is not None
     _aes = make_aes(secret)
-    encode.cache_clear()
-    decode.cache_clear()
-    fingerprint = hashlib.sha256(secret.hex.encode()).hexdigest()[:8]
-    logger.info("Public id key loaded, fingerprint %s", fingerprint)
+    _key_digest = digest
+    # Frees the old key's entries; correctness does not depend on it.
+    _clear_caches()
+    if replaced:
+        logger.warning(
+            "The public id key changed in the database (fingerprint now %s); "
+            "every public id changed with it.",
+            digest.hex()[:8],
+        )
+    else:
+        logger.info("Public id key loaded, fingerprint %s", digest.hex()[:8])
 
 
 def _test_key() -> SecretKey | None:
@@ -262,10 +293,10 @@ def key_loaded() -> bool:
 
 def clear_key() -> None:
     """Forget the cached key. For tests."""
-    global _aes
+    global _aes, _key_digest
     _aes = None
-    encode.cache_clear()
-    decode.cache_clear()
+    _key_digest = None
+    _clear_caches()
 
 
 def _get_aes() -> Cipher:

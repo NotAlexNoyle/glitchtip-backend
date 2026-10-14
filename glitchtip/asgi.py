@@ -8,6 +8,7 @@ https://docs.djangoproject.com/en/dev/howto/deployment/asgi/
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -337,15 +338,23 @@ class LoadPublicIdKey:
     A failing load logs one line naming the likely cause, then stays quiet
     until it succeeds: every worker retries, and a traceback per attempt
     would bury the cause.
+
+    Once loaded, the row is read again every ``REVALIDATE_SECONDS``. A
+    restore or flush that replaces or deletes the row while the server runs
+    would otherwise leave old processes on the old key and new ones on the
+    new, each org then having two public ids until every process restarts.
+    A failed check keeps the key in hand.
     """
 
     RETRY_SECONDS = 1.0
     RETRY_MAX_SECONDS = 10.0
     LOAD_TIMEOUT_SECONDS = 5.0
+    REVALIDATE_SECONDS = 300.0
 
     def __init__(self, app):
         self.app = app
         self._retry: asyncio.Task | None = None
+        self._revalidate: asyncio.Task | None = None
         self._attempt: asyncio.Future | None = None
         self._failing = False
         public_id.set_load_trigger(self._start_retry)
@@ -367,14 +376,19 @@ class LoadPublicIdKey:
             if message["type"] == "lifespan.startup":
                 if not await self._load():
                     self._start_retry()
-            elif message["type"] == "lifespan.shutdown" and self._retrying():
-                self._retry.cancel()
+            elif message["type"] == "lifespan.shutdown":
+                self._stop_background()
             return message
 
         return wrapped
 
     def _retrying(self) -> bool:
         return self._retry is not None and not self._retry.done()
+
+    def _stop_background(self) -> None:
+        for task in (self._retry, self._revalidate):
+            if task is not None:
+                task.cancel()
 
     def _start_retry(self) -> None:
         if not self._retrying():
@@ -391,8 +405,21 @@ class LoadPublicIdKey:
                 return
             delay = min(delay * 2, self.RETRY_MAX_SECONDS)
 
-    async def _load(self) -> bool:
-        timeout = self.LOAD_TIMEOUT_SECONDS
+    def _start_revalidation(self) -> None:
+        if self._revalidate is None or self._revalidate.done():
+            self._revalidate = asyncio.get_running_loop().create_task(
+                self._revalidate_forever()
+            )
+
+    async def _revalidate_forever(self):
+        while True:
+            await asyncio.sleep(self.REVALIDATE_SECONDS)
+            # The key in hand keeps working when this fails: a database that
+            # is down shows up everywhere else, and the next pass tries again.
+            with contextlib.suppress(Exception):
+                await self._run_attempt()
+
+    async def _run_attempt(self) -> None:
         # One attempt at a time. A timed-out attempt holds its thread until the
         # database answers, so the next try waits on it rather than starting
         # another: a fresh thread per retry would drain the default executor,
@@ -401,9 +428,13 @@ class LoadPublicIdKey:
             self._attempt = asyncio.ensure_future(
                 sync_to_async(_load_key_in_thread, thread_sensitive=False)()
             )
+        # Shielded: a timeout stops this wait, not the attempt.
+        await asyncio.wait_for(asyncio.shield(self._attempt), self.LOAD_TIMEOUT_SECONDS)
+
+    async def _load(self) -> bool:
+        timeout = self.LOAD_TIMEOUT_SECONDS
         try:
-            # Shielded: a timeout stops this wait, not the attempt.
-            await asyncio.wait_for(asyncio.shield(self._attempt), timeout)
+            await self._run_attempt()
         except Exception as exc:
             if not self._failing:
                 self._failing = True
@@ -422,6 +453,7 @@ class LoadPublicIdKey:
         if self._failing:
             self._failing = False
             logger.info("Public id key loaded; public ids are available again.")
+        self._start_revalidation()
         return True
 
 

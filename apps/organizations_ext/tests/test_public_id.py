@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -153,6 +154,21 @@ class KeyLoadingTestCase(TestCase):
             public_id.encode(42)
         trigger.assert_called_once_with()
 
+    def test_rereading_the_same_key_keeps_the_caches(self):
+        public_id.load_key_sync()
+        public_id.encode(42)
+        public_id.load_key_sync()
+        self.assertEqual(public_id._encode_cached.cache_info().currsize, 1)
+
+    def test_cache_never_answers_for_a_replaced_key(self):
+        """Not even for an entry another thread cached under the old key after
+        the swap: the cache is keyed by the cipher, not only the id."""
+        old = public_id.encode(42)
+        new_aes = make_aes(SecretKey("22" * 32))
+        public_id._aes = new_aes  # swapped, caches deliberately left alone
+        self.assertEqual(public_id.encode(42), encode_with(new_aes, 42))
+        self.assertNotEqual(public_id.encode(42), old)
+
     def test_sync_code_loads_on_first_use(self):
         encoded = public_id.encode(42)
         row = PublicIdKey.objects.get()
@@ -181,7 +197,17 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         async def send(_message):
             pass
 
-        await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
+        wrapper = LoadPublicIdKey(inner)
+        await wrapper({"type": "lifespan"}, receive, send)
+        return wrapper
+
+    async def wait_for_key(self, key_hex):
+        expected = encode_with(make_aes(SecretKey(key_hex)), 42)
+        for _ in range(500):
+            if public_id.encode(42) == expected:
+                return
+            await asyncio.sleep(0.01)
+        self.fail("The running process kept the old key.")
 
     def test_concurrent_loaders_agree_on_one_key(self):
         """A loader that loses the insert race uses the winner's key."""
@@ -358,5 +384,66 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             encoded.append(public_id.encode(42))
 
         scope = {"type": "http", "path": "/mcp"}
-        await LoadPublicIdKey(inner)(scope, None, None)
+        wrapper = LoadPublicIdKey(inner)
+        await wrapper(scope, None, None)
+        wrapper._stop_background()
         self.assertEqual(len(encoded), 1)
+
+    async def test_replaced_key_row_reaches_a_running_process(self):
+        """A restore that replaces the row, with no restart."""
+        wrapper = LoadPublicIdKey(None)
+        try:
+            with mock.patch.object(LoadPublicIdKey, "REVALIDATE_SECONDS", 0.01):
+                self.assertTrue(await wrapper._load())
+                await PublicIdKey.objects.filter(id=1).aupdate(key="22" * 32)
+                with self.assertLogs("apps.organizations_ext.public_id", "WARNING"):
+                    await self.wait_for_key("22" * 32)
+        finally:
+            wrapper._stop_background()
+
+    async def test_deleted_key_row_is_recreated_and_picked_up(self):
+        """A flush, or a restore without the row, with no restart: the running
+        process moves to the one recreated row, as new processes do."""
+        wrapper = LoadPublicIdKey(None)
+        try:
+            with mock.patch.object(LoadPublicIdKey, "REVALIDATE_SECONDS", 0.01):
+                self.assertTrue(await wrapper._load())
+                await PublicIdKey.objects.all().adelete()
+                with self.assertLogs("apps.organizations_ext.public_id", "WARNING"):
+                    row = None
+                    for _ in range(500):
+                        if row := await PublicIdKey.objects.afirst():
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertIsNotNone(row)
+                    await self.wait_for_key(row.key)
+        finally:
+            wrapper._stop_background()
+
+    async def test_failed_revalidation_keeps_the_key(self):
+        """A database outage during a check neither drops the key nor ends
+        the checks."""
+        wrapper = LoadPublicIdKey(None)
+        self.assertTrue(await wrapper._load())
+        loaded = public_id.encode(42)
+        down = mock.Mock(side_effect=OperationalError("down"))
+        with (
+            mock.patch.object(public_id, "load_key_sync", down),
+            mock.patch.object(LoadPublicIdKey, "REVALIDATE_SECONDS", 0.01),
+            contextlib.suppress(TimeoutError),
+        ):
+            # The loop never ends by itself; stop it after a few passes.
+            await asyncio.wait_for(wrapper._revalidate_forever(), 0.2)
+        wrapper._stop_background()
+        self.assertGreater(down.call_count, 1)
+        self.assertEqual(public_id.encode(42), loaded)
+
+    async def test_shutdown_stops_revalidation(self):
+        async def inner(scope, receive, send):
+            await receive()
+            await receive()
+
+        wrapper = await self.run_lifespan(inner)
+        with contextlib.suppress(asyncio.CancelledError):
+            await wrapper._revalidate
+        self.assertTrue(wrapper._revalidate.cancelled())
