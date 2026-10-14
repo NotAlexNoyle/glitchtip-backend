@@ -11,11 +11,14 @@ from apps.organizations_ext.models import EventCounts, Organization
 from apps.stripe.constants import SubscriptionStatus
 from apps.stripe.exceptions import StripeError
 from apps.stripe.models import StripeSubscription
+from apps.stripe.overage import overage_active
+from apps.stripe.utils import has_metered_window
 
-from ..tasks import _cycle_quota, check_organization_throttle
+from ..tasks import _cycle_quota, bill_from_now, check_organization_throttle
 
 _check = async_to_sync(check_organization_throttle.func)
 _cycle_quota_sync = async_to_sync(_cycle_quota)
+_bill_from_now = async_to_sync(bill_from_now)
 
 BASE_PERIOD = object()  # _make_org: the metered item's period is the plan's
 
@@ -446,6 +449,103 @@ class MeteredThrottleTestCase(TestCase):
         self._run(org, 900_000).assert_not_awaited()
         mock_meter = self._run(org, 1_010_000)
         self.assertEqual(self._sent(mock_meter), 10_000)
+
+    def _switch_on(self, org, usage, cap_cents=CAP_CENTS):
+        """Enable overage or change its cap as ``configure_overage`` does."""
+        org = Organization.objects.select_related(
+            "stripe_primary_subscription__price__product"
+        ).get(id=org.id)
+        self.clock += timedelta(seconds=10)
+        was_billing = overage_active(org) and has_metered_window(
+            org.stripe_primary_subscription
+        )
+        with (
+            patch(
+                "apps.organizations_ext.tasks.get_event_counts",
+                new=AsyncMock(return_value=EventCounts(issue_event_count=usage)),
+            ),
+            patch("apps.organizations_ext.tasks.timezone.now", return_value=self.clock),
+        ):
+            self.assertTrue(_bill_from_now(org, was_billing))
+        Organization.objects.filter(id=org.id).update(
+            metered_billing_enabled=True, overage_spend_cap_cents=cap_cents
+        )
+
+    def test_billing_starts_when_switched_on(self):
+        """Events the throttle let through for free before overage was on, or
+        past the cap, are never billed; usage that was billable stays billed."""
+
+        def toggle(enabled):
+            def step(org):
+                Organization.objects.filter(id=org.id).update(
+                    metered_billing_enabled=enabled
+                )
+
+            return step
+
+        def on(usage, cap_cents=CAP_CENTS):
+            return lambda org: self._switch_on(org, usage, cap_cents)
+
+        def sweep(usage):
+            return lambda org: self._run(org, usage)
+
+        cases = [
+            # (name, enabled at start, steps, last usage swept, figure billed)
+            ("enabled over quota", False, [on(150_000)], 150_000, None),
+            ("then usage grows", False, [on(150_000)], 160_000, 10_000),
+            ("enabled under quota", False, [on(50_000)], 150_000, 50_000),
+            (
+                "toggled off and back on",
+                True,
+                [sweep(130_000), toggle(False), sweep(160_000), on(160_000)],
+                170_000,
+                40_000,
+            ),
+            (
+                "cap raised after it was reached",
+                True,
+                [sweep(ALLOWED + 50_000), on(ALLOWED + 50_000, CAP_CENTS * 2)],
+                ALLOWED + 60_000,
+                CAP_UNITS + 10_000,
+            ),
+            (
+                "cap raised before a sweep reported",
+                True,
+                [on(150_000, CAP_CENTS * 2)],
+                150_000,
+                50_000,
+            ),
+        ]
+        for name, enabled, steps, usage, billed in cases:
+            with self.subTest(name):
+                cache.clear()
+                Organization.objects.all().delete()
+                StripeSubscription.objects.all().delete()
+                org, _ = self._make_org(enabled=enabled)
+                for step in steps:
+                    step(org)
+                mock_meter = self._run(org, usage)
+                if billed is None:
+                    mock_meter.assert_not_awaited()
+                    # The cap's worth of headroom starts from here, too.
+                    self.assertEqual(self._throttle(org), 0)
+                else:
+                    self.assertEqual(self._sent(mock_meter), billed)
+
+    def test_bill_from_now_refuses_an_unknown_window(self):
+        # Without the item's period the cycle the usage falls in is unknown,
+        # and a mark stamped on the wrong one would bill all of it.
+        org, _ = self._make_org(enabled=False, metered_period=(None, None))
+        org = Organization.objects.select_related(
+            "stripe_primary_subscription__price__product"
+        ).get(id=org.id)
+        with patch(
+            "apps.stripe.models.fetch_subscription",
+            new=AsyncMock(side_effect=StripeError("unreachable", status=503)),
+        ):
+            self.assertFalse(_bill_from_now(org, False))
+        org.refresh_from_db()
+        self.assertIsNone(org.overage_cycle_start)
 
     def test_stale_check_does_not_restamp_the_cycle_record(self):
         org, sub = self._make_org()
