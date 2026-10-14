@@ -501,10 +501,13 @@ class OrgScopedGateTestCase(TestCase):
         headers = self.bearer()
         self.token.add_permission("project:read")
         # Token, page, prefetch; the gate adds nothing by id, one lookup by slug.
+        # An empty page skips the prefetch. A digit segment that names no org
+        # never falls back to a slug lookup: no slug is all digits.
         cases = [
             (public(self.org), 3, 200),
             ("orga", 4, 200),
             ("no-such-org", 3, 200),
+            (str(self.org.id), 2, 200),
         ]
         for segment, queries, status in cases:
             with self.subTest(segment=segment), self.assertNumQueries(queries):

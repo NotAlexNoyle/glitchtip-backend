@@ -29,11 +29,9 @@ async def resolve_org_id(segment: str) -> int:
     miss too: it decodes to a value that, all but never, is an org the caller
     is in.
     """
-    org_id = parse(segment)
-
-    if org_id != NO_ORG_ID:
-        return org_id
-
+    # No slug is all digits, so a digit miss skips the slug lookup.
+    if segment.isascii() and segment.isdigit():
+        return parse(segment)
     org_id = await (
         Organization.objects.filter(slug=segment, is_deleted=False)
         .values_list("id", flat=True)
