@@ -1,15 +1,17 @@
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
 import logging
+import threading
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.core.exceptions import ImproperlyConfigured
-from django.db import OperationalError, ProgrammingError
+from django.db import OperationalError, ProgrammingError, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 
 from apps.organizations_ext import public_id
@@ -145,24 +147,6 @@ class KeyLoadingTestCase(TestCase):
             public_id.encode(42), encode_with(make_aes(SecretKey(row.key)), 42)
         )
 
-    def test_concurrent_loaders_agree_on_one_key(self):
-        """A loader that loses the insert race uses the winner's key."""
-        PublicIdKey.objects.all().delete()
-
-        def winner_inserts_first(_nbytes):
-            # Runs after this loader's read missed, before its insert.
-            PublicIdKey.objects.create(id=1, key="aa" * 32)
-            return "bb" * 32
-
-        with mock.patch.object(
-            public_id.secrets, "token_hex", side_effect=winner_inserts_first
-        ):
-            key = public_id._read_or_create_key_sync()
-        self.assertEqual(key.hex, "aa" * 32)
-        self.assertEqual(
-            list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
-        )
-
     async def test_unloaded_key_in_event_loop_starts_a_load(self):
         """Rather than a sync ORM call, which would raise SynchronousOnlyOperation."""
         trigger = mock.Mock()
@@ -172,6 +156,21 @@ class KeyLoadingTestCase(TestCase):
         ):
             public_id.encode(42)
         trigger.assert_called_once_with()
+
+    def test_rereading_the_same_key_keeps_the_caches(self):
+        public_id.load_key_sync()
+        public_id.encode(42)
+        public_id.load_key_sync()
+        self.assertEqual(public_id._encode_cached.cache_info().currsize, 1)
+
+    def test_cache_never_answers_for_a_replaced_key(self):
+        """Not even for an entry another thread cached under the old key after
+        the swap: the cache is keyed by the cipher, not only the id."""
+        old = public_id.encode(42)
+        new_aes = make_aes(SecretKey("22" * 32))
+        public_id._aes = new_aes  # swapped, caches deliberately left alone
+        self.assertEqual(public_id.encode(42), encode_with(new_aes, 42))
+        self.assertNotEqual(public_id.encode(42), old)
 
     def test_sync_code_loads_on_first_use(self):
         encoded = public_id.encode(42)
@@ -201,7 +200,48 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         async def send(_message):
             pass
 
-        await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
+        wrapper = LoadPublicIdKey(inner)
+        await wrapper({"type": "lifespan"}, receive, send)
+        return wrapper
+
+    async def wait_for_key(self, key_hex):
+        expected = encode_with(make_aes(SecretKey(key_hex)), 42)
+        for _ in range(500):
+            if public_id.encode(42) == expected:
+                return
+            await asyncio.sleep(0.01)
+        self.fail("The running process kept the old key.")
+
+    def test_concurrent_loaders_agree_on_one_key(self):
+        """A loader that loses the insert race uses the winner's key."""
+        PublicIdKey.objects.all().delete()
+
+        def winner_inserts_first(_nbytes):
+            # Runs after this loader's read missed, before its insert.
+            PublicIdKey.objects.create(id=1, key="aa" * 32)
+            return "bb" * 32
+
+        with mock.patch.object(
+            public_id.secrets, "token_hex", side_effect=winner_inserts_first
+        ):
+            key = public_id._read_or_create_key_sync()
+        self.assertEqual(key.hex, "aa" * 32)
+        self.assertEqual(
+            list(PublicIdKey.objects.values_list("key", flat=True)), ["aa" * 32]
+        )
+
+    def test_key_created_inside_a_rolled_back_transaction_is_kept(self):
+        """The row a loader creates inside a caller's transaction outlives it."""
+
+        class Rollback(Exception):
+            pass
+
+        PublicIdKey.objects.all().delete()
+        with self.assertRaises(Rollback), transaction.atomic():
+            encoded = public_id.encode(42)
+            raise Rollback
+        row = PublicIdKey.objects.get()
+        self.assertEqual(encoded, encode_with(make_aes(SecretKey(row.key)), 42))
 
     async def test_lifespan_loads_key_before_inner_startup(self):
         loaded_at_startup = []
@@ -234,7 +274,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
 
         with (
             mock.patch.object(
-                public_id, "load_key", side_effect=OperationalError("down")
+                public_id, "load_key_sync", side_effect=OperationalError("down")
             ),
             self.assertLogs("glitchtip.asgi", "WARNING"),
         ):
@@ -245,22 +285,22 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
     async def test_failed_startup_load_recovers_without_a_request(self):
         """Startup fails (database down, or migrate not run yet), then the key
         loads with no HTTP request to prompt it."""
-        load_key = public_id.load_key
+        load_key_sync = public_id.load_key_sync
         attempts = []
 
-        async def down_twice():
+        def down_twice():
             attempts.append(1)
             if len(attempts) <= 2:
                 raise OperationalError("down")
-            await load_key()
+            load_key_sync()
 
         messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
 
         async def receive():
             if attempts:
-                # Hold shutdown back until the retry had its chance.
+                # Hold shutdown back until the retry finished: shutdown cancels it.
                 for _ in range(500):
-                    if public_id.key_loaded():
+                    if wrapper._retry is not None and wrapper._retry.done():
                         break
                     await asyncio.sleep(0.01)
             return next(messages)
@@ -272,14 +312,15 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         async def send(_message):
             pass
 
+        wrapper = LoadPublicIdKey(inner)
         out = io.StringIO()
         with (
-            mock.patch.object(public_id, "load_key", down_twice),
+            mock.patch.object(public_id, "load_key_sync", down_twice),
             mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
             self.assertLogs("glitchtip.asgi", "WARNING"),
             redirect_stdout(out),
         ):
-            await LoadPublicIdKey(inner)({"type": "lifespan"}, receive, send)
+            await wrapper({"type": "lifespan"}, receive, send)
         self.assertTrue(public_id.key_loaded())
         self.assertEqual(len(attempts), 3)
         # The operator's sign that the retry recovered.
@@ -294,7 +335,7 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
 
         wrapper = LoadPublicIdKey(None)
         with (
-            mock.patch.object(public_id, "load_key", side_effect=no_table),
+            mock.patch.object(public_id, "load_key_sync", side_effect=no_table),
             self.assertLogs("glitchtip.asgi", "WARNING") as logs,
         ):
             for _ in range(3):
@@ -304,8 +345,12 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         self.assertIsNone(record.exc_info)
 
     async def test_hung_load_does_not_hold_startup(self):
-        async def hang():
-            await asyncio.sleep(3600)
+        """A hung database blocks a thread inside the driver, not a coroutine:
+        the hang must tie up a real thread for this test to mean anything."""
+        release = threading.Event()
+
+        def hang():
+            release.wait(30)
 
         started = []
 
@@ -313,14 +358,41 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             started.append((await receive())["type"])
             await receive()
 
-        with (
-            mock.patch.object(public_id, "load_key", hang),
-            mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
-            self.assertLogs("glitchtip.asgi", "WARNING"),
-        ):
-            # Bounded here too, so a regression fails instead of hanging.
-            await asyncio.wait_for(self.run_lifespan(inner), 5)
+        try:
+            with (
+                mock.patch.object(public_id, "load_key_sync", hang),
+                mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
+                self.assertLogs("glitchtip.asgi", "WARNING"),
+            ):
+                # Bounded here too, so a regression fails instead of hanging.
+                await asyncio.wait_for(self.run_lifespan(inner), 5)
+        finally:
+            # Before this test's loop closes, which waits for its threads.
+            release.set()
         self.assertEqual(started, ["lifespan.startup"])
+
+    async def test_retry_waits_on_a_hung_attempt(self):
+        """A retry joins the attempt still in flight instead of starting a
+        thread of its own, so a hung database cannot drain the executor."""
+        release = threading.Event()
+        calls = []
+
+        def hang():
+            calls.append(1)
+            release.wait(30)
+
+        wrapper = LoadPublicIdKey(None)
+        try:
+            with (
+                mock.patch.object(public_id, "load_key_sync", hang),
+                mock.patch.object(LoadPublicIdKey, "LOAD_TIMEOUT_SECONDS", 0.05),
+                self.assertLogs("glitchtip.asgi", "WARNING"),
+            ):
+                for _ in range(3):
+                    self.assertFalse(await wrapper._load())
+        finally:
+            release.set()
+        self.assertEqual(len(calls), 1)
 
     async def test_request_with_cold_cache_can_encode(self):
         """Covers servers without lifespan, and apps Django middleware never
@@ -331,5 +403,66 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
             encoded.append(public_id.encode(42))
 
         scope = {"type": "http", "path": "/mcp"}
-        await LoadPublicIdKey(inner)(scope, None, None)
+        wrapper = LoadPublicIdKey(inner)
+        await wrapper(scope, None, None)
+        wrapper._stop_background()
         self.assertEqual(len(encoded), 1)
+
+    async def test_replaced_key_row_reaches_a_running_process(self):
+        """A restore that replaces the row, with no restart."""
+        wrapper = LoadPublicIdKey(None)
+        try:
+            with mock.patch.object(LoadPublicIdKey, "REVALIDATE_SECONDS", 0.01):
+                self.assertTrue(await wrapper._load())
+                await PublicIdKey.objects.filter(id=1).aupdate(key="22" * 32)
+                with self.assertLogs("apps.organizations_ext.public_id", "WARNING"):
+                    await self.wait_for_key("22" * 32)
+        finally:
+            wrapper._stop_background()
+
+    async def test_deleted_key_row_is_recreated_and_picked_up(self):
+        """A flush, or a restore without the row, with no restart: the running
+        process moves to the one recreated row, as new processes do."""
+        wrapper = LoadPublicIdKey(None)
+        try:
+            with mock.patch.object(LoadPublicIdKey, "REVALIDATE_SECONDS", 0.01):
+                self.assertTrue(await wrapper._load())
+                await PublicIdKey.objects.all().adelete()
+                with self.assertLogs("apps.organizations_ext.public_id", "WARNING"):
+                    row = None
+                    for _ in range(500):
+                        if row := await PublicIdKey.objects.afirst():
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertIsNotNone(row)
+                    await self.wait_for_key(row.key)
+        finally:
+            wrapper._stop_background()
+
+    async def test_failed_revalidation_keeps_the_key(self):
+        """A database outage during a check neither drops the key nor ends
+        the checks."""
+        wrapper = LoadPublicIdKey(None)
+        self.assertTrue(await wrapper._load())
+        loaded = public_id.encode(42)
+        down = mock.Mock(side_effect=OperationalError("down"))
+        with (
+            mock.patch.object(public_id, "load_key_sync", down),
+            mock.patch.object(LoadPublicIdKey, "REVALIDATE_SECONDS", 0.01),
+            contextlib.suppress(TimeoutError),
+        ):
+            # The loop never ends by itself; stop it after a few passes.
+            await asyncio.wait_for(wrapper._revalidate_forever(), 0.2)
+        wrapper._stop_background()
+        self.assertGreater(down.call_count, 1)
+        self.assertEqual(public_id.encode(42), loaded)
+
+    async def test_shutdown_stops_revalidation(self):
+        async def inner(scope, receive, send):
+            await receive()
+            await receive()
+
+        wrapper = await self.run_lifespan(inner)
+        with contextlib.suppress(asyncio.CancelledError):
+            await wrapper._revalidate
+        self.assertTrue(wrapper._revalidate.cancelled())

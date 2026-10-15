@@ -8,20 +8,26 @@ version that ``decode`` would pick by range; ``parse``'s digit cap must grow
 with it.
 
 The key is one ``PublicIdKey`` row, made by migrate or by the first process
-to find it missing, and cached per process.
+to find it missing, and cached per process. Servers re-read it every few
+minutes, so a restored key reaches running processes.
 """
 
 import asyncio
 import functools
 import hashlib
+import logging
 import secrets
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connections, transaction
 from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
+
+logger = logging.getLogger(__name__)
 
 # Organization.id is an int4 AutoField, this is the upper bound.
 MAX_ORG_ID = 2**31 - 1
@@ -34,7 +40,8 @@ _V1_LIMIT = 2**PUBLIC_ID_BITS
 _ORG_TWEAK = b"org"
 
 _aes: Cipher | None = None
-_fingerprint: str | None = None
+# Tells a re-read of the same key row from a new key.
+_key_digest: bytes | None = None
 # Set by glitchtip.asgi.LoadPublicIdKey: starts its background retry.
 _load_trigger: Callable[[], None] | None = None
 
@@ -139,20 +146,36 @@ def decode_with(aes: Cipher, public: int) -> int:
     return internal if 1 <= internal <= MAX_ORG_ID else NO_ORG_ID
 
 
-# Bounded because decode takes path segments, which anyone can vary.
-@functools.lru_cache(maxsize=4096)
 def encode(internal: int) -> int:
     """The public id for an internal organization id."""
     # Anything outside int4 is a caller bug and would not decode back.
     if not 1 <= internal <= MAX_ORG_ID:
         raise ValueError(f"Not an organization id: {internal!r}")
-    return encode_with(_get_aes(), internal)
+    return _encode_cached(_get_aes(), internal)
+
+
+def decode(public: int) -> int:
+    """The internal organization id a public id names, or ``NO_ORG_ID``."""
+    return _decode_cached(_get_aes(), public)
+
+
+# Keyed by the cipher too: a key can be replaced while other threads encode,
+# and a result one of them computed under the old key must never answer for
+# the new one. Bounded because decode takes path segments, which anyone can
+# vary.
+@functools.lru_cache(maxsize=4096)
+def _encode_cached(aes: Cipher, internal: int) -> int:
+    return encode_with(aes, internal)
 
 
 @functools.lru_cache(maxsize=4096)
-def decode(public: int) -> int:
-    """The internal organization id a public id names, or ``NO_ORG_ID``."""
-    return decode_with(_get_aes(), public)
+def _decode_cached(aes: Cipher, public: int) -> int:
+    return decode_with(aes, public)
+
+
+def _clear_caches() -> None:
+    _encode_cached.cache_clear()
+    _decode_cached.cache_clear()
 
 
 _MAX_DIGITS = len(str(_V1_LIMIT - 1))
@@ -211,16 +234,26 @@ def make_aes(secret: SecretKey) -> Cipher:
 
 
 def _install(secret: SecretKey) -> None:
-    global _aes, _fingerprint
+    global _aes, _key_digest
+    digest = hashlib.sha256(secret.hex.encode()).digest()
+    if digest == _key_digest:
+        return
+    replaced = _key_digest is not None
     _aes = make_aes(secret)
-    encode.cache_clear()
-    decode.cache_clear()
-    _fingerprint = hashlib.sha256(secret.hex.encode()).hexdigest()[:8]
+    _key_digest = digest
+    # Frees the old key's entries; correctness does not depend on it.
+    _clear_caches()
+    if replaced:
+        logger.warning(
+            "The public id key changed in the database (fingerprint now %s); "
+            "every public id changed with it.",
+            key_fingerprint(),
+        )
 
 
 def key_fingerprint() -> str | None:
     """A short hash of the loaded key, to compare across a database move."""
-    return _fingerprint
+    return _key_digest.hex()[:8] if _key_digest else None
 
 
 def _test_key() -> SecretKey | None:
@@ -254,11 +287,26 @@ def _read_or_create_key_sync() -> SecretKey:
 
     key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
     if key_hex is None:
+        if transaction.get_connection().in_atomic_block:
+            # Inside the caller's transaction the insert and the re-read see
+            # only each other, and a rollback would leave this process with a
+            # key no other process has. Create it on a connection of its own.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_read_or_create_key_own_connection).result()
         PublicIdKey.objects.bulk_create(
             [PublicIdKey(id=1, key=secrets.token_hex(32))], ignore_conflicts=True
         )
         key_hex = PublicIdKey.objects.values_list("key", flat=True).first()
     return SecretKey(key_hex)
+
+
+def _read_or_create_key_own_connection() -> SecretKey:
+    # A new thread gets a new connection, in autocommit, outside any
+    # transaction of the thread that started it.
+    try:
+        return _read_or_create_key_sync()
+    finally:
+        connections.close_all()
 
 
 async def load_key() -> None:
@@ -281,11 +329,10 @@ def key_loaded() -> bool:
 
 def clear_key() -> None:
     """Forget the cached key. For tests."""
-    global _aes, _fingerprint
+    global _aes, _key_digest
     _aes = None
-    _fingerprint = None
-    encode.cache_clear()
-    decode.cache_clear()
+    _key_digest = None
+    _clear_caches()
 
 
 def _get_aes() -> Cipher:

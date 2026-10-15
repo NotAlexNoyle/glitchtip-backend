@@ -16,22 +16,21 @@ from glitchtip.base_models import OrgScopedModel, SoftDeleteModel
 from .authentication import AuthHttpRequest
 
 ORG_NOT_FOUND = "Organization not found."
+# The path parameter every gated route names its organization by.
+ORG_PARAM = "organization_id_or_slug"
 
 
 async def resolve_org_id(segment: str) -> int:
     """The org id a path segment names: all digits is a public id, anything
     else a slug.
 
-    A public id costs no query; a slug, or digits that are not a public id,
-    cost one lookup. A miss is ``NO_ORG_ID``, so the gate treats it like any
-    org the caller isn't in. A raw internal id almost never decodes to an org
-    the caller is in.
+    An id costs no query; a slug costs one lookup. A miss is ``NO_ORG_ID``, so
+    the gate treats it like any org the caller isn't in. A raw internal id
+    almost never decodes to an org the caller is in.
     """
-    org_id = parse(segment)
-
-    if org_id != NO_ORG_ID:
-        return org_id
-
+    # No slug is all digits, so a digit miss skips the slug lookup.
+    if segment.isascii() and segment.isdigit():
+        return parse(segment)
     org_id = await (
         Organization.objects.filter(slug=segment, is_deleted=False)
         .values_list("id", flat=True)
@@ -65,7 +64,7 @@ class OrgScope:
                 )
             roles = tuple(i for i, r in enumerate(ROLES) if effective & r["scopes"])
 
-        org_id = await resolve_org_id(kwargs["organization_slug"])
+        org_id = await resolve_org_id(kwargs[ORG_PARAM])
         scope = cls(request.auth.user_id, org_id, required, roles)
         request.org_scope = scope  # set before the view runs
         return scope
@@ -152,8 +151,8 @@ def org_scoped(scopes: list[Scopes], model: type[OrgScopedModel]):
     Only ``qs`` is gated; ``Model.objects`` in the view is not. (List routes
     use ``org_scoped_list``, which gates the queryset the view returns.)
 
-    ``organization_slug`` may carry the org's public id or its slug (see
-    ``resolve_org_id``); the name predates ids.
+    ``organization_id_or_slug`` carries the org's public id or its slug (see
+    ``resolve_org_id``).
     """
     required, roles = _resolve_roles(scopes)
     _require_scoped_model(model, "org_scoped")
@@ -167,7 +166,7 @@ def org_scoped(scopes: list[Scopes], model: type[OrgScopedModel]):
                 "@paginate above it"
             )
         signature = inspect.signature(view)
-        _require_org_slug(view, signature.parameters, "org_scoped")
+        _require_org_param(view, signature.parameters, "org_scoped")
         if "qs" not in signature.parameters:
             raise ImproperlyConfigured(
                 f"{view.__qualname__} is @org_scoped but takes no `qs` "
@@ -200,19 +199,20 @@ def org_scoped(scopes: list[Scopes], model: type[OrgScopedModel]):
     return decorator
 
 
-def org_scoped_list(scopes: list[Scopes], model: type[OrgScopedModel]):
+def org_scoped_list(scopes: list[Scopes], model: type[OrgScopedModel], pagination=None):
     """Gate the queryset a list view returns, once, then paginate it.
 
     ``paginate`` evaluates whatever the view returns, so that is what gets
     gated. The view takes no ``qs``: gating one as well would put the gate in
-    the SQL twice. ``model`` is only checked at import.
+    the SQL twice. ``model`` is only checked at import. ``pagination`` is a
+    pagination class for routes that don't use the default.
     """
     required, roles = _resolve_roles(scopes)
     _require_scoped_model(model, "org_scoped_list")
 
     def decorator(view):
         parameters = inspect.signature(view).parameters
-        _require_org_slug(view, parameters, "org_scoped_list")
+        _require_org_param(view, parameters, "org_scoped_list")
         if "qs" in parameters:
             raise ImproperlyConfigured(
                 f"{view.__qualname__} is @org_scoped_list but takes `qs`; a "
@@ -232,7 +232,7 @@ def org_scoped_list(scopes: list[Scopes], model: type[OrgScopedModel]):
                 raise TypeError(f"{view.__qualname__} must return a QuerySet")
             return scope.apply(result)
 
-        return paginate(gated)
+        return paginate(pagination)(gated) if pagination else paginate(gated)
 
     return decorator
 
@@ -246,11 +246,11 @@ def _require_scoped_model(model, decorator: str) -> None:
         )
 
 
-def _require_org_slug(view, parameters, decorator: str) -> None:
-    if "organization_slug" not in parameters:
+def _require_org_param(view, parameters, decorator: str) -> None:
+    if ORG_PARAM not in parameters:
         raise ImproperlyConfigured(
             f"{view.__qualname__} is @{decorator} but takes no "
-            "`organization_slug` parameter -- the gate has no organization "
+            f"`{ORG_PARAM}` parameter -- the gate has no organization "
             "to scope it to"
         )
 
@@ -260,8 +260,9 @@ class OrgScopedHttpRequest(AuthHttpRequest):
 
     The folded gate doesn't resolve an ``OrganizationUser`` row, so there is
     no role here. ``org_scope.org_id`` is the path's org id, but nothing has
-    checked it yet: membership is only proven inside ``qs``, so filter with
-    ``org_scope.apply``, never with the bare id.
+    checked it yet: membership is only proven inside ``qs``. Filter with
+    ``org_scope.apply``; the bare id is safe only in a query that also
+    carries the gate, or once a gated read has matched.
     """
 
     org_scope: OrgScope

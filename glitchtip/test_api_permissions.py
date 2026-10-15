@@ -114,7 +114,14 @@ class OrgScopedModelCheckTestCase(SimpleTestCase):
             class Meta:
                 app_label = "alerts"
 
-        for model in (StopsAtProject, ReachesOrganizationColumn):
+        # Only Organization may name its own primary key.
+        class OwnId(OrgScopedModel, models.Model):
+            org_field = "id"
+
+            class Meta:
+                app_label = "alerts"
+
+        for model in (StopsAtProject, ReachesOrganizationColumn, OwnId):
             with self.subTest(model.org_field):
                 error = check_org_field(model)
                 self.assertEqual(error.id, "glitchtip.E002")
@@ -217,12 +224,12 @@ class OrgScopedDeclarationTestCase(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured) as ctx:
 
             @org_scoped(["project:admin"], ProjectAlert)
-            async def view(request, organization_slug: str):
+            async def view(request, organization_id_or_slug: str):
                 pass
 
         self.assertIn("qs", str(ctx.exception))
 
-    def test_view_without_an_organization_slug_is_rejected(self):
+    def test_view_without_an_organization_param_is_rejected(self):
         # Otherwise a KeyError 500 at request time.
         with self.assertRaises(ImproperlyConfigured) as ctx:
 
@@ -230,14 +237,14 @@ class OrgScopedDeclarationTestCase(SimpleTestCase):
             async def view(request, qs, project_slug: str):
                 pass
 
-        self.assertIn("organization_slug", str(ctx.exception))
+        self.assertIn("organization_id_or_slug", str(ctx.exception))
 
     def test_paginate_under_the_gate_is_rejected(self):
         with self.assertRaises(ImproperlyConfigured) as ctx:
 
             @org_scoped(["project:read"], ProjectAlert)
             @paginate
-            async def view(request, qs, organization_slug: str):
+            async def view(request, qs, organization_id_or_slug: str):
                 return qs
 
         self.assertIn("@paginate above", str(ctx.exception))
@@ -385,15 +392,17 @@ class OrgScopedGateTestCase(TestCase):
             )
         )
 
-        @router.get("/{organization_slug}/alerts/", response=list[_Id])
+        @router.get("/{organization_id_or_slug}/alerts/", response=list[_Id])
         @org_scoped_list(["project:read"], ProjectAlert)
-        async def leaky_alerts(request, response: HttpResponse, organization_slug: str):
+        async def leaky_alerts(
+            request, response: HttpResponse, organization_id_or_slug: str
+        ):
             return ProjectAlert.objects.all()
 
-        @router.get("/{organization_slug}/projects/", response=list[_Id])
+        @router.get("/{organization_id_or_slug}/projects/", response=list[_Id])
         @org_scoped_list(["project:read"], Project)
         async def leaky_projects(
-            request, response: HttpResponse, organization_slug: str
+            request, response: HttpResponse, organization_id_or_slug: str
         ):
             return Project.objects.all()
 
@@ -492,10 +501,13 @@ class OrgScopedGateTestCase(TestCase):
         headers = self.bearer()
         self.token.add_permission("project:read")
         # Token, page, prefetch; the gate adds nothing by id, one lookup by slug.
+        # An empty page skips the prefetch. A digit segment that names no org
+        # never falls back to a slug lookup: no slug is all digits.
         cases = [
             (public(self.org), 3, 200),
             ("orga", 4, 200),
             ("no-such-org", 3, 200),
+            (str(self.org.id), 2, 200),
         ]
         for segment, queries, status in cases:
             with self.subTest(segment=segment), self.assertNumQueries(queries):

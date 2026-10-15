@@ -3,7 +3,7 @@ import logging
 from datetime import date, timedelta
 
 from django.conf import settings
-from django.db.models import Prefetch, Q, Sum
+from django.db.models import Prefetch, Q, QuerySet, Sum
 from django.db.models.functions import Coalesce, TruncDate
 from django.http import JsonResponse
 from django.shortcuts import aget_object_or_404
@@ -26,6 +26,7 @@ from apps.projects.models import (
 )
 from apps.uptime.models import UptimeCheckHourlyStatistic
 from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.permissions import OrgScopedHttpRequest, org_scoped
 from glitchtip.schema import CamelSchema
 
 from .client import (
@@ -50,6 +51,7 @@ from .overage import (
     cycle_quota,
     overage_active,
     overage_eligible,
+    reported_units,
     units_for_budget,
 )
 from .utils import (
@@ -223,17 +225,18 @@ async def list_stripe_products(request: AuthHttpRequest):
 
 
 @router.get(
-    "subscriptions/{slug:organization_slug}/",
+    "subscriptions/{slug:organization_id_or_slug}/",
     response=StripeSubscriptionSchema | None,
     by_alias=True,
 )
-async def get_stripe_subscription(request: AuthHttpRequest, organization_slug: str):
+@org_scoped(["org:read"], StripeSubscription)
+async def get_stripe_subscription(
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[StripeSubscription],
+    organization_id_or_slug: str,
+):
     return await (
-        StripeSubscription.objects.filter(
-            organization__users=request.auth.user_id,
-            organization__slug=organization_slug,
-            status__in=ACTIVE_SUBSCRIPTION_STATUSES,
-        )
+        qs.filter(status__in=ACTIVE_SUBSCRIPTION_STATUSES)
         .select_related("price__product")
         .order_by("-created")
         .afirst()
@@ -241,22 +244,34 @@ async def get_stripe_subscription(request: AuthHttpRequest, organization_slug: s
 
 
 @router.post(
-    "organizations/{slug:organization_slug}/create-stripe-subscription-checkout/",
+    "organizations/{slug:organization_id_or_slug}/create-stripe-subscription-checkout/",
     response=StripeCheckoutSessionSchema,
 )
+@org_scoped(["org:admin"], Organization)
 async def create_stripe_session(
-    request: AuthHttpRequest, organization_slug: str, payload: PriceIDSchema
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
+    payload: PriceIDSchema,
 ):
     """
     Create Stripe Checkout, send to client for redirecting to Stripe
     See https://stripe.com/docs/api/checkout/sessions/create
     """
     organization = await aget_object_or_404(
-        Organization.objects.select_related("owner__organization_user__user"),
-        slug=organization_slug,
-        organization_users__role=OrganizationUserRole.OWNER,
-        organization_users__user=request.auth.user_id,
+        qs.select_related("owner__organization_user__user")
     )
+    # Checkout creates a new subscription, so a paid org buying through it would
+    # pay two base plans; it changes plan in the billing portal instead. A free
+    # plan is a $0 subscription and costs nothing to leave behind.
+    if await StripeSubscription.objects.filter(
+        organization=organization,
+        status__in=ACTIVE_SUBSCRIPTION_STATUSES,
+        price__price__gt=0,
+    ).aexists():
+        return JsonResponse(
+            {"detail": "Organization already has a paid subscription"}, status=400
+        )
     if organization.stripe_customer_id:
         customer_id = organization.stripe_customer_id
     else:
@@ -269,29 +284,31 @@ async def create_stripe_session(
     await aget_object_or_404(
         StripePrice, stripe_id=price_id, is_metered=False, active=True
     )
-    return await create_session(price_id, customer_id, organization_slug)
+    # The return URLs are frontend routes, which take the slug whichever form
+    # the path used.
+    return await create_session(price_id, customer_id, organization.slug)
 
 
 @router.post(
-    "organizations/{slug:organization_slug}/create-billing-portal/",
+    "organizations/{slug:organization_id_or_slug}/create-billing-portal/",
     response=StripePortalSessionSchema,
 )
+@org_scoped(["org:admin"], Organization)
 async def stripe_billing_portal_session(
-    request: AuthHttpRequest, organization_slug: str
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
 ):
     """See https://stripe.com/docs/billing/subscriptions/integrating-self-serve-portal"""
     organization = await aget_object_or_404(
-        Organization.objects.select_related("owner__organization_user__user"),
-        slug=organization_slug,
-        organization_users__role=OrganizationUserRole.OWNER,
-        organization_users__user=request.auth.user_id,
+        qs.select_related("owner__organization_user__user")
     )
     if organization.stripe_customer_id:
         customer_id = organization.stripe_customer_id
     else:
         customer = await create_customer(organization)
         customer_id = customer.id
-    return await create_portal_session(customer_id, organization_slug)
+    return await create_portal_session(customer_id, organization.slug)
 
 
 @router.post("subscriptions/", response=CreateSubscriptionResponse, by_alias=True)
@@ -370,13 +387,15 @@ def usage_response(counts: EventCounts) -> dict:
 
 
 @router.get(
-    "subscriptions/{slug:organization_slug}/events_count/period/",
+    "subscriptions/{slug:organization_id_or_slug}/events_count/period/",
     response=SubscriptionUsageSchema,
     by_alias=True,
 )
+@org_scoped(["org:read"], Organization)
 async def subscription_events_count_for_period(
-    request: AuthHttpRequest,
-    organization_slug: str,
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
     periods_ago: int = 0,
 ):
     retention_days = max(30, settings.GLITCHTIP_RETENTION_DAYS)
@@ -388,11 +407,7 @@ async def subscription_events_count_for_period(
             status=400,
         )
 
-    org = await aget_object_or_404(
-        Organization,
-        slug=organization_slug,
-        users=request.auth.user_id,
-    )
+    org = await aget_object_or_404(qs)
 
     period = await get_current_period_dates(org, periods_ago)
     if period is None:
@@ -405,18 +420,17 @@ async def subscription_events_count_for_period(
 
 
 @router.get(
-    "subscriptions/{slug:organization_slug}/events_count/daily/",
+    "subscriptions/{slug:organization_id_or_slug}/events_count/daily/",
     response=DailyEventsCountSchema,
     by_alias=True,
 )
+@org_scoped(["org:read"], Organization)
 async def subscription_events_count_daily(
-    request: AuthHttpRequest, organization_slug: str
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
 ):
-    org = await aget_object_or_404(
-        Organization,
-        slug=organization_slug,
-        users=request.auth.user_id,
-    )
+    org = await aget_object_or_404(qs)
 
     period = await get_current_period_dates(org)
     if period is None:
@@ -526,6 +540,9 @@ class OverageStatusSchema(CamelSchema):
     usage: int
     overage_units: int
     overage_cost_cents: int
+    # Cost of what was already sent to Stripe this period; still invoiced after
+    # overage is switched off.
+    reported_cost_cents: int
     throttle_rate: int
 
 
@@ -557,19 +574,7 @@ async def _get_overage_price() -> StripePrice | None:
     )
 
 
-@router.get(
-    "subscriptions/{slug:organization_slug}/overage/",
-    response=OverageStatusSchema,
-    by_alias=True,
-)
-async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
-    org = await aget_object_or_404(
-        Organization.objects.select_related(
-            "stripe_primary_subscription__price__product"
-        ),
-        slug=organization_slug,
-        users=request.auth.user_id,
-    )
+async def overage_status(org: Organization) -> dict:
     sub = org.stripe_primary_subscription
     # Same test configure_overage applies, so the card can't offer a toggle the
     # POST would reject.
@@ -595,6 +600,7 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
         # cap.
         quota = cycle_quota(org, period[0], quota)
     overage_units = max(0, usage - quota)
+    reported = 0
     if period and active:
         billed_units = billable_units(
             overage_units,
@@ -602,6 +608,11 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
             org.overage_last_reported_units,
             org.overage_last_reported_at,
             *period,
+        )
+    # Only while the item that invoices it is still attached.
+    if period and sub and sub.metered_item_id:
+        reported = reported_units(
+            org.overage_last_reported_units, org.overage_last_reported_at, *period
         )
 
     return {
@@ -616,47 +627,69 @@ async def get_overage_status(request: AuthHttpRequest, organization_slug: str):
         "usage": usage,
         "overage_units": overage_units,
         "overage_cost_cents": cost_cents_for_units(billed_units),
+        "reported_cost_cents": cost_cents_for_units(reported),
         "throttle_rate": org.event_throttle_rate,
     }
 
 
-@router.post(
-    "organizations/{slug:organization_slug}/overage/",
+@router.get(
+    "subscriptions/{slug:organization_id_or_slug}/overage/",
     response=OverageStatusSchema,
     by_alias=True,
 )
+@org_scoped(["org:read"], Organization)
+async def get_overage_status(
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
+):
+    return await overage_status(
+        await aget_object_or_404(
+            qs.select_related("stripe_primary_subscription__price__product")
+        )
+    )
+
+
+@router.post(
+    "organizations/{slug:organization_id_or_slug}/overage/",
+    response=OverageStatusSchema,
+    by_alias=True,
+)
+@org_scoped(["org:admin"], Organization)
 async def configure_overage(
-    request: AuthHttpRequest, organization_slug: str, payload: OverageConfigIn
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
+    payload: OverageConfigIn,
 ):
     """Enable/disable metered overage billing and set the spend cap (owner-only).
 
     Enabling attaches the metered overage price as a second subscription item,
     whose own Stripe billing period becomes the organization's usage window
     from then on (see ``billing_window``). Disabling only clears the flag: the
-    item stays attached (dormant, billing zero), so a re-enable within the
-    same cycle can't re-bill reported usage and toggling never moves the
-    window. Either way a throttle re-check is enqueued so the new headroom (or
-    block) takes effect promptly.
+    item stays attached and dormant, so a re-enable within the same cycle
+    can't re-bill reported usage and toggling never moves the window. Dormant
+    means nothing further is reported, not that the period bills zero: the
+    figure already filed with Stripe this period is still invoiced, and the
+    status response says so in ``reported_cost_cents``. Either way a throttle
+    re-check is enqueued so the new headroom (or block) takes effect promptly.
     """
     org = await aget_object_or_404(
-        Organization.objects.select_related(
-            "stripe_primary_subscription__price__product"
-        ),
-        slug=organization_slug,
-        organization_users__role=OrganizationUserRole.OWNER,
-        organization_users__user=request.auth.user_id,
+        qs.select_related("stripe_primary_subscription__price__product")
     )
     sub = org.stripe_primary_subscription
 
     if payload.enabled:
         if not overage_eligible(sub):
             return JsonResponse(
-                {"detail": "An active paid plan is required for overage billing."},
+                {"detail": "An active paid plan is required for on-demand billing."},
                 status=400,
             )
         if payload.cap_cents <= 0:
             return JsonResponse(
-                {"detail": "A positive spend cap is required to enable overage."},
+                {
+                    "detail": "A positive spend cap is required to enable on-demand billing."
+                },
                 status=400,
             )
         if payload.cap_cents > settings.GLITCHTIP_OVERAGE_MAX_CAP_CENTS:
@@ -670,14 +703,14 @@ async def configure_overage(
         overage_price = await _get_overage_price()
         if overage_price is None:
             return JsonResponse(
-                {"detail": "Overage billing is not configured on this server."},
+                {"detail": "On-demand billing is not configured on this server."},
                 status=400,
             )
         if not org.stripe_customer_id:
             # Nothing to attach to or meter; also keeps the customer-scoped
             # listing below from ever running unscoped.
             return JsonResponse(
-                {"detail": "A billing account is required for overage billing."},
+                {"detail": "A billing account is required for on-demand billing."},
                 status=400,
             )
         # A cap decrease on an already-enabled org only reduces exposure; it
@@ -713,7 +746,7 @@ async def configure_overage(
                     return JsonResponse(
                         {
                             "detail": "Another subscription on this account already "
-                            "has overage billing. Contact support to consolidate "
+                            "has on-demand billing. Contact support to consolidate "
                             "your subscriptions first."
                         },
                         status=400,
@@ -755,7 +788,7 @@ async def configure_overage(
                 e.code,
             )
             return JsonResponse(
-                {"detail": "Could not enable overage billing. Please try again."},
+                {"detail": "Could not enable on-demand billing. Please try again."},
                 status=502,
             )
         org.metered_billing_enabled = True
@@ -766,9 +799,14 @@ async def configure_overage(
     else:
         # Keep the item attached and the last-report record intact: a re-enable
         # is then a flag flip, and the cap stays floored at what the cycle has
-        # billed so toggling can't retract it. A dormant item bills zero.
+        # billed so toggling can't retract it. Nothing more is reported while
+        # dormant; what was already reported this period is still invoiced.
         org.metered_billing_enabled = False
         await org.asave(update_fields=["metered_billing_enabled"])
 
     await check_organization_throttle.aenqueue(org.id, bypass_cache=True)
-    return await get_overage_status(request, organization_slug)
+    return await overage_status(
+        await Organization.objects.select_related(
+            "stripe_primary_subscription__price__product"
+        ).aget(id=org.id)
+    )
