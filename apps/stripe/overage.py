@@ -11,6 +11,7 @@ background throttle task — the only code that actually sends meter events —
 can apply the same predicate the API does without importing a router module.
 """
 
+from datetime import timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
 from django.conf import settings
@@ -89,17 +90,52 @@ def units_for_budget(cap_cents: int) -> int:
 def cycle_quota(org, cycle_start, plan_events: int) -> int:
     """The quota overage is measured against in the cycle starting ``cycle_start``.
 
-    The record the throttle sweep keeps on the organization, or the plan's own
-    quota when the record is on another cycle. The record is the largest quota
-    the plan has held during the cycle: measured against the current quota
-    alone, a mid-cycle downgrade would turn usage that was within quota when it
-    happened into billable overage; the smaller quota applies from the next
-    cycle instead. Switching overage on or raising its cap raises the record to
-    the usage accepted so far but not billable, so billing starts from then.
+    The largest quota the plan has held during the cycle, from the record the
+    throttle sweep keeps on the organization, or the plan's own when the record
+    is on another cycle. Measured against the current quota alone, a mid-cycle
+    downgrade would turn usage that was within quota when it happened into
+    billable overage; the smaller quota applies from the next cycle instead.
     """
     if org.overage_cycle_start == cycle_start:
         return max(org.overage_cycle_quota, plan_events)
     return plan_events
+
+
+def metering_start(enabled_at, cycle_start):
+    """When the cycle starting ``cycle_start`` meters events from.
+
+    The cycle start, or, when overage was switched on (or its cap raised)
+    during the cycle, the first whole hour after that. Usage is counted in
+    hourly buckets, and starting at the next one rather than the current one
+    errs toward not billing events accepted before the switch -- including
+    any still queued for processing when it happened.
+    """
+    if enabled_at is None or enabled_at <= cycle_start:
+        return cycle_start
+    hour = enabled_at.replace(minute=0, second=0, microsecond=0)
+    return hour if hour == enabled_at else hour + timedelta(hours=1)
+
+
+def metered_units(
+    over_quota: int,
+    new_events: int,
+    carried: int,
+    enabled_at,
+    cycle_start,
+    cycle_end,
+) -> int:
+    """Overage units this cycle meters, before the spend cap.
+
+    Overage is billed only for events accepted while it was on: those since
+    :func:`metering_start` (``new_events``), plus what had already been billed
+    this cycle when it was last switched on (``carried``), so that switching
+    it off and on again can't retract a bill. Events the throttle let through
+    while it was off, or past the cap before a raise, are not billed. Never
+    more than the usage above quota.
+    """
+    if not (enabled_at is not None and cycle_start <= enabled_at < cycle_end):
+        carried = 0
+    return min(over_quota, carried + new_events)
 
 
 def billable_units(
