@@ -287,12 +287,13 @@ class OverageAPITestCase(TestCase):
         self.sub.metered_period_end = now + timedelta(days=25)
         self.sub.save()
         cases = [
-            # (name, enabled, cap before, cap after, seen by start_metering, carried)
-            ("switched on over quota", False, 0, 2000, (False, 0, False), 0),
+            # (name, enabled, cap before, cap after, seen by start_metering,
+            #  usage billed through)
+            ("switched on over quota", False, 0, 2000, (False, 0, False), QUOTA),
             # Billable while on, though no sweep has reported it yet.
-            ("cap raised", True, 2000, 4000, (True, 2000, True), 50_000),
+            ("cap raised", True, 2000, 4000, (True, 2000, True), 150_000),
         ]
-        for name, enabled, cap, new_cap, expected_seen, carried in cases:
+        for name, enabled, cap, new_cap, expected_seen, billed_through in cases:
             with self.subTest(name):
                 self.org.metered_billing_enabled = enabled
                 self.org.overage_spend_cap_cents = cap
@@ -323,7 +324,7 @@ class OverageAPITestCase(TestCase):
                 self.org.refresh_from_db()
                 self.assertTrue(self.org.metered_billing_enabled)
                 self.assertIsNotNone(self.org.overage_enabled_at)
-                self.assertEqual(self.org.overage_carried_units, carried)
+                self.assertEqual(self.org.overage_billed_through, billed_through)
 
     def test_disable_reports_first(self):
         # Switching back on carries only what was reported, so billable usage
@@ -346,7 +347,7 @@ class OverageAPITestCase(TestCase):
             )
 
         with (
-            patch("apps.stripe.api._check_and_update_throttle", new=check),
+            patch("apps.stripe.api.check_and_update_throttle", new=check),
             patch(
                 "apps.stripe.api.check_organization_throttle",
                 new=MagicMock(aenqueue=AsyncMock()),
@@ -374,6 +375,7 @@ class OverageAPITestCase(TestCase):
         self.assertEqual(res.status_code, 503)
         self.org.refresh_from_db()
         self.assertFalse(self.org.metered_billing_enabled)
+        self.assertIsNone(self.org.overage_enabled_at)
 
     def test_enable_card_error_returns_402(self):
         # A declined card surfaces Stripe's message to the owner, not a 500.
