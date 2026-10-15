@@ -105,10 +105,11 @@ def metering_start(enabled_at, cycle_start):
     """When the cycle starting ``cycle_start`` meters events from.
 
     The cycle start, or, when overage was switched on (or its cap raised)
-    during the cycle, the first whole hour after that. Usage is counted in
-    hourly buckets, and starting at the next one rather than the current one
-    errs toward not billing events accepted before the switch -- including
-    any still queued for processing when it happened.
+    during the cycle, the first whole hour after that: usage is counted in
+    hourly buckets, and the next one is the first holding no events accepted
+    before the switch. Until then the organization is throttled as if
+    overage were off, or the unmetered remainder of the hour would be free
+    and unthrottled.
     """
     if enabled_at is None or enabled_at <= cycle_start:
         return cycle_start
@@ -117,9 +118,10 @@ def metering_start(enabled_at, cycle_start):
 
 
 def metered_units(
-    over_quota: int,
+    usage: int,
+    quota: int,
     new_events: int,
-    carried: int,
+    billed_through: int,
     enabled_at,
     cycle_start,
     cycle_end,
@@ -127,15 +129,31 @@ def metered_units(
     """Overage units this cycle meters, before the spend cap.
 
     Overage is billed only for events accepted while it was on: those since
-    :func:`metering_start` (``new_events``), plus what had already been billed
-    this cycle when it was last switched on (``carried``), so that switching
-    it off and on again can't retract a bill. Events the throttle let through
-    while it was off, or past the cap before a raise, are not billed. Never
-    more than the usage above quota.
+    :func:`metering_start` (``new_events``), plus what the cycle had already
+    billed when overage was last switched on, so switching it off and on
+    can't retract a bill. Events the throttle let through while it was off,
+    or past the cap before a raise, are never billed.
+
+    What was already billed is held as the cycle usage it was billed through
+    (``billed_through``), not as a count of units, so a later upgrade forgives
+    it as it forgives any overage under the smaller plan.
     """
-    if not (enabled_at is not None and cycle_start <= enabled_at < cycle_end):
-        carried = 0
-    return min(over_quota, carried + new_events)
+    carried = 0
+    if enabled_at is not None and cycle_start <= enabled_at < cycle_end:
+        carried = max(0, billed_through - quota)
+    return min(max(0, usage - quota), carried + new_events)
+
+
+def billed_units(org, metered: int, cap_units: int, cycle_start, cycle_end) -> int:
+    """:func:`billable_units` for ``org``'s metered overage and last report."""
+    return billable_units(
+        metered,
+        cap_units,
+        org.overage_last_reported_units,
+        org.overage_last_reported_at,
+        cycle_start,
+        cycle_end,
+    )
 
 
 def billable_units(

@@ -339,19 +339,16 @@ class Organization(OrgScopedModel, SharedBaseModel, OrganizationBase):
         default=0,
         help_text="Largest plan event quota held during that cycle.",
     )
-    # When overage was last switched on (or its cap raised) and what the cycle
-    # had billed by then. Overage meters events from that moment plus what it
-    # carried, so events the throttle let through for free are never billed
-    # and switching it off and on can't retract a bill. See
-    # apps.stripe.overage.metered_units.
+    # See apps.stripe.overage.metered_units.
     overage_enabled_at = models.DateTimeField(
         null=True,
         blank=True,
         help_text="When overage was last switched on or its cap raised.",
     )
-    overage_carried_units = models.PositiveBigIntegerField(
+    overage_billed_through = models.PositiveBigIntegerField(
         default=0,
-        help_text="Overage units that cycle had billed by overage_enabled_at.",
+        db_default=0,
+        help_text="Cycle usage that overage had billed through by overage_enabled_at.",
     )
     stripe_customer_id = models.CharField(max_length=28, blank=True)
     stripe_primary_subscription = models.ForeignKey(

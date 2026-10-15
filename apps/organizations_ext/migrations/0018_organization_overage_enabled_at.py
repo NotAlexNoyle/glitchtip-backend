@@ -18,10 +18,12 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name="organization",
-            name="overage_carried_units",
+            name="overage_billed_through",
             field=models.PositiveBigIntegerField(
+                db_default=0,
                 default=0,
-                help_text="Overage units that cycle had billed by overage_enabled_at.",
+                help_text="Cycle usage that overage had billed through by "
+                "overage_enabled_at.",
             ),
         ),
     ]

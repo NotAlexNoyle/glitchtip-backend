@@ -18,7 +18,7 @@ from apps.organizations_ext.models import (
     get_event_counts,
 )
 from apps.organizations_ext.tasks import (
-    _check_and_update_throttle,
+    check_and_update_throttle,
     check_organization_throttle,
     metered_overage,
     start_metering,
@@ -50,7 +50,7 @@ from .constants import (
 from .exceptions import StripeError
 from .models import StripePrice, StripeProduct, StripeSubscription
 from .overage import (
-    billable_units,
+    billed_units,
     cost_cents_for_units,
     cycle_quota,
     overage_active,
@@ -589,14 +589,14 @@ async def overage_status(org: Organization) -> dict:
     # sticky opt-in flag.
     active = overage_active(org)
     # Quota is a separate question from eligibility: an ineligible plan (unpaid,
-    # comped, quota-less) still has whatever quota it has, and _check_and_update_
+    # comped, quota-less) still has whatever quota it has, and check_and_update_
     # throttle enforces exactly this. Deriving it from `eligible` made the card
     # report the free-tier number while a larger one was actually being enforced.
     quota = plan_events or settings.GLITCHTIP_FREE_TIER_EVENTS
 
     usage = 0
     cap_units = units_for_budget(org.overage_spend_cap_cents)
-    billed_units = 0
+    billed = 0
     period = await get_current_period_dates(org)
     if period:
         usage = (await get_event_counts(org.id, *period)).total_event_count
@@ -604,18 +604,11 @@ async def overage_status(org: Organization) -> dict:
         # show a smaller charge than the invoice after a downgrade or a lowered
         # cap.
         quota = cycle_quota(org, period[0], quota)
-    overage_units = 0
-    if period:
-        overage_units = await metered_overage(org, *period, usage, quota)
-    reported = 0
+    overage_units = max(0, usage - quota)
     if period and active:
-        billed_units = billable_units(
-            overage_units,
-            cap_units,
-            org.overage_last_reported_units,
-            org.overage_last_reported_at,
-            *period,
-        )
+        overage_units = await metered_overage(org, *period, usage, quota)
+        billed = billed_units(org, overage_units, cap_units, *period)
+    reported = 0
     # Only while the item that invoices it is still attached.
     if period and sub and sub.metered_item_id:
         reported = reported_units(
@@ -633,7 +626,7 @@ async def overage_status(org: Organization) -> dict:
         "quota": quota,
         "usage": usage,
         "overage_units": overage_units,
-        "overage_cost_cents": cost_cents_for_units(billed_units),
+        "overage_cost_cents": cost_cents_for_units(billed),
         "reported_cost_cents": cost_cents_for_units(reported),
         "throttle_rate": org.event_throttle_rate,
     }
@@ -826,7 +819,7 @@ async def configure_overage(
         # A failed report only under-bills, so it never blocks the switch.
         if was_billing:
             try:
-                await _check_and_update_throttle(org)
+                await check_and_update_throttle(org)
             except Exception:
                 logger.exception(
                     "Overage report before disable failed for org %s", org.id

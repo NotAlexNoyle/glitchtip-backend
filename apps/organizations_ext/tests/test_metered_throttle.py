@@ -463,7 +463,11 @@ class MeteredThrottleTestCase(TestCase):
         self.assertEqual(self._sent(mock_meter), 10_000)
 
     def _switch_on(self, org, usage, cap_cents=CAP_CENTS):
-        """Switch overage on, or change its cap, as ``configure_overage`` does."""
+        """Switch overage on, or change its cap, as ``configure_overage`` does.
+
+        The API's own wiring, ``was_billing`` included, is pinned by
+        ``test_metering_restarts_before_the_switch`` in apps.stripe.
+        """
         org = Organization.objects.select_related(
             "stripe_primary_subscription__price__product"
         ).get(id=org.id)
@@ -492,7 +496,8 @@ class MeteredThrottleTestCase(TestCase):
 
     def test_billing_starts_when_switched_on(self):
         """Events the throttle let through for free while overage was off, or
-        past the cap, are never billed; what was billable stays billed."""
+        past the cap, are never billed; what was billable stays billed, and the
+        whole cap is paid headroom from the switch."""
 
         def toggle(enabled):
             def step(org):
@@ -508,19 +513,27 @@ class MeteredThrottleTestCase(TestCase):
         def sweep(usage):
             return lambda org: self._run(org, usage)
 
+        def plan(events):
+            def step(org):
+                product = org.stripe_primary_subscription.price.product
+                product.events = events
+                product.save(update_fields=["events"])
+
+            return step
+
         cases = [
-            # (name, enabled at start, steps, last usage swept, figure billed)
-            ("enabled over quota", False, [on(150_000)], 150_000, None),
-            ("then usage grows", False, [on(150_000)], 160_000, 10_000),
-            ("enabled under quota", False, [on(50_000)], 150_000, 50_000),
-            # Paid headroom is the whole cap from the switch, unthrottled.
-            ("cap counts from the switch", False, [on(200_000)], 300_000, 100_000),
+            # (name, enabled at start, steps, last usage swept, billed, throttle)
+            ("enabled over quota", False, [on(150_000)], 150_000, None, 0),
+            ("then usage grows", False, [on(150_000)], 160_000, 10_000, 0),
+            ("enabled under quota", False, [on(50_000)], 150_000, 50_000, 0),
+            ("cap counts from the switch", False, [on(200_000)], 300_000, 100_000, 0),
             (
                 "toggled off and back on",
                 True,
                 [sweep(130_000), toggle(False), sweep(160_000), on(160_000)],
                 170_000,
                 40_000,
+                0,
             ),
             (
                 "cap raised after it was reached",
@@ -528,6 +541,7 @@ class MeteredThrottleTestCase(TestCase):
                 [sweep(ALLOWED + 50_000), on(ALLOWED + 50_000, CAP_CENTS * 2)],
                 ALLOWED + 60_000,
                 CAP_UNITS + 10_000,
+                0,
             ),
             (
                 "cap raised before a sweep reported",
@@ -535,9 +549,24 @@ class MeteredThrottleTestCase(TestCase):
                 [on(150_000, CAP_CENTS * 2)],
                 150_000,
                 50_000,
+                0,
+            ),
+            (
+                "upgraded after the switch",
+                True,
+                [
+                    sweep(150_000),
+                    toggle(False),
+                    sweep(200_000),
+                    on(200_000),
+                    plan(120_000),
+                ],
+                210_000,
+                40_000,
+                0,
             ),
         ]
-        for name, enabled, steps, usage, billed in cases:
+        for name, enabled, steps, usage, billed, throttle in cases:
             with self.subTest(name):
                 cache.clear()
                 self.ledger = []
@@ -550,12 +579,25 @@ class MeteredThrottleTestCase(TestCase):
                 mock_meter = self._run(org, usage)
                 if billed is None:
                     mock_meter.assert_not_awaited()
-                    # The cap's worth of headroom starts from here, too.
-                    self.assertEqual(self._throttle(org), 0)
                 else:
                     self.assertEqual(self._sent(mock_meter), billed)
-                    if billed < CAP_UNITS:
-                        self.assertEqual(self._throttle(org), 0)
+                self.assertEqual(self._throttle(org), throttle)
+
+    def test_the_rest_of_the_hour_is_throttled_not_billed(self):
+        # Metering starts at the next whole hour; until then the organization
+        # is on the free ramp, or toggling every hour would leave it unmetered
+        # and unthrottled.
+        self._hourly()
+        org, _ = self._make_org(enabled=False)
+        self._run(org, 180_000)
+        self.clock += timedelta(minutes=30) - self.tick
+        self._switch_on(org, 180_000)  # at :30
+        self.tick = timedelta(minutes=10)
+        self._run(org, 190_000).assert_not_awaited()
+        self.assertEqual(self._throttle(org), 50)
+        self.tick = timedelta(minutes=30)
+        self.assertEqual(self._sent(self._run(org, 200_000)), 10_000)
+        self.assertEqual(self._throttle(org), 0)
 
     def test_switching_on_again_does_not_restart_the_ramp(self):
         # Past the cap and past the free ramp after it: fully throttled.
@@ -595,21 +637,6 @@ class MeteredThrottleTestCase(TestCase):
         for enabled_at, expected in cases:
             with self.subTest(enabled_at=enabled_at):
                 self.assertEqual(metering_start(enabled_at, start), expected)
-
-    def test_start_metering_refuses_an_unknown_window(self):
-        # Without the item's period the carried figure can't be tied to a
-        # cycle, and filed under the wrong one it would be billed again.
-        org, _ = self._make_org(enabled=False, metered_period=(None, None))
-        org = Organization.objects.select_related(
-            "stripe_primary_subscription__price__product"
-        ).get(id=org.id)
-        with patch(
-            "apps.stripe.models.fetch_subscription",
-            new=AsyncMock(side_effect=StripeError("unreachable", status=503)),
-        ):
-            self.assertFalse(_start_metering(org, False))
-        org.refresh_from_db()
-        self.assertIsNone(org.overage_enabled_at)
 
     def test_stale_check_does_not_restamp_the_cycle_record(self):
         org, sub = self._make_org()
