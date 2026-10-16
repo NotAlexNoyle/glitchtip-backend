@@ -252,7 +252,7 @@ class TeamAPITestCase(TestCase):
         self.assertTrue(await new_project.teams.aexists())
 
     async def test_team_add_project_no_perms(self):
-        """User must be manager or above to manage project teams"""
+        """User must be admin or above to manage project teams"""
         team = await baker.amake("teams.Team", organization=self.organization)
         new_project = await baker.amake(
             "projects.Project", organization=self.organization
@@ -263,8 +263,7 @@ class TeamAPITestCase(TestCase):
         )
         for role, status in (
             (OrganizationUserRole.MEMBER, 403),
-            (OrganizationUserRole.ADMIN, 403),
-            (OrganizationUserRole.MANAGER, 201),
+            (OrganizationUserRole.ADMIN, 201),
         ):
             with self.subTest(role=role.label):
                 self.org_user.role = role
