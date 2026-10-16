@@ -5,6 +5,7 @@ from allauth.mfa.utils import encrypt
 from allauth_async.account.internal.flows.email_verification import asend_confirmation
 from allauth_async.mfa.recovery_codes.internal.auth import AsyncRecoveryCodes
 from django.core.cache import cache
+from django.db.models import Exists, OuterRef
 from django.db.utils import IntegrityError
 from django.http import Http404, HttpResponse
 from django.shortcuts import aget_object_or_404
@@ -92,11 +93,16 @@ async def delete_user(request: AuthHttpRequest, user_id: MeID):
     # Owners of a live org may not delete their account. Soft-deleted orgs
     # don't count: the org is gone to the user even while the async cleanup
     # task, which can take a while, hasn't hard-deleted it yet.
-    live_owner_ids = OrganizationOwner.objects.filter(
-        organization__is_deleted=False
-    ).values("organization_user__user_id")
+    # Exists, not id__in: a NOT IN over a subquery that yields a NULL (an owner
+    # row pointing at a pending invite) excludes every user.
+    owns_live_org = Exists(
+        OrganizationOwner.objects.filter(
+            organization_user__user_id=OuterRef("pk"),
+            organization__is_deleted=False,
+        )
+    )
     try:
-        result, _ = await queryset.exclude(id__in=live_owner_ids).adelete()
+        result, _ = await queryset.exclude(owns_live_org).adelete()
     except IntegrityError as err:
         if is_member_guard_violation(err):
             raise HttpError(
