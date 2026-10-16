@@ -200,24 +200,12 @@ class TeamAPITestCase(TestCase):
         res = await self.async_client.post(url)
         self.assertEqual(res.status_code, 403)
 
-        # Can't add someone when admin and not in team
+        # Can add someone when admin, in the team or not
         self.org_user.role = OrganizationUserRole.ADMIN
         await self.org_user.asave()
         res = await self.async_client.post(url)
-        self.assertEqual(res.status_code, 403)
-
-        # Can add someone when admin and in team
-        await team.members.aadd(self.org_user)
-        res = await self.async_client.post(url)
         self.assertEqual(res.status_code, 201)
-        await team.members.aremove(self.org_user)
-        await team.members.aremove(other_org_user)
-
-        # Can add someone else when manager
-        self.org_user.role = OrganizationUserRole.MANAGER
-        await self.org_user.asave()
-        res = await self.async_client.post(url)
-        self.assertEqual(res.status_code, 201)
+        self.assertFalse(await team.members.filter(id=self.org_user.id).aexists())
 
     async def test_list_project_teams(self):
         project = await baker.amake("projects.Project", organization=self.organization)

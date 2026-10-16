@@ -172,9 +172,7 @@ async def modify_member_for_team(
     user_id: int,
     add_member=True,
 ):
-    # One query: the team, the member to add or remove, and everything the
-    # role rule below needs. annotate_team_details' is_member is whether the
-    # caller is in the team.
+    # One query: the team, the member to add or remove, and the caller's role.
     target = OrganizationUser.objects.filter(
         organization_id=OuterRef("organization_id")
     )
@@ -197,14 +195,11 @@ async def modify_member_for_team(
         raise Http404
 
     is_self = team.target_user_id == user_id
-    if not (team.open_membership and is_self):
-        required_role = (
-            OrganizationUserRole.ADMIN
-            if team.is_member
-            else OrganizationUserRole.MANAGER
-        )
-        if team.actor_role < required_role:
-            raise HttpError(403, "Must be admin to modify teams")
+    if (
+        not (team.open_membership and is_self)
+        and team.actor_role < OrganizationUserRole.ADMIN
+    ):
+        raise HttpError(403, "Must be admin to modify teams")
 
     if add_member:
         await team.members.aadd(team.target_id)

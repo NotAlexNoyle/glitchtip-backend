@@ -52,7 +52,7 @@ ROLES: tuple[Role, ...] = (
     {
         "id": "admin",
         "name": "Admin",
-        "desc": "Admin privileges on any teams of which they're a member. They can create new teams and projects, as well as remove teams and projects which they already hold membership on (or all teams, if open membership is on). Additionally, they can manage memberships of teams that they are members of.",
+        "desc": "Admins can create, change, and delete any project, team, alert, and uptime monitor in the organization, and manage team memberships.",
         "scopes": {
             "event:read",
             "event:write",
@@ -72,7 +72,7 @@ ROLES: tuple[Role, ...] = (
     {
         "id": "manager",
         "name": "Manager",
-        "desc": "Gains admin access on all teams as well as the ability to add and remove members.",
+        "desc": "Everything an admin can do, plus inviting and removing members, changing their roles up to manager, and changing organization settings.",
         "is_global": True,
         "scopes": {
             "event:read",
