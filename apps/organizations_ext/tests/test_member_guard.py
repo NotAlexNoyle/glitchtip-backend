@@ -120,6 +120,28 @@ class MemberGuardEndpointTestCase(TransactionTestCase):
         self.assertIn("only member", res.json()["detail"])
         self.assertTrue(User.objects.filter(id=self.user.id).exists())
 
+    def test_delete_user_owning_soft_deleted_org(self):
+        """An owner who deleted their org can delete their account right away,
+        without waiting for the async cleanup task to hard-delete the org."""
+        self.organization.is_deleted = True
+        self.organization.save(update_fields=["is_deleted"])
+
+        self.client.force_login(self.user)
+        res = self.client.delete(reverse("api:delete_user", args=["me"]))
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(User.objects.filter(id=self.user.id).exists())
+
+    def test_delete_user_owning_live_and_soft_deleted_org(self):
+        """A soft-deleted org must not mask ownership of a live one."""
+        deleted_org = baker.make("organizations_ext.Organization", is_deleted=True)
+        deleted_org.add_user(self.user)
+
+        self.client.force_login(self.user)
+        res = self.client.delete(reverse("api:delete_user", args=["me"]))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("owner", res.json()["detail"])
+        self.assertTrue(User.objects.filter(id=self.user.id).exists())
+
     def test_remove_last_member_without_owner_record(self):
         OrganizationOwner.objects.filter(organization=self.organization).delete()
 

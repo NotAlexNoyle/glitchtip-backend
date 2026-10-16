@@ -12,6 +12,7 @@ from ninja import Router, Status
 from ninja.errors import HttpError
 from ninja.pagination import paginate
 
+from apps.organizations_ext.models import OrganizationOwner
 from apps.organizations_ext.utils import is_member_guard_violation
 from apps.shared.types import MeID
 from glitchtip.api.authentication import AuthHttpRequest
@@ -88,14 +89,14 @@ async def delete_user(request: AuthHttpRequest, user_id: MeID):
         raise Http404
     user_id = request.auth.user_id
     queryset = get_user_queryset(user_id=user_id)
+    # Owners of a live org may not delete their account. Soft-deleted orgs
+    # don't count: the org is gone to the user even while the async cleanup
+    # task, which can take a while, hasn't hard-deleted it yet.
+    live_owner_ids = OrganizationOwner.objects.filter(
+        organization__is_deleted=False
+    ).values("organization_user__user_id")
     try:
-        # exclude, not filter(isnull=True): the filter form matches a user as
-        # soon as ANY of their memberships lacks an owner record, letting an
-        # owner of one org delete their account through a plain membership in
-        # another and orphan the org they own.
-        result, _ = await queryset.exclude(
-            organizations_ext_organizationuser__organizationowner__isnull=False
-        ).adelete()
+        result, _ = await queryset.exclude(id__in=live_owner_ids).adelete()
     except IntegrityError as err:
         if is_member_guard_violation(err):
             raise HttpError(
