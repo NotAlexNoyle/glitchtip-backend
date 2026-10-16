@@ -10,7 +10,6 @@ from django.shortcuts import aget_object_or_404
 from django.utils import timezone
 from ninja import ModelSchema, Router
 
-from apps.organizations_ext.constants import OrganizationUserRole
 from apps.organizations_ext.models import (
     EventCounts,
     Organization,
@@ -311,12 +310,26 @@ async def stripe_billing_portal_session(
 
 @router.post("subscriptions/", response=CreateSubscriptionResponse, by_alias=True)
 async def stripe_create_subscription(request: AuthHttpRequest, payload: SubscriptionIn):
-    org_id = int(payload.organization)
+    """Deprecated: use POST subscriptions/{organization_id_or_slug}/."""
+    return await create_organization_subscription(
+        request, organization_id_or_slug=payload.organization, payload=payload
+    )
+
+
+@router.post(
+    "subscriptions/{slug:organization_id_or_slug}/",
+    response=CreateSubscriptionResponse,
+    by_alias=True,
+)
+@org_scoped(["org:admin"], Organization)
+async def create_organization_subscription(
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Organization],
+    organization_id_or_slug: str,
+    payload: PriceIDSchema,
+):
     organization = await aget_object_or_404(
-        Organization.objects.select_related("owner__organization_user__user"),
-        id=org_id,
-        organization_users__role=OrganizationUserRole.OWNER,
-        organization_users__user=request.auth.user_id,
+        qs.select_related("owner__organization_user__user")
     )
     # is_metered excludes the overage price, which also stores price=0 (its
     # cost lives in tiers) but is never a valid base plan.
