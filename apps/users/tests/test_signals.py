@@ -63,6 +63,13 @@ class TestAddUserToSocialAppOragnizationTestCase(TestCase):
         user_logged_in.send(sender=User, request=self.request, user=self.user)
         assert self.user in self.organization_1.users.all()
 
+    def test_user_is_not_added_to_soft_deleted_orgs(self):
+        self.organization_1.is_deleted = True
+        self.organization_1.save(update_fields=["is_deleted"])
+        user_logged_in.send(sender=User, request=self.request, user=self.user)
+        assert self.user not in self.organization_1.users.all()
+        assert self.user in self.organization_2.users.all()
+
     def test_global_social_apps(self):
         social_app = baker.make(SocialApp, provider="microsoft")
         baker.make(SocialAccount, user=self.user, provider=social_app.provider)

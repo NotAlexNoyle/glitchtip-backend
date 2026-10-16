@@ -25,6 +25,9 @@ async def add_user_to_socialapp_organization(request, user, **kwargs):
     )
     social_apps = (
         org_social_apps_for_provider(user_providers)
+        # A soft-deleted org may have no members left; joining would make
+        # this user its owner while it waits for cleanup.
+        .filter(organizationsocialapp__organization__is_deleted=False)
         .select_related("organizationsocialapp__organization")
         .prefetch_related(
             Prefetch(
