@@ -75,3 +75,29 @@ class UptimeTokenScopeTests(APIPermissionTestCase):
         self.assertGetReqStatusCode(self.list_url, 403)
         self.auth_token.add_permission("org:read")
         self.assertGetReqStatusCode(self.list_url, 200)
+
+    def test_writes_accept_project_admin(self):
+        self.auth_token.add_permission("project:admin")
+        org = self.organization.slug
+        monitor = {
+            "monitorType": "Ping",
+            "name": "m",
+            "url": "https://example.com",
+            "expectedStatus": 200,
+            "expectedBody": "",
+            "interval": 60,
+            "timeout": 25,
+        }
+        res = self.client.post(
+            reverse("api:create_monitor", args=[org]),
+            monitor,
+            content_type="application/json",
+            **self.get_headers(),
+        )
+        self.assertEqual(res.status_code, 201)
+        detail = reverse("api:update_monitor", args=[org, res.json()["id"]])
+        self.assertPutReqStatusCode(detail, monitor, 200)
+        self.assertDeleteReqStatusCode(detail, 204)
+        self.assertPostReqStatusCode(
+            reverse("api:create_status_page", args=[org]), {"name": "s"}, 201
+        )

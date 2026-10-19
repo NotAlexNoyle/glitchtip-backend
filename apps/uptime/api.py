@@ -374,7 +374,7 @@ async def get_monitor(
     response={201: MonitorSchema},
     by_alias=True,
 )
-@org_scoped(["project:write"], Organization)
+@org_scoped(["project:write", "project:admin"], Organization)
 async def create_monitor(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -411,7 +411,7 @@ async def create_monitor(
     response=MonitorSchema,
     by_alias=True,
 )
-@org_scoped(["project:write"], Monitor)
+@org_scoped(["project:write", "project:admin"], Monitor)
 async def update_monitor(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Monitor],
@@ -496,7 +496,7 @@ async def list_status_pages(
     response={201: StatusPageSchema},
     by_alias=True,
 )
-@org_scoped(["project:write"], Organization)
+@org_scoped(["project:write", "project:admin"], Organization)
 async def create_status_page(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -516,7 +516,7 @@ async def create_status_page(
     "organizations/{slug:organization_id_or_slug}/monitors/{int:monitor_id}/",
     response={204: None},
 )
-@org_scoped(["project:write"], Monitor)
+@org_scoped(["project:write", "project:admin"], Monitor)
 async def delete_monitor(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Monitor],
