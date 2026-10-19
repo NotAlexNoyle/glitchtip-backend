@@ -1,4 +1,4 @@
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
@@ -257,26 +257,24 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
             ).exists()
         )
 
-    def log_in(self):
+    def log_in_as_owner(self):
         self.create_logged_in_user()
+        self.org_user.role = OrganizationUserRole.OWNER
+        self.org_user.save()
         self.organization.slug = self.org_name
         self.organization.save()
 
     def post_import(self):
         return self.client.post(
-            reverse("api:importer"),
-            {
-                "url": self.url,
-                "authToken": self.auth_token,
-                "organizationSlug": self.org_name,
-            },
+            reverse("api:import_organization", args=[self.org_name]),
+            {"url": self.url, "authToken": self.auth_token, "organizationSlug": "org"},
             content_type="application/json",
         )
 
     @mock_aiohttp()
     def test_view(self, m):
         """Web imports don't copy keys; the project keeps the one it was created with."""
-        self.log_in()
+        self.log_in_as_owner()
         self.set_mocks(m)
         res = self.post_import()
         self.assertEqual(res.status_code, 200)
@@ -299,7 +297,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         other_team = baker.make("teams.Team", organization=other_org, slug="team")
         other_member = other_org.add_user(baker.make("users.User"))
         other_org.add_user(baker.make("users.User"))
-        self.log_in()
+        self.log_in_as_owner()
         self.set_mocks(
             m,
             org_users=[{**test_org_user, "id": str(other_member.id)}],
@@ -330,7 +328,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
     @mock_aiohttp()
     def test_view_keeps_the_remote_slug_when_it_differs_from_the_name(self, m):
         """A renamed project keeps its slug, so re-imports match it and teams link."""
-        self.log_in()
+        self.log_in_as_owner()
         for _ in range(2):
             self.set_mocks(m, project=renamed_project)
             self.assertEqual(self.post_import().status_code, 200)
@@ -343,7 +341,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
 
     @mock_aiohttp()
     def test_view_does_not_keep_a_reserved_slug(self, m):
-        self.log_in()
+        self.log_in_as_owner()
         self.set_mocks(m, project={"id": "1", "slug": "new", "name": "Backend"})
 
         self.assertEqual(self.post_import().status_code, 200)
@@ -359,7 +357,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
 
         A linked team's members would start getting the project's alerts.
         """
-        self.log_in()
+        self.log_in_as_owner()
         Project.objects.filter(pk=self.project.pk).update(slug=test_project["slug"])
         self.set_mocks(m, project={**test_project, "name": "Renamed"})
 
@@ -375,7 +373,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
     @mock_aiohttp()
     def test_view_leaves_an_existing_team_unchanged(self, m):
         """Importing would replace a matched team's members and projects."""
-        self.log_in()
+        self.log_in_as_owner()
         self.team.slug = "team"
         self.team.save()
         self.team.members.add(self.org_user)
@@ -387,11 +385,12 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         self.assertEqual(list(self.team.projects.all()), [self.project])
 
     @mock_aiohttp()
-    def test_view_caps_roles_and_skips_existing_members(self, m):
-        """An import can't grant above the importer's role, or edit a member."""
-        self.log_in()
-        self.org_user.role = OrganizationUserRole.MANAGER
-        self.org_user.save()
+    def test_run_caps_roles_and_skips_existing_members(self, m):
+        """An import can't grant above max_role, or edit a member.
+
+        The route is owner-only, so max_role is set here directly.
+        """
+        self.log_in_as_owner()
         invite = baker.make(
             "organizations_ext.OrganizationUser",
             organization=self.organization,
@@ -406,9 +405,12 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
             ],
         )
 
-        res = self.post_import()
+        importer = GlitchTipImporter(self.url, self.auth_token, "org")
+        async_to_sync(importer.run)(
+            organization_id=self.organization.id,
+            max_role=OrganizationUserRole.MANAGER,
+        )
 
-        self.assertEqual(res.status_code, 200)
         self.assertEqual(
             OrganizationUser.objects.get(email="new@example.com").role,
             OrganizationUserRole.MANAGER,
@@ -416,7 +418,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         invite.refresh_from_db()
         self.assertEqual(invite.role, OrganizationUserRole.MEMBER)
         self.org_user.refresh_from_db()
-        self.assertEqual(self.org_user.role, OrganizationUserRole.MANAGER)
+        self.assertEqual(self.org_user.role, OrganizationUserRole.OWNER)
         self.assertFalse(
             OrganizationUser.objects.filter(email=self.user.email).exists()
         )
@@ -424,7 +426,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
     @mock_aiohttp()
     def test_view_matches_emails_ignoring_case(self, m):
         """Foo@x.com and foo@x.com are one person: one membership, linked to teams."""
-        self.log_in()
+        self.log_in_as_owner()
         shouted = self.user.email.upper()
         self.set_mocks(
             m,
@@ -448,7 +450,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
 
     @mock_aiohttp()
     def test_view_with_no_teams_or_no_projects(self, m):
-        self.log_in()
+        self.log_in_as_owner()
         for projects in ([test_project], []):
             with self.subTest(projects=len(projects)):
                 m.get(self.url + "/api/0/", payload={"user": {"username": "foo"}})
@@ -468,7 +470,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
     @mock_aiohttp()
     def test_view_refuses_a_deleted_project_slug(self, m):
         """A deleted project still holds its slug; importing into it would vanish."""
-        self.log_in()
+        self.log_in_as_owner()
         deleted = baker.make(
             "projects.Project", organization=self.organization, is_deleted=True
         )
@@ -490,7 +492,7 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         The endpoint takes an auth token for another server, so who is refused
         matters less than when: the refusal has to land before anything is sent.
         Registering no response asserts that -- any outbound request would
-        raise. Membership alone is not enough either; the view demands admin.
+        raise. Membership alone is not enough either; the view demands owner.
         """
         await sync_to_async(self.create_logged_in_user)()
         await self.async_client.aforce_login(self.user)
@@ -511,10 +513,20 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         res = await self.async_client.post(url, data, content_type="application/json")
         self.assertEqual(res.status_code, 404)
 
-        # A member of it, but not an admin of it.
-        await other_org.aadd_user(self.user)
-        res = await self.async_client.post(url, data, content_type="application/json")
-        self.assertEqual(res.status_code, 404)
+        # A member of it, but not its owner.
+        org_user = await other_org.aadd_user(self.user)
+        for role in (
+            OrganizationUserRole.MEMBER,
+            OrganizationUserRole.ADMIN,
+            OrganizationUserRole.MANAGER,
+        ):
+            with self.subTest(role=role.label):
+                org_user.role = role
+                await org_user.asave()
+                res = await self.async_client.post(
+                    url, data, content_type="application/json"
+                )
+                self.assertEqual(res.status_code, 403)
 
         self.assertEqual(m.requests, [])
 
