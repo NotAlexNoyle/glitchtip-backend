@@ -349,12 +349,20 @@ async def update_user_notification_alerts(
     if alert_status not in [1, 0, -1]:
         raise ValidationError("Invalid status, must be -1, 0, or 1")
 
-    alert = await UserProjectAlert.objects.filter(
-        user_id=user_id, project_id=project_id
-    ).afirst()
+    # A non-numeric key would make the id lookup raise.
+    if not (
+        project_id.isascii()
+        and project_id.isdigit()
+        and await Project.undeleted_objects.filter(
+            id=project_id, organization__users=user_id
+        ).aexists()
+    ):
+        raise Http404
+
     if alert_status == -1:
-        if alert:
-            await alert.adelete()
+        await UserProjectAlert.objects.filter(
+            user_id=user_id, project_id=project_id
+        ).adelete()
     else:
         await UserProjectAlert.objects.aupdate_or_create(
             user_id=user_id, project_id=project_id, defaults={"status": alert_status}
