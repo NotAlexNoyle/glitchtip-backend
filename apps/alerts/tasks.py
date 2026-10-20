@@ -12,6 +12,9 @@ from glitchtip.partition_manager import UUID7Helper
 from .constants import ISSUE_IDS_KEY
 from .models import Notification, ProjectAlert
 
+# Covers the delay between two runs beyond ALERT_NOTIFICATION_INTERVAL
+ALERT_WINDOW_GRACE_SECONDS = 10
+
 # Lua script for atomic smembers + del
 LUA_SCRIPT = """
 local members = redis.call('SMEMBERS', KEYS[1])
@@ -50,7 +53,12 @@ async def process_event_alerts():
         ).distinct()
 
     async for alert in project_alerts:
-        start_time = now - timedelta(minutes=alert.timespan_minutes)
+        # Runs start slightly more than ALERT_NOTIFICATION_INTERVAL apart (the scheduler checks once per
+        # second, then the task waits in the queue). Without a grace period an event received just after
+        # a run is older than the timespan at the next one and never alerts.
+        start_time = now - timedelta(
+            minutes=alert.timespan_minutes, seconds=ALERT_WINDOW_GRACE_SECONDS
+        )
         # Pruning partition optimization
         start_uuid = UUID7Helper._uuid7_for_timestamp(start_time, min_random=True)
         quantity_in_timespan = alert.quantity

@@ -152,6 +152,43 @@ class AlertTestCase(GlitchTipTransactionTestCase):
         process_event_alerts.call()
         self.assertEqual(Notification.objects.count(), 1)
 
+    def _alert_after_run(self, event_after_run_seconds):
+        """Runs start slightly more than ALERT_NOTIFICATION_INTERVAL apart: the scheduler checks once per
+        second whether the interval has passed. Here 60.8 s, for the default of 60 s."""
+        baker.make(
+            "alerts.ProjectAlert",
+            project=self.project,
+            timespan_minutes=1,
+            quantity=1,
+        )
+        issue = baker.make("issue_events.Issue", project=self.project)
+
+        with freeze_time(self.now):
+            process_event_alerts.call()  # run N
+
+        with freeze_time(self.now + timedelta(seconds=event_after_run_seconds)):
+            baker.make(
+                "issue_events.IssueEvent",
+                issue=issue,
+                organization=issue.project.organization,
+            )
+
+        with freeze_time(self.now + timedelta(seconds=60.8)):
+            process_event_alerts.call()  # run N+1
+
+        with freeze_time(self.now + timedelta(seconds=121.6)):
+            process_event_alerts.call()  # run N+2
+
+        return Notification.objects.count()
+
+    def test_alert_for_an_event_right_after_a_run(self):
+        # The event is 60.5 s old at run N+1, more than the 1 minute timespan
+        self.assertEqual(self._alert_after_run(0.3), 1)
+
+    def test_alert_for_an_event_a_second_after_a_run(self):
+        # The event is 59.8 s old at run N+1, inside the 1 minute timespan
+        self.assertEqual(self._alert_after_run(1.0), 1)
+
     def test_multiple_alerts(self):
         baker.make(
             "alerts.ProjectAlert",
