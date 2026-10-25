@@ -6,5 +6,5 @@
 # Test fixture, not a shipped artifact. On a version bump rebuild and push to
 # registry.gitlab.com/glitchtip/glitchtip-backend/garage, then update the tag
 # here, in .gitlab-ci.yml and in compose.s3.yml.
-FROM dxflrs/garage:v2.4.1
+FROM dxflrs/garage:v2.5.0
 COPY garage.toml /etc/garage.toml
