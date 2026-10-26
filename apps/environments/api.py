@@ -31,7 +31,7 @@ Visibility = Literal["all", "hidden", "visible"]
     "organizations/{slug:organization_id_or_slug}/environments/",
     response=list[EnvironmentSchema],
 )
-@org_scoped_list(["org:read", "org:write", "org:admin"], Environment)
+@org_scoped_list(["org:read"], Environment)
 async def list_environments(
     request: OrgScopedHttpRequest,
     response: HttpResponse,
@@ -51,7 +51,7 @@ async def list_environments(
     response=list[EnvironmentProjectSchema],
     by_alias=True,
 )
-@org_scoped_list(["project:read", "project:write", "project:admin"], EnvironmentProject)
+@org_scoped_list(["project:read"], EnvironmentProject)
 async def list_environment_projects(
     request: OrgScopedHttpRequest,
     response: HttpResponse,

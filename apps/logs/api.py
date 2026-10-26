@@ -724,7 +724,7 @@ async def get_log_by_id(organization_id: int, log_id: UUID) -> LogEventRow | Non
     response=list[LogEventSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Organization)
+@org_scoped(["event:read"], Organization)
 async def list_logs(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -817,7 +817,7 @@ async def list_logs(
     response=LogEventSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Organization)
+@org_scoped(["event:read"], Organization)
 async def get_log(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -910,7 +910,7 @@ async def query_log_stats(
     response=LogStatsSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Organization)
+@org_scoped(["event:read"], Organization)
 async def get_log_stats(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -968,7 +968,7 @@ async def get_log_stats(
     response=list[LogResourceSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Organization)
+@org_scoped(["event:read"], Organization)
 async def list_log_resources(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],

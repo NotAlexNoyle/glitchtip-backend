@@ -83,7 +83,7 @@ class NPlusOneFilters(Schema):
     response=list[TransactionGroupSchema],
     by_alias=True,
 )
-@org_scoped_list(["event:read", "event:write", "event:admin"], TransactionGroup)
+@org_scoped_list(["event:read"], TransactionGroup)
 async def list_transaction_groups(
     request: OrgScopedHttpRequest,
     response: HttpResponse,
@@ -109,7 +109,7 @@ async def list_transaction_groups(
     response=TransactionGroupSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], TransactionGroup)
+@org_scoped(["event:read"], TransactionGroup)
 async def get_transaction_group(
     request: OrgScopedHttpRequest,
     qs: QuerySet[TransactionGroup],
@@ -124,7 +124,7 @@ async def get_transaction_group(
     response=list[SpanGroupSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], TransactionGroup)
+@org_scoped(["event:read"], TransactionGroup)
 async def list_transaction_spans(
     request: OrgScopedHttpRequest,
     qs: QuerySet[TransactionGroup],
@@ -153,7 +153,7 @@ async def list_transaction_spans(
     response=list[SpanGroupSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Organization)
+@org_scoped(["event:read"], Organization)
 async def list_span_groups(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -186,7 +186,7 @@ async def list_span_groups(
     response=list[NPlusOnePatternSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Organization)
+@org_scoped(["event:read"], Organization)
 async def list_n_plus_one_patterns(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -219,7 +219,7 @@ async def list_n_plus_one_patterns(
     response=list[TransactionTrendSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], TransactionGroup)
+@org_scoped(["event:read"], TransactionGroup)
 async def get_transaction_trend(
     request: OrgScopedHttpRequest,
     qs: QuerySet[TransactionGroup],

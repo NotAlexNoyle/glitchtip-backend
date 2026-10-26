@@ -411,7 +411,7 @@ async def create_deploy(
     response=list[DeploySchema],
     by_alias=True,
 )
-@org_scoped(["project:releases", "project:write", "project:admin"], Release)
+@org_scoped(["project:releases"], Release)
 async def list_deploys(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Release],
@@ -452,7 +452,7 @@ async def create_commits(
     response=list[CommitSchema],
     by_alias=True,
 )
-@org_scoped(["project:releases", "project:write", "project:admin"], Release)
+@org_scoped(["project:releases"], Release)
 async def list_commits(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Release],

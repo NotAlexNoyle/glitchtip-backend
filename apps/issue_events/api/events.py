@@ -208,7 +208,7 @@ async def _get_issue_event(request: AuthHttpRequest, issue: Issue, event_id: uui
 
 @router.get("/issues/{int:issue_id}/events/", response=list[IssueEventSchema])
 @paginate
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def list_issue_event(
     request: AuthHttpRequest, response: HttpResponse, issue_id: int
 ):
@@ -221,7 +221,7 @@ async def list_issue_event(
     response=list[IssueEventSchema],
 )
 @org_scoped_list(
-    ["event:read", "event:write", "event:admin"],
+    ["event:read"],
     IssueEvent,
     pagination=MissOnEmptyPagination,
 )
@@ -246,7 +246,7 @@ async def list_organization_issue_event(
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def get_latest_issue_event(request: AuthHttpRequest, issue_id: int):
     # Resolve issue first to get organization_id for hash partition pruning
     issue = await _resolve_issue(request, issue_id)
@@ -258,7 +258,7 @@ async def get_latest_issue_event(request: AuthHttpRequest, issue_id: int):
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def get_organization_latest_issue_event(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],
@@ -278,7 +278,7 @@ async def get_organization_latest_issue_event(
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def get_issue_event(request: AuthHttpRequest, issue_id: int, event_id: uuid.UUID):
     issue = await _resolve_issue(request, issue_id)
     return await _get_issue_event(request, issue, event_id)
@@ -289,7 +289,7 @@ async def get_issue_event(request: AuthHttpRequest, issue_id: int, event_id: uui
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def get_organization_issue_event(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],
@@ -310,7 +310,7 @@ async def get_organization_issue_event(
     response=list[IssueEventSchema],
     by_alias=True,
 )
-@org_scoped_list(["event:read", "event:write", "event:admin"], IssueEvent)
+@org_scoped_list(["event:read"], IssueEvent)
 async def list_project_issue_event(
     request: OrgScopedHttpRequest,
     response: HttpResponse,
@@ -336,7 +336,7 @@ async def list_project_issue_event(
     response=IssueEventDetailSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], IssueEvent)
+@org_scoped(["event:read"], IssueEvent)
 async def get_project_issue_event(
     request: OrgScopedHttpRequest,
     qs: QuerySet[IssueEvent],
@@ -405,7 +405,7 @@ async def get_project_issue_event(
     by_alias=True,
     exclude_none=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], IssueEvent)
+@org_scoped(["event:read"], IssueEvent)
 async def get_event_json(
     request: OrgScopedHttpRequest,
     qs: QuerySet[IssueEvent],

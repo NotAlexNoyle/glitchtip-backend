@@ -30,7 +30,7 @@ def get_queryset(request: AuthHttpRequest, issue_id: int):
     response=list[CommentSchema],
     by_alias=True,
 )
-@has_permission(["event:read", "event:admin"])
+@has_permission(["event:read"])
 @paginate
 async def list_comments(
     request: AuthHttpRequest, response: HttpResponse, issue_id: int
@@ -43,7 +43,7 @@ async def list_comments(
     response=list[CommentSchema],
     by_alias=True,
 )
-@org_scoped_list(["event:read", "event:admin"], Comment)
+@org_scoped_list(["event:read"], Comment)
 async def list_organization_comments(
     request: OrgScopedHttpRequest,
     response: HttpResponse,

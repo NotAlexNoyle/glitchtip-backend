@@ -81,7 +81,7 @@ async def list_projects(request: AuthHttpRequest, response: HttpResponse):
     response=ProjectOrganizationSchema,
     by_alias=True,
 )
-@org_scoped(["project:read", "project:write", "project:admin"], Project)
+@org_scoped(["project:read"], Project)
 async def get_project(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Project],
@@ -228,7 +228,7 @@ async def list_organization_projects(
     response=list[ProjectKeySchema],
     by_alias=True,
 )
-@org_scoped_list(["project:read", "project:write", "project:admin"], ProjectKey)
+@org_scoped_list(["project:read"], ProjectKey)
 async def list_project_keys(
     request: OrgScopedHttpRequest,
     response: HttpResponse,
@@ -245,7 +245,7 @@ async def list_project_keys(
     response=ProjectKeySchema,
     by_alias=True,
 )
-@org_scoped(["project:read", "project:write", "project:admin"], ProjectKey)
+@org_scoped(["project:read"], ProjectKey)
 async def get_project_key(
     request: OrgScopedHttpRequest,
     qs: QuerySet[ProjectKey],

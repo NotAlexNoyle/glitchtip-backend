@@ -19,7 +19,7 @@ from . import router
     by_alias=True,
 )
 @paginate
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def list_user_reports(
     request: AuthHttpRequest, response: HttpResponse, issue_id: int
 ):
@@ -34,7 +34,7 @@ async def list_user_reports(
     response=list[UserReportSchema],
     by_alias=True,
 )
-@org_scoped_list(["event:read", "event:write", "event:admin"], UserReport)
+@org_scoped_list(["event:read"], UserReport)
 async def list_organization_user_reports(
     request: OrgScopedHttpRequest,
     response: HttpResponse,

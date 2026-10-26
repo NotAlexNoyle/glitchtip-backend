@@ -294,7 +294,7 @@ async def create_dif_from_read_only_file(
 )
 @paginate
 # Gates the project rather than the list, so an unknown project stays a 404.
-@org_scoped(["project:read", "project:write", "project:admin"], Project)
+@org_scoped(["project:read"], Project)
 async def list_dsyms(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Project],

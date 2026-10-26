@@ -144,7 +144,7 @@ def create_linked_social_app(
     response=list[OrganizationSocialAppSchema],
     by_alias=True,
 )
-@org_scoped(["org:read", "org:write", "org:admin"], Organization)
+@org_scoped(["org:read"], Organization)
 async def list_organization_social_apps(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],

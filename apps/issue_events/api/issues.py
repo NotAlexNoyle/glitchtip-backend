@@ -169,7 +169,7 @@ async def _aggregate_tags(issue: Issue, key: str | None):
     response=IssueDetailSchema,
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def get_issue(request: AuthHttpRequest, issue_id: int):
     qs = await get_queryset(request.auth.user_id)
     qs = qs.annotate(
@@ -186,7 +186,7 @@ async def get_issue(request: AuthHttpRequest, issue_id: int):
     response=IssueDetailSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def get_organization_issue(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],
@@ -208,7 +208,7 @@ async def get_organization_issue(
     response=list[CommitSchema],
     by_alias=True,
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
     """Return commits from the release where this issue first appeared."""
     qs = await get_queryset(request.auth.user_id)
@@ -226,7 +226,7 @@ async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
     response=list[CommitSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def list_organization_issue_commits(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],
@@ -396,7 +396,7 @@ async def get_short_id_hit(
     response=ShortIdLookupSchema,
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def get_issue_by_short_id(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],
@@ -434,7 +434,7 @@ async def get_issue_by_short_id(
     by_alias=True,
 )
 @org_scoped_list(
-    ["event:read", "event:write", "event:admin"],
+    ["event:read"],
     Issue,
     pagination=MissOnEmptyPagination,
 )
@@ -695,7 +695,7 @@ async def bulk_update_issues(
     by_alias=True,
 )
 @org_scoped_list(
-    ["event:read", "event:write", "event:admin"],
+    ["event:read"],
     Issue,
     pagination=MissOnEmptyPagination,
 )
@@ -738,7 +738,7 @@ async def list_project_issues(
 @router.get(
     "/issues/{int:issue_id}/tags/", response=list[IssueTagSchema], by_alias=True
 )
-@has_permission(["event:read", "event:write", "event:admin"])
+@has_permission(["event:read"])
 async def list_issue_tags(
     request: AuthHttpRequest, issue_id: int, key: str | None = None
 ):
@@ -756,7 +756,7 @@ async def list_issue_tags(
     response=list[IssueTagSchema],
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def list_organization_issue_tags(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],
@@ -784,7 +784,7 @@ class IssueStatsFilters(Schema):
     summary="Retrieve Statistics for a Set of Issues",
     by_alias=True,
 )
-@org_scoped(["event:read", "event:write", "event:admin"], Issue)
+@org_scoped(["event:read"], Issue)
 async def issue_stats(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Issue],

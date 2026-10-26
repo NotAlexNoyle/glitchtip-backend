@@ -50,7 +50,7 @@ def get_timeseries(category, start, end, interval, project_ids):
 
 
 @router.get("organizations/{slug:organization_id_or_slug}/stats_v2/")
-@org_scoped(["org:read", "org:write", "org:admin"], Project)
+@org_scoped(["org:read"], Project)
 async def stats_v2(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Project],

@@ -63,7 +63,7 @@ GET /api/0/teams/{organization_slug}/{team_slug}/members/ (Not documented in sen
 
 @router.get("organizations/", response=list[OrganizationSchema], by_alias=True)
 @paginate
-@has_permission(["org:read", "org:write", "org:admin"])
+@has_permission(["org:read"])
 async def list_organizations(
     request: AuthHttpRequest,
     response: HttpResponse,
@@ -86,7 +86,7 @@ def organization_details(qs: QuerySet[Organization], user_id: int):
     response=OrganizationDetailSchema,
     by_alias=True,
 )
-@org_scoped(["org:read", "org:write", "org:admin"], Organization)
+@org_scoped(["org:read"], Organization)
 async def get_organization(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Organization],
@@ -163,7 +163,7 @@ async def delete_organization(
     response=list[OrganizationUserSchema],
     by_alias=True,
 )
-@org_scoped_list(["member:read", "member:write", "member:admin"], OrganizationUser)
+@org_scoped_list(["member:read"], OrganizationUser)
 async def list_organization_members(
     request: OrgScopedHttpRequest,
     response: HttpResponse,
@@ -177,7 +177,7 @@ async def list_organization_members(
     response=list[OrganizationUserSchema],
     by_alias=True,
 )
-@org_scoped_list(["member:read", "member:write", "member:admin"], OrganizationUser)
+@org_scoped_list(["member:read"], OrganizationUser)
 async def list_team_organization_members(
     request: OrgScopedHttpRequest,
     response: HttpResponse,
@@ -194,7 +194,7 @@ async def list_team_organization_members(
     response=OrganizationUserDetailSchema,
     by_alias=True,
 )
-@org_scoped(["member:read", "member:write", "member:admin"], OrganizationUser)
+@org_scoped(["member:read"], OrganizationUser)
 async def get_organization_member(
     request: OrgScopedHttpRequest,
     qs: QuerySet[OrganizationUser],

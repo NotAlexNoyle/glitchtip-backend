@@ -47,7 +47,7 @@ def get_project_alert_queryset(user_id: int, organization_slug: str, project_slu
     response=list[ProjectAlertSchema],
     by_alias=True,
 )
-@org_scoped_list(["project:read", "project:write", "project:admin"], ProjectAlert)
+@org_scoped_list(["project:read"], ProjectAlert)
 async def list_project_alerts(
     request: OrgScopedHttpRequest,
     response: HttpResponse,

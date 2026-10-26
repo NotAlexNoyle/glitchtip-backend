@@ -26,7 +26,7 @@ router = Router()
     response=list[RepositorySchema],
     by_alias=True,
 )
-@org_scoped_list(["org:read", "org:write", "org:admin"], Repository)
+@org_scoped_list(["org:read"], Repository)
 async def list_repositories(
     request: OrgScopedHttpRequest,
     response: HttpResponse,

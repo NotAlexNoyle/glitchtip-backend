@@ -76,7 +76,7 @@ def annotate_team_details(qs: QuerySet[Team], user_id: int, add_projects=True):
     response=TeamProjectSchema,
     by_alias=True,
 )
-@org_scoped(["team:read", "team:write", "team:admin"], Team)
+@org_scoped(["team:read"], Team)
 async def get_team(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Team],
@@ -131,7 +131,7 @@ async def delete_team(
     by_alias=True,
 )
 @org_scoped_list(
-    ["team:read", "team:write", "team:admin", "org:read", "org:write", "org:admin"],
+    ["team:read", "org:read"],
     Team,
 )
 async def list_teams(
@@ -264,7 +264,7 @@ async def delete_member_from_team(
     by_alias=True,
 )
 @org_scoped_list(
-    ["team:read", "team:write", "team:admin", "org:read", "org:write", "org:admin"],
+    ["team:read", "org:read"],
     Team,
 )
 async def list_project_teams(

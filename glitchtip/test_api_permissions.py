@@ -15,7 +15,7 @@ from ninja.pagination import paginate
 from ninja.testing import TestAsyncClient
 
 from apps.alerts.models import AlertRecipient, ProjectAlert
-from apps.organizations_ext.constants import OrganizationUserRole
+from apps.organizations_ext.constants import ROLES, OrganizationUserRole
 from apps.organizations_ext.models import Organization, OrganizationUser
 from apps.projects.models import Project
 from glitchtip.api.permissions import (
@@ -266,6 +266,61 @@ class OrgScopedDeclarationTestCase(SimpleTestCase):
                 self.assertLessEqual(expected, names)
 
 
+class RoleScopesTestCase(SimpleTestCase):
+    def test_every_role_holds_the_levels_below_its_scopes(self):
+        # So a read route listing only :read admits every role that can write.
+        below = {"write": ["read"], "admin": ["read", "write"]}
+        for role in ROLES:
+            for scope in role["scopes"]:
+                family, level = scope.split(":")
+                for lower in below.get(level, []):
+                    with self.subTest(role=role["id"], scope=scope):
+                        self.assertIn(f"{family}:{lower}", role["scopes"])
+
+
+class ReadScopeTestCase(TestCase):
+    """Reads take only :read, so a write-only token stays write-only."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = baker.make("users.user")
+        cls.org = baker.make("organizations_ext.Organization")
+        cls.org.add_user(cls.user, OrganizationUserRole.MEMBER)
+        project = baker.make("projects.Project", organization=cls.org)
+        cls.issue = baker.make("issue_events.Issue", project=project)
+        cls.token = baker.make("api_tokens.APIToken", user=cls.user)
+
+    def test_a_write_only_token_can_update_an_issue_but_not_read_it(self):
+        self.token.add_permission("event:write")
+        headers = {"authorization": f"Bearer {self.token.token}"}
+        urls = {
+            "has_permission": reverse(
+                "api:get_issue", kwargs={"issue_id": self.issue.id}
+            ),
+            "org_scoped": reverse(
+                "api:get_organization_issue", args=[self.org.id, self.issue.id]
+            ),
+        }
+        for label, url in urls.items():
+            with self.subTest(label):
+                res = self.client.get(url, headers=headers)
+                self.assertEqual(res.status_code, 403)
+
+        res = self.client.put(
+            urls["org_scoped"],
+            {"status": "resolved"},
+            content_type="application/json",
+            headers=headers,
+        )
+        self.assertEqual(res.status_code, 200)
+
+        self.token.add_permission("event:read")
+        for label, url in urls.items():
+            with self.subTest(label):
+                res = self.client.get(url, headers=headers)
+                self.assertEqual(res.status_code, 200)
+
+
 class _Id(Schema):
     id: int
 
@@ -455,6 +510,16 @@ class OrgScopedGateTestCase(TestCase):
         res = self.client.delete(self.delete_url(), headers=headers)
         self.assertEqual(res.status_code, 403)
         self.assertIn("token", res.json()["detail"])
+
+    def test_an_admin_only_token_can_delete_but_not_list(self):
+        self.set_role(OrganizationUserRole.ADMIN)
+        self.token.add_permission("project:admin")
+        headers = self.bearer()
+        res = self.client.get(self.list_url(), headers=headers)
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("token", res.json()["detail"])
+        res = self.client.delete(self.delete_url(), headers=headers)
+        self.assertEqual(res.status_code, 204)
 
     def test_token_cannot_grant_more_than_the_users_role(self):
         self.set_role(OrganizationUserRole.MEMBER)
