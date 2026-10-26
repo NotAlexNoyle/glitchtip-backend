@@ -1,4 +1,4 @@
-"""Startup validation for the folded gate's model registry.
+"""Startup validation for the folded gate's model registry and route scopes.
 
 These checks run on ``manage.py check``, ``runserver``, ``migrate``, and in
 the test runner, so an ``org_field`` that does not reach the organization
@@ -121,3 +121,72 @@ def check_org_scoped_models(app_configs, **kwargs) -> list[Error]:
         for check in (check_org_field, check_undeleted_through)
         if (error := check(model))
     ]
+
+
+def check_scope_levels(label: str, methods, scopes, view) -> list[Error]:
+    """A read names only :read scopes, and a write admitting X:write admits X:admin.
+
+    Tokens get no hierarchy: a scope counts only where a route lists it.
+    """
+    errors = []
+    higher = sorted(s for s in scopes if s.endswith((":write", ":admin")))
+    if "GET" in methods and higher:
+        errors.append(
+            Error(
+                f"{label} is a read but admits {higher}, so a token without "
+                "the matching :read scope can read it.",
+                hint="A read route lists only :read scopes.",
+                obj=view,
+                id="glitchtip.E005",
+            )
+        )
+    for scope in sorted(scopes):
+        family, _, level = scope.partition(":")
+        if level == "write" and f"{family}:admin" not in scopes:
+            errors.append(
+                Error(
+                    f"{label} admits {scope} but not {family}:admin, so a "
+                    "token holding only the admin scope is refused.",
+                    hint=f"List {family}:admin beside {scope}.",
+                    obj=view,
+                    id="glitchtip.E006",
+                )
+            )
+    return errors
+
+
+def route_scope_errors(routers, app_configs=None) -> list[Error]:
+    """Check the scope lists ``org_scoped`` and ``has_permission`` leave on views."""
+    modules = None if app_configs is None else tuple(c.name for c in app_configs)
+    errors = []
+    seen = set()
+    for prefix, router in routers:
+        for path, path_view in router.path_operations.items():
+            for operation in path_view.operations:
+                view = operation.view_func
+                # optional_slash registers one view under two paths.
+                key = (view, tuple(operation.methods))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if modules is not None and not view.__module__.startswith(modules):
+                    continue
+                route = f"{prefix}/{path.lstrip('/')}"
+                label = f"{'/'.join(operation.methods)} {route}"
+                for scopes in (
+                    getattr(view, "gate_scopes", None),
+                    getattr(view, "token_scopes", None),
+                ):
+                    if scopes:
+                        errors += check_scope_levels(
+                            label, operation.methods, scopes, view
+                        )
+    return errors
+
+
+@register(Tags.urls)
+def check_route_scopes(app_configs, **kwargs) -> list[Error]:
+    # The API imports every app's routes, so it can only load once apps are ready.
+    from .api.api import api
+
+    return route_scope_errors(api._routers, app_configs)

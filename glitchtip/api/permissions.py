@@ -199,6 +199,7 @@ def org_scoped(scopes: list[Scopes], model: type[OrgScopedModel]):
                 param for key, param in signature.parameters.items() if key != "qs"
             ]
         )
+        gated.gate_scopes = required  # read by glitchtip.checks
         return gated
 
     return decorator
@@ -237,6 +238,8 @@ def org_scoped_list(scopes: list[Scopes], model: type[OrgScopedModel], paginatio
                 raise TypeError(f"{view.__qualname__} must return a QuerySet")
             return scope.apply(result)
 
+        # Before paginate wraps it: @wraps copies the attribute outward.
+        gated.gate_scopes = required
         return paginate(pagination)(gated) if pagination else paginate(gated)
 
     return decorator
@@ -291,6 +294,8 @@ def has_permission(permissions: list[str]):
                     raise HttpError(403, "Permission denied")
             return await f(request, *args, **kwargs)
 
+        # Its own name: on a stacked route @wraps also copies the gate's.
+        decorated_function.token_scopes = frozenset(permissions)
         return decorated_function
 
     return decorator

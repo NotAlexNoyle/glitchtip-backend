@@ -22,6 +22,7 @@ from glitchtip.api.permissions import (
     NO_ORG_ID,
     OrgScope,
     _resolve_roles,
+    has_permission,
     org_scoped,
     org_scoped_list,
     resolve_org_id,
@@ -30,8 +31,10 @@ from glitchtip.base_models import ORG_SCOPED_MODELS, OrgScopedModel
 from glitchtip.checks import (
     check_org_field,
     check_org_scoped_models,
+    check_route_scopes,
     check_undeleted_through,
     registered_models,
+    route_scope_errors,
 )
 from glitchtip.test_utils import generators  # noqa: F401
 
@@ -276,6 +279,58 @@ class RoleScopesTestCase(SimpleTestCase):
                 for lower in below.get(level, []):
                     with self.subTest(role=role["id"], scope=scope):
                         self.assertIn(f"{family}:{lower}", role["scopes"])
+
+
+class RouteScopeCheckTestCase(SimpleTestCase):
+    """Scope lists that break the levels fail at startup."""
+
+    def error_ids(self, router):
+        return [error.id for error in route_scope_errors([("0", router)])]
+
+    def test_the_real_routes_pass(self):
+        self.assertEqual(check_route_scopes(None), [])
+
+    def test_a_read_that_admits_write_or_admin_is_rejected(self):
+        router = Router()
+
+        @router.get("/{organization_id_or_slug}/a/")
+        @has_permission(["event:read", "event:write", "event:admin"])
+        async def token_read(request, organization_id_or_slug: str):
+            pass
+
+        @router.get("/{organization_id_or_slug}/b/")
+        @org_scoped_list(["project:read", "project:admin"], ProjectAlert)
+        async def gated_read(request, organization_id_or_slug: str):
+            pass
+
+        self.assertEqual(self.error_ids(router), ["glitchtip.E005"] * 2)
+
+    def test_a_write_that_admits_write_but_not_admin_is_rejected(self):
+        router = Router()
+
+        # The gate under a stacked has_permission is still checked.
+        @router.post("/{organization_id_or_slug}/")
+        @has_permission(["member:admin"])
+        @org_scoped(["project:write"], ProjectAlert)
+        async def stacked_write(request, qs, organization_id_or_slug: str):
+            pass
+
+        self.assertEqual(self.error_ids(router), ["glitchtip.E006"])
+
+    def test_reads_of_read_and_writes_with_admin_pass(self):
+        router = Router()
+
+        @router.get("/{organization_id_or_slug}/")
+        @has_permission(["event:read"])
+        async def read(request, organization_id_or_slug: str):
+            pass
+
+        @router.post("/{organization_id_or_slug}/")
+        @org_scoped(["event:write", "event:admin"], ProjectAlert)
+        async def write(request, qs, organization_id_or_slug: str):
+            pass
+
+        self.assertEqual(self.error_ids(router), [])
 
 
 class ReadScopeTestCase(TestCase):
