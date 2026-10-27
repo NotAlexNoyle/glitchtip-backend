@@ -40,7 +40,7 @@ from ..schema import (
 from ..services import (
     IssueFilters,
     filter_issue_list,
-    get_queryset,
+    issue_org_segment,
     sort_options,
     with_issue_details,
 )
@@ -164,21 +164,20 @@ async def _aggregate_tags(issue: Issue, key: str | None):
     ]
 
 
+# GitLab error tracking calls this route, and it never sends an org.
 @router.get(
     "/issues/{int:issue_id}/",
     response=IssueDetailSchema,
     by_alias=True,
+    deprecated=True,
 )
 @has_permission(["event:read"])
 async def get_issue(request: AuthHttpRequest, issue_id: int):
-    qs = await get_queryset(request.auth.user_id)
-    qs = qs.annotate(
-        user_report_count=Count("userreport", distinct=True),
+    return await get_organization_issue(
+        request,
+        organization_id_or_slug=await issue_org_segment(issue_id),
+        issue_id=issue_id,
     )
-    try:
-        return await qs.filter(id=issue_id).aget()
-    except Issue.DoesNotExist:
-        raise Http404()
 
 
 @router.get(
@@ -204,24 +203,6 @@ async def get_organization_issue(
 
 
 @router.get(
-    "/issues/{int:issue_id}/commits/",
-    response=list[CommitSchema],
-    by_alias=True,
-)
-@has_permission(["event:read"])
-async def list_issue_commits(request: AuthHttpRequest, issue_id: int):
-    """Return commits from the release where this issue first appeared."""
-    qs = await get_queryset(request.auth.user_id)
-    try:
-        issue = await qs.select_related("first_release").filter(id=issue_id).aget()
-    except Issue.DoesNotExist:
-        raise Http404()
-    if not issue.first_release_id:
-        return []
-    return issue.first_release.data.get("commits", [])
-
-
-@router.get(
     "/organizations/{slug:organization_id_or_slug}/issues/{int:issue_id}/commits/",
     response=list[CommitSchema],
     by_alias=True,
@@ -243,10 +224,12 @@ async def list_organization_issue_commits(
     return issue.first_release.data.get("commits", [])
 
 
+# GitLab error tracking calls this route, and it never sends an org.
 @router.put(
     "/issues/{int:issue_id}/",
     response=IssueDetailSchema,
     by_alias=True,
+    deprecated=True,
 )
 @has_permission(["event:write", "event:admin"])
 async def update_issue(
@@ -254,19 +237,12 @@ async def update_issue(
     issue_id: int,
     payload: UpdateIssueSchema,
 ):
-    qs = await get_queryset(request.auth.user_id)
-    return await update_issue_status(qs, issue_id, payload)
-
-
-@router.delete("/issues/{int:issue_id}/", response={204: None})
-@has_permission(["event:write", "event:admin"])
-async def delete_issue(request: AuthHttpRequest, issue_id: int):
-    qs = await get_queryset(request.auth.user_id)
-    result = await qs.filter(id=issue_id).aupdate(is_deleted=True)
-    if not result:
-        raise Http404()
-    await delete_issue_task.aenqueue([issue_id])
-    return Status(204, None)
+    return await update_organization_issue(
+        request,
+        organization_id_or_slug=await issue_org_segment(issue_id),
+        issue_id=issue_id,
+        payload=payload,
+    )
 
 
 @router.delete(
@@ -733,22 +709,6 @@ async def list_project_issues(
     return filter_issue_list(
         qs, filters, sort, event_id, organization_id=request.org_scope.org_id
     )
-
-
-@router.get(
-    "/issues/{int:issue_id}/tags/", response=list[IssueTagSchema], by_alias=True
-)
-@has_permission(["event:read"])
-async def list_issue_tags(
-    request: AuthHttpRequest, issue_id: int, key: str | None = None
-):
-    qs = await get_queryset(request.auth.user_id)
-    try:
-        issue = await qs.filter(id=issue_id).aget()
-    except Issue.DoesNotExist:
-        raise Http404()
-
-    return await _aggregate_tags(issue, key)
 
 
 @router.get(

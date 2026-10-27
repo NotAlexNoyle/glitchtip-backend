@@ -759,8 +759,12 @@ class ColdEventSlotDegradationTestCase(TestCase):
         self.addCleanup(gcs._duckdb_semaphore.release)
 
         url = reverse(
-            "api:get_issue_event",
-            kwargs={"issue_id": issue.id, "event_id": uuid4()},
+            "api:get_organization_issue_event",
+            kwargs={
+                "organization_id_or_slug": org.slug,
+                "issue_id": issue.id,
+                "event_id": uuid4(),
+            },
         )
         res = self.client.get(url)
 

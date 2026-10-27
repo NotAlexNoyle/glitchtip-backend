@@ -84,6 +84,20 @@ _SORT_FIELD_MAP = {
 }
 
 
+async def issue_org_segment(issue_id: int) -> str:
+    """The org path segment for an issue, for legacy routes with no org in the path.
+
+    No membership check: the org route's gate does that. A miss is "0", which
+    the gate answers like any org the caller isn't in.
+    """
+    org_id = await (
+        Issue.objects.filter(id=issue_id)
+        .values_list("project__organization_id", flat=True)
+        .afirst()
+    )
+    return str(org_id or 0)
+
+
 async def get_queryset(
     user_id: int | None,
     organization_slug: str | None = None,

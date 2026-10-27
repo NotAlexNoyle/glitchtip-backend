@@ -6,14 +6,15 @@ from apps.organizations_ext.constants import OrganizationUserRole
 from glitchtip.test_utils.test_case import APIPermissionTestCase, GlitchTipTestCaseMixin
 
 
-def get_issue_event_url(issue_id: int, event_id: str) -> str:
+def get_issue_event_url(organization_slug: str, issue_id: int, event_id: str) -> str:
     return reverse(
-        "api:get_issue_event", kwargs={"issue_id": issue_id, "event_id": event_id}
+        "api:get_organization_issue_event",
+        kwargs={
+            "organization_id_or_slug": organization_slug,
+            "issue_id": issue_id,
+            "event_id": event_id,
+        },
     )
-
-
-def list_user_reports_url(issue_id: int) -> str:
-    return reverse("api:list_user_reports", kwargs={"issue_id": issue_id})
 
 
 def list_organization_user_reports_url(organization_slug: str, issue_id: int) -> str:
@@ -42,7 +43,9 @@ class IssuesUserReportTestCase(GlitchTipTestCaseMixin, TestCase):
         )
 
     async def test_events_user_report(self):
-        url = get_issue_event_url(self.event.issue_id, self.event.id.hex)
+        url = get_issue_event_url(
+            self.organization.slug, self.event.issue_id, self.event.id.hex
+        )
 
         res = await self.async_client.get(url)
         self.assertContains(res, self.user_report.email)
@@ -60,7 +63,9 @@ class IssuesUserReportTestCase(GlitchTipTestCaseMixin, TestCase):
             issue=event2.issue,
             event_id=event2.id.hex,
         )
-        url = list_user_reports_url(self.event.issue.id)
+        url = list_organization_user_reports_url(
+            self.organization.slug, self.event.issue.id
+        )
         res = await self.async_client.get(url)
         self.assertContains(res, self.user_report.email)
         self.assertNotContains(res, user_report2.email)
@@ -115,7 +120,9 @@ class UserReportAPIPermissionTests(APIPermissionTestCase):
         self.user_report = baker.make(
             "issue_events.UserReport", project=self.project, issue=self.issue
         )
-        self.list_url = list_user_reports_url(self.issue.id)
+        self.list_url = list_organization_user_reports_url(
+            self.organization.slug, self.issue.id
+        )
 
     def test_list(self):
         self.assertGetReqStatusCode(self.list_url, 403)

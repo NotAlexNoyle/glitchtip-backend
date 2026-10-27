@@ -878,10 +878,14 @@ class IssueAPITestCase(GlitchTestCase):
         issue = await baker.amake("issue_events.Issue", project=self.project)
         not_my_issue = await baker.amake("issue_events.Issue")
 
-        res = await self.async_client.delete(get_issue_url(issue.id))
+        res = await self.async_client.delete(
+            get_organization_issue_url(self.organization.slug, issue.id)
+        )
         self.assertEqual(res.status_code, 204)
 
-        res = await self.async_client.delete(get_issue_url(not_my_issue.id))
+        res = await self.async_client.delete(
+            get_organization_issue_url(self.organization.slug, not_my_issue.id)
+        )
         self.assertEqual(res.status_code, 404)
 
     async def test_organizations_issue_update(self):
@@ -1784,7 +1788,13 @@ class IssueCommitsAPITestCase(GlitchTestCase):
         issue = await baker.amake(
             "issue_events.Issue", project=self.project, short_id=1
         )
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:list_organization_issue_commits",
+            kwargs={
+                "organization_id_or_slug": self.organization.slug,
+                "issue_id": issue.id,
+            },
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
@@ -1799,7 +1809,13 @@ class IssueCommitsAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:list_organization_issue_commits",
+            kwargs={
+                "organization_id_or_slug": self.organization.slug,
+                "issue_id": issue.id,
+            },
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
@@ -1830,7 +1846,13 @@ class IssueCommitsAPITestCase(GlitchTestCase):
             short_id=1,
             first_release=release,
         )
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": issue.id})
+        url = reverse(
+            "api:list_organization_issue_commits",
+            kwargs={
+                "organization_id_or_slug": self.organization.slug,
+                "issue_id": issue.id,
+            },
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -1841,7 +1863,13 @@ class IssueCommitsAPITestCase(GlitchTestCase):
         self.assertEqual(data[1]["id"], "def456")
 
     async def test_list_issue_commits_not_found(self):
-        url = reverse("api:list_issue_commits", kwargs={"issue_id": 99999})
+        url = reverse(
+            "api:list_organization_issue_commits",
+            kwargs={
+                "organization_id_or_slug": self.organization.slug,
+                "issue_id": 99999,
+            },
+        )
         res = await self.async_client.get(url)
         self.assertEqual(res.status_code, 404)
 
@@ -1873,7 +1901,13 @@ class IssueEventTagsAPITestCase(GlitchTestCase):
         self.async_client.force_login(self.user)
 
     def get_url(self, issue_id: int) -> str:
-        return reverse("api:list_issue_tags", kwargs={"issue_id": issue_id})
+        return reverse(
+            "api:list_organization_issue_tags",
+            kwargs={
+                "organization_id_or_slug": str(self.organization.id),
+                "issue_id": issue_id,
+            },
+        )
 
     async def test_issue_tags(self):
         issue = await baker.amake("issue_events.Issue", project=self.project)
@@ -2541,3 +2575,96 @@ class ProjectBulkUpdateAPITestCase(GlitchTestCase):
             other_org_url, {"status": "resolved"}, content_type="application/json"
         )
         self.assertEqual(res.status_code, 404)
+
+
+class LegacyIssueRouteTestCase(GlitchTestCase):
+    """The org-less routes GitLab's Sentry integration calls go through the org gate."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.create_user()
+
+    def setUp(self):
+        self.async_client.force_login(self.user)
+
+    def get_url(self, issue_id: int) -> str:
+        return reverse("api:get_issue", kwargs={"issue_id": issue_id})
+
+    def latest_url(self, issue_id: int) -> str:
+        return reverse("api:get_latest_issue_event", kwargs={"issue_id": issue_id})
+
+    async def test_retrieve_matches_org_route(self):
+        issue = await amake_issue(project=self.project, short_id=1)
+        org_url = reverse(
+            "api:get_organization_issue",
+            kwargs={
+                "organization_id_or_slug": self.organization.slug,
+                "issue_id": issue.id,
+            },
+        )
+        res = await self.async_client.get(self.get_url(issue.id))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), (await self.async_client.get(org_url)).json())
+
+    async def test_missing_and_foreign_issue_look_alike(self):
+        foreign_issue = await amake_issue()
+        for url in [self.get_url(foreign_issue.id), self.get_url(2**31 - 1)]:
+            res = await self.async_client.get(url)
+            self.assertEqual(res.status_code, 404)
+            self.assertEqual(res.json(), {"detail": "Organization not found."})
+
+    async def test_soft_deleted_issue(self):
+        issue = await amake_issue(project=self.project, is_deleted=True)
+        await baker.amake(
+            "issue_events.IssueEvent", issue=issue, organization=self.organization
+        )
+        res = await self.async_client.get(self.get_url(issue.id))
+        self.assertEqual(res.status_code, 404)
+        res = await self.async_client.get(self.latest_url(issue.id))
+        self.assertEqual(res.status_code, 404)
+        res = await self.async_client.put(
+            self.get_url(issue.id),
+            {"status": "resolved"},
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 404)
+
+    async def test_deleted_organization(self):
+        issue = await amake_issue(project=self.project)
+        self.organization.is_deleted = True
+        await self.organization.asave(update_fields=["is_deleted"])
+        res = await self.async_client.get(self.get_url(issue.id))
+        self.assertEqual(res.status_code, 404)
+
+    async def test_latest_event(self):
+        issue = await amake_issue(project=self.project)
+        event = await baker.amake(
+            "issue_events.IssueEvent", issue=issue, organization=self.organization
+        )
+        res = await self.async_client.get(self.latest_url(issue.id))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["id"], event.id.hex)
+
+
+class LegacyIssueRouteTokenTestCase(APIPermissionTestCase):
+    """GitLab authenticates with an API token."""
+
+    def setUp(self):
+        self.create_org_team_project()
+        self.set_client_credentials(self.auth_token.token)
+        self.issue = make_issue(project=self.project)
+        self.url = reverse("api:get_issue", kwargs={"issue_id": self.issue.id})
+
+    def test_retrieve(self):
+        self.assertGetReqStatusCode(self.url, 403)
+        self.auth_token.add_permission("event:read")
+        self.assertGetReqStatusCode(self.url, 200)
+
+    def test_resolve(self):
+        data = {"status": "resolved"}
+        self.auth_token.add_permission("event:read")
+        self.assertPutReqStatusCode(self.url, data, 403)
+        self.auth_token.add_permission("event:write")
+        self.assertPutReqStatusCode(self.url, data, 200)
+        self.issue.index.refresh_from_db()
+        self.assertEqual(self.issue.status, EventStatus.RESOLVED)
