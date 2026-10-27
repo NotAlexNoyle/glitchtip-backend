@@ -155,6 +155,20 @@ def check_scope_levels(label: str, methods, scopes, view) -> list[Error]:
     return errors
 
 
+def declared_scopes(view) -> set[frozenset]:
+    """The scope list each decorator layer of a view declares.
+
+    Read layer by layer down ``__wrapped__``: ``@wraps`` also copies an inner
+    layer's list onto the outer one, which the set folds away.
+    """
+    found = set()
+    while view is not None:
+        if scopes := vars(view).get("route_scopes"):
+            found.add(scopes)
+        view = getattr(view, "__wrapped__", None)
+    return found
+
+
 def route_scope_errors(routers, app_configs=None) -> list[Error]:
     """Check the scope lists ``org_scoped`` and ``has_permission`` leave on views."""
     modules = None if app_configs is None else tuple(c.name for c in app_configs)
@@ -173,14 +187,8 @@ def route_scope_errors(routers, app_configs=None) -> list[Error]:
                     continue
                 route = f"{prefix}/{path.lstrip('/')}"
                 label = f"{'/'.join(operation.methods)} {route}"
-                for scopes in (
-                    getattr(view, "gate_scopes", None),
-                    getattr(view, "token_scopes", None),
-                ):
-                    if scopes:
-                        errors += check_scope_levels(
-                            label, operation.methods, scopes, view
-                        )
+                for scopes in declared_scopes(view):
+                    errors += check_scope_levels(label, operation.methods, scopes, view)
     return errors
 
 
