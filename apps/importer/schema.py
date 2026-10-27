@@ -1,5 +1,5 @@
 from django.conf import settings
-from pydantic import HttpUrl, field_validator
+from pydantic import Field, HttpUrl, field_validator
 
 from glitchtip.schema import CamelSchema
 from glitchtip.url_validation import validate_public_url
@@ -8,7 +8,10 @@ from glitchtip.url_validation import validate_public_url
 class ImportIn(CamelSchema):
     url: HttpUrl
     auth_token: str
-    organization_slug: str
+    organization_slug: str = Field(
+        description="The organization's slug on the remote server. The deprecated "
+        "POST import/ also reads it as the local organization."
+    )
 
     @field_validator("url")
     @classmethod

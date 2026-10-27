@@ -272,6 +272,30 @@ class ImporterTestCase(GlitchTipTestCaseMixin, TestCase):
         )
 
     @mock_aiohttp()
+    def test_deprecated_route(self, m):
+        """The body names the local org too; owners only, as on the new route."""
+        self.log_in_as_owner()
+        url = reverse("api:importer")
+        data = {
+            "url": self.url,
+            "authToken": self.auth_token,
+            "organizationSlug": self.org_name,
+        }
+        self.set_mocks(m)
+        res = self.client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(
+            Project.objects.filter(
+                organization=self.organization, slug=test_project["slug"]
+            ).exists()
+        )
+
+        self.org_user.role = OrganizationUserRole.MANAGER
+        self.org_user.save()
+        res = self.client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 403)
+
+    @mock_aiohttp()
     def test_view(self, m):
         """Web imports don't copy keys; the project keeps the one it was created with."""
         self.log_in_as_owner()
