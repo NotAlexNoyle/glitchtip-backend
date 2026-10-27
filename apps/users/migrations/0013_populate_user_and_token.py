@@ -17,13 +17,11 @@ def provision_user_and_token(apps, schema_editor):
 
         if token is not None:
             APIToken = apps.get_model("api_tokens", "APIToken")
-            scopes = (
-                getattr(APIToken.scopes, "project:admin")
-                | getattr(APIToken.scopes, "team:admin")
-                | getattr(APIToken.scopes, "event:admin")
-                | getattr(APIToken.scopes, "org:admin")
-                | getattr(APIToken.scopes, "member:admin")
-            )
+            # Reads take only :read, so admin alone could write but not read.
+            scopes = 0
+            for family in ("project", "team", "event", "org", "member"):
+                for level in ("read", "write", "admin"):
+                    scopes |= getattr(APIToken.scopes, f"{family}:{level}").mask
             APIToken.objects.create(
                 scopes=scopes,
                 user_id=superuser.id,
