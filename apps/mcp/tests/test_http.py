@@ -205,6 +205,39 @@ class MCPHttpIntegrationTest(TestCase):
             orgs = json.loads(content[0]["text"])
             self.assertIsInstance(orgs, list)
 
+    async def test_write_only_api_token_cannot_read(self):
+        """event:write without event:read is refused reads, as on the API."""
+        api_token = await sync_to_async(APIToken.objects.create)(user=self.user)
+        await sync_to_async(api_token.add_permission)("event:write")
+        org = await baker.amake("organizations_ext.Organization")
+        await org.aadd_user(self.user)
+        await baker.amake(
+            "issue_events.Issue",
+            project=await baker.amake("projects.Project", organization=org),
+        )
+
+        app = build_http_app()
+        async with _run_lifespan(app), _client(app) as client:
+            resp = await client.post(
+                "/mcp",
+                json=_jsonrpc(
+                    "tools/call",
+                    {
+                        "name": "list_issues",
+                        "arguments": {"organization_slug": org.slug},
+                    },
+                ),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": ACCEPT_HEADERS,
+                    "Authorization": f"Bearer {api_token.token}",
+                },
+            )
+        payload = _parse_sse_response(resp.text) or resp.json()
+        text = payload["result"]["content"][0]["text"]
+        self.assertIn("event:read", text)
+        self.assertNotIn('"id"', text)
+
     async def test_api_token_auth(self):
         """MCP endpoint should accept regular API tokens, not just OAuth tokens."""
 

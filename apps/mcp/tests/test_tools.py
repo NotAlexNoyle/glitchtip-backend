@@ -70,17 +70,28 @@ class CheckScopesTest(TestCase):
         token = self._mock_access_token(user.id, ["project:read"])
 
         with patch("apps.mcp.server.get_access_token", return_value=token):
-            # Should pass with matching scope
-            user_id = _check_scopes(["project:read"])
-            self.assertEqual(user_id, user.id)
-
-            # Should pass with broader scope list (OR logic)
-            user_id = _check_scopes(["project:read", "project:write"])
-            self.assertEqual(user_id, user.id)
-
-            # Should fail when token lacks all required scopes
+            self.assertEqual(_check_scopes("project:read"), user.id)
             with self.assertRaises(ValueError):
-                _check_scopes(["event:read"])
+                _check_scopes("event:read")
+
+    def test_scope_levels(self):
+        """A read takes only :read; a write also takes :admin."""
+        user = baker.make("users.user", is_active=True)
+        for scopes, allowed, refused in (
+            (["event:write"], ["event:write"], ["event:read"]),
+            (["event:admin"], ["event:write"], ["event:read"]),
+            (["event:read"], ["event:read"], ["event:write"]),
+        ):
+            token = self._mock_access_token(user.id, scopes)
+            with (
+                self.subTest(scopes=scopes),
+                patch("apps.mcp.server.get_access_token", return_value=token),
+            ):
+                for scope in allowed:
+                    self.assertEqual(_check_scopes(scope), user.id)
+                for scope in refused:
+                    with self.assertRaises(ValueError):
+                        _check_scopes(scope)
 
     def test_no_scopes_rejected(self):
         """Token with no scopes should be rejected."""
@@ -91,7 +102,7 @@ class CheckScopesTest(TestCase):
             patch("apps.mcp.server.get_access_token", return_value=token),
             self.assertRaises(ValueError),
         ):
-            _check_scopes(["project:read"])
+            _check_scopes("project:read")
 
     def test_not_authenticated(self):
         """Missing auth context should raise ValueError."""
@@ -99,7 +110,7 @@ class CheckScopesTest(TestCase):
             patch("apps.mcp.server.get_access_token", return_value=None),
             self.assertRaises(ValueError),
         ):
-            _check_scopes(["project:read"])
+            _check_scopes("project:read")
 
 
 class DataLayerTest(TestCase):
