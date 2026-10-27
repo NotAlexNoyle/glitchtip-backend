@@ -293,7 +293,7 @@ async def get_project_teams(project_id: int, user_id: int) -> Project:
     response={201: ProjectTeamSchema},
     by_alias=True,
 )
-@org_scoped(["org:write"], Project)
+@org_scoped(["org:write", "org:admin"], Project)
 async def add_team_to_project(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Project],
@@ -323,7 +323,7 @@ async def add_team_to_project(
     response=ProjectTeamSchema,
     by_alias=True,
 )
-@org_scoped(["org:write"], Project)
+@org_scoped(["org:write", "org:admin"], Project)
 async def delete_team_from_project(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Project],

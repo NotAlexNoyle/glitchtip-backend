@@ -80,6 +80,20 @@ class TeamAPIPermissionTests(APIPermissionTestCase):
         self.auth_token.add_permission("team:write")
         self.assertPutReqStatusCode(self.detail_url, data, 200)
 
+    def test_project_team_link_accepts_org_admin(self):
+        self.set_user_role(OrganizationUserRole.OWNER)
+        url = reverse(
+            "api:add_team_to_project",
+            args=[self.organization.slug, self.project.slug, self.team.slug],
+        )
+        self.auth_token.add_permission("org:read")
+        self.assertPostReqStatusCode(url, {}, 403)
+        self.assertDeleteReqStatusCode(url, 403)
+
+        self.auth_token.add_permission("org:admin")
+        self.assertPostReqStatusCode(url, {}, 201)
+        self.assertDeleteReqStatusCode(url, 200)
+
     def member_team_url(self, member_id="me", organization_id_or_slug=None):
         return reverse(
             "api:add_member_to_team",
