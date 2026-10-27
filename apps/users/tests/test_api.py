@@ -330,6 +330,19 @@ class UsersTestCase(GlitchTestCase):
                 self.assertEqual(res.status_code, 404)
         self.assertFalse(await UserProjectAlert.objects.aexists())
 
+    async def test_alerts_reset_for_a_project_left_behind(self):
+        """A preference outlives access to its project and can still be reset."""
+        url = reverse("api:update_user_notification_alerts", args=["me"])
+        foreign = await baker.amake("projects.Project")
+        await UserProjectAlert.objects.acreate(
+            user=self.user, project=foreign, status=1
+        )
+        res = await self.async_client.put(
+            url, {str(foreign.id): -1}, content_type="application/json"
+        )
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(await UserProjectAlert.objects.aexists())
+
     def test_alert_notification_recipients_default_false(self):
         User.inspect = True
         self.user.subscribe_by_default = False
