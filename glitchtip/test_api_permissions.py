@@ -29,10 +29,12 @@ from glitchtip.api.permissions import (
 )
 from glitchtip.base_models import ORG_SCOPED_MODELS, OrgScopedModel
 from glitchtip.checks import (
+    UNSCOPED_READS,
     check_org_field,
     check_org_scoped_models,
     check_route_scopes,
     check_undeleted_through,
+    declared_scopes,
     registered_models,
     route_scope_errors,
 )
@@ -331,6 +333,35 @@ class RouteScopeCheckTestCase(SimpleTestCase):
             pass
 
         self.assertEqual(self.error_ids(router), [])
+
+    def test_an_unscoped_read_is_rejected_unless_public(self):
+        router = Router()
+
+        @router.get("/unscoped/")
+        async def unscoped(request):
+            pass
+
+        @router.get("/public/", auth=None)
+        async def public(request):
+            pass
+
+        @router.post("/unscoped-write/")
+        async def unscoped_write(request):
+            pass
+
+        self.assertEqual(self.error_ids(router), ["glitchtip.E007"])
+
+    def test_every_allowed_unscoped_read_is_still_unscoped(self):
+        from glitchtip.api.api import api
+
+        unscoped = {
+            f"{op.view_func.__module__}.{op.view_func.__qualname__}"
+            for _, router in api._routers
+            for path_view in router.path_operations.values()
+            for op in path_view.operations
+            if "GET" in op.methods and not declared_scopes(op.view_func)
+        }
+        self.assertLessEqual(UNSCOPED_READS, unscoped)
 
 
 class ReadScopeTestCase(TestCase):

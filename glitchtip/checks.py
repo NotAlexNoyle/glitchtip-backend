@@ -155,6 +155,26 @@ def check_scope_levels(label: str, methods, scopes, view) -> list[Error]:
     return errors
 
 
+# Authenticated reads that list no scopes, so any token that reaches them reads them.
+UNSCOPED_READS = frozenset(
+    {
+        "apps.api_tokens.api.list_api_tokens",
+        "apps.event_ingest.embed_api.get_embed_error_page",
+        "apps.files.api.get_chunk_upload_info",
+        "apps.projects.api.user_notification_alerts",
+        "apps.stripe.api.list_stripe_products",
+        "apps.users.api.generate_recovery_codes",
+        "apps.users.api.get_notifications",
+        "apps.users.api.get_user",
+        "apps.users.api.list_emails",
+        "apps.users.api.list_users",
+        "apps.wizard.api.setup_wizard_hash",
+        "glitchtip.api.api.get_instance_license",
+        "glitchtip.api.api.get_support_link",
+    }
+)
+
+
 def declared_scopes(view) -> set[frozenset]:
     """The scope list each decorator layer of a view declares.
 
@@ -187,8 +207,27 @@ def route_scope_errors(routers, app_configs=None) -> list[Error]:
                     continue
                 route = f"{prefix}/{path.lstrip('/')}"
                 label = f"{'/'.join(operation.methods)} {route}"
-                for scopes in declared_scopes(view):
+                scope_lists = declared_scopes(view)
+                for scopes in scope_lists:
                     errors += check_scope_levels(label, operation.methods, scopes, view)
+                name = f"{view.__module__}.{view.__qualname__}"
+                if (
+                    "GET" in operation.methods
+                    and not scope_lists
+                    # auth=None: a public route, which tokens can't widen.
+                    and operation.auth_param is not None
+                    and name not in UNSCOPED_READS
+                ):
+                    errors.append(
+                        Error(
+                            f"{label} is a read that lists no scopes, so every "
+                            "token can read it.",
+                            hint="Gate it with org_scoped or has_permission, or "
+                            "add it to UNSCOPED_READS in glitchtip/checks.py.",
+                            obj=view,
+                            id="glitchtip.E007",
+                        )
+                    )
     return errors
 
 
