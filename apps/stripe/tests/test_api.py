@@ -254,6 +254,30 @@ class StripeAPITestCase(TestCase):
         self.assertEqual(self.client.get(url, **headers).status_code, 200)
 
     @patch("apps.stripe.api.create_subscription")
+    async def test_deprecated_create_subscription_route(self, mock_create_subscription):
+        """The frontend still posts the organization id in the body."""
+        mock_create_subscription.return_value.id = "test"
+        mock_create_subscription.return_value.created = 1681564800
+        mock_create_subscription.return_value.start_date = 1681564800
+        mock_create_subscription.return_value.collection_method = "send_invoice"
+        item = MagicMock()
+        item.current_period_start = 1681564800
+        item.current_period_end = 1684243200
+        mock_create_subscription.return_value.items.data = [item]
+        res = await self.async_client.post(
+            reverse("api:stripe_create_subscription"),
+            {"organization": str(self.organization.id), "price": self.price.stripe_id},
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["organization"], str(self.organization.id))
+        self.assertTrue(
+            await StripeSubscription.objects.filter(
+                stripe_id="test", organization=self.organization
+            ).aexists()
+        )
+
+    @patch("apps.stripe.api.create_subscription")
     async def test_stripe_create_subscription(self, mock_create_subscription):
         period_start = 1681564800
         period_end = 1684243200

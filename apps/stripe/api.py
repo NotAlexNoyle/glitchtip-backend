@@ -312,7 +312,9 @@ async def stripe_billing_portal_session(
 async def stripe_create_subscription(request: AuthHttpRequest, payload: SubscriptionIn):
     """Deprecated: use POST subscriptions/{organization_id_or_slug}/."""
     return await create_organization_subscription(
-        request, organization_id_or_slug=payload.organization, payload=payload
+        request,
+        organization_id_or_slug=payload.organization,
+        payload=PriceIDSchema(price=payload.price),
     )
 
 
