@@ -148,8 +148,8 @@ class IssueSchema(ModelSchema):
     @staticmethod
     def resolve_permalink(obj: Issue, context):
         glitchtip_url = settings.GLITCHTIP_URL.geturl()
-        project_slug = obj.project.slug
-        return f"{glitchtip_url}/{project_slug}/issues/{obj.id}"
+        org_slug = obj.project.organization.slug
+        return f"{glitchtip_url}/{org_slug}/issues/{obj.id}"
 
     model_config = ConfigDict(
         alias_generator=to_camel_with_lower_id,
