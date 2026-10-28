@@ -24,7 +24,7 @@ from . import router
 
 def get_queryset(issue_id: int):
     # Callers pass an issue the gate already let through.
-    return IssueEvent.objects.filter(issue_id=issue_id).select_related("issue")
+    return IssueEvent.objects.filter(issue_id=issue_id)
 
 
 async def get_user_report(event_id: uuid.UUID) -> UserReport | None:
@@ -68,6 +68,7 @@ async def _get_latest_event_for_issue(issue: Issue, issue_id: int):
     )
     event = await qs.afirst()
     if event:
+        event.issue = issue
         event.next = None  # We know the next after "latest" must be None
         event.user_report = await get_user_report(event.id)
         return event
@@ -156,6 +157,7 @@ async def _get_issue_event(issue: Issue, event_id: uuid.UUID):
         event = await qs.filter(event_id=event_id).afirst()
 
     if event:
+        event.issue = issue
         event.user_report = await get_user_report(event.id)
         return event
 
