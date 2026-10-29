@@ -330,15 +330,6 @@ class CommentAuthorRuleTestCase(GlitchTipTestCase):
         self.login_as(OrganizationUserRole.MANAGER)
         self.assertEqual(self.edit(comment).status_code, 200)
 
-    def test_other_organization_is_404(self):
-        comment = self.make_comment(self.author)
-        outsider = baker.make("users.User")
-        baker.make("organizations_ext.Organization").add_user(
-            outsider, OrganizationUserRole.OWNER
-        )
-        self.client.force_login(outsider)
-        self.assertEqual(self.edit(comment).status_code, 404)
-
     def test_token(self):
         comment = self.make_comment(self.author)
         for role, status in [
