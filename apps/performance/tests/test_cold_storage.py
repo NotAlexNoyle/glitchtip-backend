@@ -732,6 +732,7 @@ class QueryColdStorageTestCase(ColdStorageTestMixin, TestCase):
         self._write_chunk(self.org.id, self.ts, rows)
 
     def test_query_span_groups_for_transaction(self):
+        other_project = baker.make("projects.Project", organization=self.org)
         self._write(
             [
                 _row(
@@ -743,11 +744,26 @@ class QueryColdStorageTestCase(ColdStorageTestMixin, TestCase):
                 )
                 for i in range(5)
             ]
+            + [
+                _row(
+                    self.org.id,
+                    other_project.id,
+                    self.ts + timedelta(seconds=i),
+                    span_id=f"other_s{i}",
+                    duration=100.0,
+                )
+                for i in range(3)
+            ]
         )
         start = datetime(2026, 2, 20, tzinfo=UTC)
         end = datetime(2026, 2, 21, tzinfo=UTC)
-        results = query_span_groups_for_transaction(
+        all_results = query_span_groups_for_transaction(
             self.org.id, "/api/test/", start, end
+        )
+        self.assertEqual(all_results[0]["count"], 8)
+
+        results = query_span_groups_for_transaction(
+            self.org.id, "/api/test/", start, end, project_id=self.project.id
         )
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["count"], 5)

@@ -152,6 +152,26 @@ class TransactionGroupAPITestCase(GlitchTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
 
+    async def test_spans_endpoint_passes_project_id(self):
+        group = await self.create_group()
+        url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/spans/"
+        with patch("apps.performance.api.query_span_groups_for_transaction") as mock_query:
+            mock_query.return_value = []
+            res = await self.async_client.get(url)
+            self.assertEqual(res.status_code, 200)
+            mock_query.assert_called_once()
+            self.assertEqual(mock_query.call_args.kwargs["project_id"], group.project_id)
+
+    async def test_trend_endpoint_passes_project_id(self):
+        group = await self.create_group()
+        url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/trend/"
+        with patch("apps.performance.api.query_transaction_trend") as mock_query:
+            mock_query.return_value = []
+            res = await self.async_client.get(url)
+            self.assertEqual(res.status_code, 200)
+            mock_query.assert_called_once()
+            self.assertEqual(mock_query.call_args.kwargs["project_ids"], [group.project_id])
+
     async def test_span_groups_endpoint_empty(self):
         url = f"/api/0/organizations/{self.organization.slug}/span-groups/"
         res = await self.async_client.get(url)

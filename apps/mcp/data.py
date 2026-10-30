@@ -413,6 +413,7 @@ async def get_transaction_spans(
         transaction_name=group.transaction,
         start_dt=start,
         end_dt=end,
+        project_id=group.project_id,
     )
 
 
