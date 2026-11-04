@@ -4,8 +4,7 @@ from django.shortcuts import aget_object_or_404
 from ninja import Router, Status
 from ninja.errors import ValidationError
 
-from apps.files.models import FileBlob
-from apps.files.tasks import assemble_artifacts_task
+from apps.files.api import respond_to_artifact_assemble
 from apps.organizations_ext.models import Organization
 from apps.projects.models import Project
 from apps.sourcecode.models import DebugSymbolBundle
@@ -478,22 +477,6 @@ async def assemble_release(
 ):
     organization = await aget_object_or_404(qs.only("id"))
 
-    existing_chunks = [
-        checksum
-        async for checksum in FileBlob.objects.filter(
-            checksum__in=payload.chunks
-        ).values_list("checksum", flat=True)
-    ]
-    missing_chunks = list(set(payload.chunks) - set(existing_chunks))
-
-    if missing_chunks:
-        return {"state": "not_found", "missingChunks": missing_chunks}
-
-    await assemble_artifacts_task.aenqueue(
-        organization.id,
-        version,
-        payload.checksum,
-        payload.chunks,
+    return await respond_to_artifact_assemble(
+        organization.id, version, payload.checksum, payload.chunks
     )
-
-    return {"state": "created", "missingChunks": []}
