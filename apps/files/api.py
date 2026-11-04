@@ -8,6 +8,7 @@ from gzip import BadGzipFile, GzipFile
 from hashlib import sha1
 from tempfile import SpooledTemporaryFile
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.files.base import File as FileObj
 from django.db.models import QuerySet
@@ -22,7 +23,14 @@ from glitchtip.api.authentication import AuthHttpRequest
 from glitchtip.api.decorators import optional_slash
 from glitchtip.api.permissions import OrgScopedHttpRequest, org_scoped
 
+from .assemble import (
+    AssembleTask,
+    ChunkFileState,
+    claim_assemble,
+    get_assemble_status,
+)
 from .models import FileBlob
+from .tasks import assemble_artifacts_task
 
 CHUNK_UPLOAD_BLOB_SIZE = 32 * 1024 * 1024  # 32MB
 MAX_CHUNKS_PER_REQUEST = 1
@@ -178,3 +186,46 @@ async def chunk_upload(
             file.close()
 
     logger.info("chunkupload.end", extra={"status": 200})
+
+
+async def respond_to_artifact_assemble(
+    organization_id: int, version: str | None, checksum: str, chunks: list[str]
+) -> dict:
+    """
+    Shared body of the release and artifact bundle assemble endpoints.
+
+    Upload tools poll these until they answer ``ok`` or ``error``. Only the
+    first caller to claim a checksum enqueues it; later ones are told how it
+    went. Assembling deletes the bundle afterwards, so the cached status is the
+    only record of the outcome.
+    """
+    existing_chunks = [
+        chunk
+        async for chunk in FileBlob.objects.filter(checksum__in=chunks).values_list(
+            "checksum", flat=True
+        )
+    ]
+    missing_chunks = list(set(chunks) - set(existing_chunks))
+    if missing_chunks:
+        return {
+            "state": ChunkFileState.NOT_FOUND.value,
+            "missingChunks": missing_chunks,
+        }
+
+    if await sync_to_async(claim_assemble)(
+        AssembleTask.ARTIFACTS, organization_id, checksum
+    ):
+        await assemble_artifacts_task.aenqueue(
+            organization_id, version, checksum, chunks
+        )
+        return {"state": ChunkFileState.CREATED.value, "missingChunks": []}
+
+    status = await sync_to_async(get_assemble_status)(
+        AssembleTask.ARTIFACTS, organization_id, checksum
+    )
+    # None only if the status expired since the claim failed.
+    state, detail = status or (ChunkFileState.ASSEMBLING, None)
+    response = {"state": state.value, "missingChunks": []}
+    if detail:
+        response["detail"] = detail
+    return response
