@@ -189,6 +189,103 @@ class ArtifactBundleAssembleTests(GlitchTipTestCaseMixin, TestCase):
         self.assertEqual(bundle.release.version, version)
         self.assertEqual(bundle.file.name, "plain.js")
 
+    async def test_source_is_paired_with_its_own_source_map(self):
+        """File names are not unique within a build, so they are a last resort."""
+        version = "1.0.0"
+        a, b = str(uuid.uuid4()), str(uuid.uuid4())
+        cases = [
+            # name, [(url, type, headers, content)], {source content: map content}
+            (
+                "debug id decides when the header names a map elsewhere",
+                [
+                    (
+                        "~/a/index.js",
+                        "minified_source",
+                        {"debug-id": a, "sourcemap": "index.js.map"},
+                        "1a",
+                    ),
+                    ("~/maps/a/index.js.map", "source_map", {"debug-id": a}, "1a.map"),
+                    (
+                        "~/b/index.js",
+                        "minified_source",
+                        {"debug-id": b, "sourcemap": "index.js.map"},
+                        "1b",
+                    ),
+                    ("~/maps/b/index.js.map", "source_map", {"debug-id": b}, "1b.map"),
+                ],
+                {"1a": "1a.map", "1b": "1b.map"},
+            ),
+            (
+                "header resolves against the source's directory",
+                [
+                    (
+                        "~/a/index.js",
+                        "minified_source",
+                        {"sourcemap": "index.js.map"},
+                        "2a",
+                    ),
+                    ("~/a/index.js.map", "source_map", {}, "2a.map"),
+                    (
+                        "~/b/index.js",
+                        "minified_source",
+                        {"sourcemap": "index.js.map"},
+                        "2b",
+                    ),
+                    ("~/b/index.js.map", "source_map", {}, "2b.map"),
+                ],
+                {"2a": "2a.map", "2b": "2b.map"},
+            ),
+            (
+                "a bare name still finds a map in another directory",
+                [
+                    (
+                        "~/js/app.js",
+                        "minified_source",
+                        {"sourcemap": "app.js.map"},
+                        "3",
+                    ),
+                    ("~/maps/app.js.map", "source_map", {}, "3.map"),
+                ],
+                {"3": "3.map"},
+            ),
+            (
+                "a header that is not a string is ignored",
+                [
+                    ("~/c.js", "minified_source", {"sourcemap": ["c.js.map"]}, "4"),
+                    ("~/c.js.map", "source_map", {}, "4.map"),
+                ],
+                {"4": None},
+            ),
+        ]
+        for name, artifacts, expected in cases:
+            with self.subTest(name):
+                manifest_files, contents = {}, {}
+                for index, (url, file_type, headers, content) in enumerate(artifacts):
+                    entry = f"files/{index}/{url.rsplit('/', 1)[-1]}"
+                    manifest_files[entry] = {
+                        "type": file_type,
+                        "url": url,
+                        "headers": headers,
+                    }
+                    contents[entry] = content
+                manifest = {
+                    "org": self.organization.slug,
+                    "release": version,
+                    "files": manifest_files,
+                }
+                checksum = await self.assemble(manifest, contents, version=version)
+
+                self.assertAssembleState(checksum, ChunkFileState.OK)
+                for source, source_map in expected.items():
+                    bundle = await DebugSymbolBundle.objects.select_related(
+                        "sourcemap_file"
+                    ).aget(file__checksum=sha1(source.encode()).hexdigest())
+                    self.assertEqual(
+                        bundle.sourcemap_file and bundle.sourcemap_file.checksum,
+                        source_map and sha1(source_map.encode()).hexdigest(),
+                        f"{source} paired with the wrong map",
+                    )
+
     async def test_unusable_debug_id_headers_do_not_abort_the_upload(self):
         """debug-id is client-supplied, so it need not be a usable uuid.
 

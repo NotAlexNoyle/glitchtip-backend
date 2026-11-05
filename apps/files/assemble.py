@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from enum import Enum
 from os import path
+from urllib.parse import urljoin
 from uuid import UUID
 
 from django.core.cache import cache
@@ -123,6 +124,7 @@ def assemble_artifacts(
     bundle_file, temp_file = rv
     scratchpad = tempfile.mkdtemp()
     files: list[File] = []
+    urls: dict[int, str] = {}
 
     def _fail_and_cleanup(detail: str):
         set_assemble_status(
@@ -220,6 +222,7 @@ def assemble_artifacts(
             headers=headers,
         )
         files.append(file)
+        urls[file.id] = artifact_url
 
         with open(full_path, "rb") as fp:
             file.putfile(fp)
@@ -231,6 +234,19 @@ def assemble_artifacts(
     for file in files:
         if parsed := parse_debug_id(file.headers.get("debug-id")):
             debug_ids[file.id] = parsed
+
+    # A source's map is the one sharing its debug id, else the one at the URL
+    # its sourcemap header points to. A bare file name decides only after
+    # both: builds repeat names (every package can have an index.js.map).
+    maps_by_debug_id: dict[str, File] = {}
+    maps_by_url: dict[str, File] = {}
+    maps_by_name: dict[str, File] = {}
+    for file in files:
+        if file.type == "source_map":
+            if file.id in debug_ids:
+                maps_by_debug_id.setdefault(debug_ids[file.id], file)
+            maps_by_url.setdefault(urls[file.id], file)
+            maps_by_name.setdefault(file.name, file)
 
     # Build bundles, deduplicating by debug_id. When a minified_source and its
     # source_map share the same debug-id, keep only the minified_source bundle
@@ -251,21 +267,14 @@ def assemble_artifacts(
 
         sourcemap_file = None
         if file.type == "minified_source":
-            try:
-                sourcemap_file = next(
-                    value
-                    for value in files
-                    if value.type == "source_map"
-                    and (
-                        file.headers.get("sourcemap", file.headers.get("Sourcemap"))
-                        == value.name
-                        or (
-                            debug_id is not None and debug_ids.get(value.id) == debug_id
-                        )
-                    )
-                )
-            except StopIteration:
-                pass
+            header = file.headers.get("sourcemap", file.headers.get("Sourcemap"))
+            if debug_id is not None:
+                sourcemap_file = maps_by_debug_id.get(debug_id)
+            # The header is client-supplied JSON, so it need not be a string.
+            if sourcemap_file is None and isinstance(header, str) and header:
+                sourcemap_file = maps_by_url.get(
+                    urljoin(urls[file.id], header)
+                ) or maps_by_name.get(header)
 
         bundle = DebugSymbolBundle(
             organization=organization,
