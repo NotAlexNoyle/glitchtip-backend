@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import uuid
 import zipfile
 from hashlib import sha1
@@ -10,6 +11,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
 
+from apps.releases.models import Release
 from apps.sourcecode.models import DebugSymbolBundle
 from glitchtip.test_utils.test_case import GlitchTipTestCaseMixin
 
@@ -19,6 +21,7 @@ from ..assemble import (
     _get_cache_key,
     assemble_artifacts,
     get_assemble_status,
+    set_assemble_status,
 )
 from ..models import File, FileBlob
 
@@ -388,3 +391,62 @@ class AssembleStatusReportingTests(GlitchTipTestCaseMixin, TestCase):
             get_assemble_status(AssembleTask.DIF, 1, "a" * 40),
             (ChunkFileState.ERROR, "not a debug file"),
         )
+
+    def advance_cache_clock(self, seconds: int):
+        """Make the test cache (LocMemCache) see entries as ``seconds`` older."""
+        now = time.time() + seconds
+        return patch("django.core.cache.backends.locmem.time", time=lambda: now)
+
+    def test_only_assembling_outlives_a_minute(self):
+        cases = [
+            (ChunkFileState.ASSEMBLING, True),
+            (ChunkFileState.OK, False),
+            (ChunkFileState.ERROR, False),
+        ]
+        for state, held in cases:
+            with self.subTest(state=state):
+                checksum = sha1(state.value.encode()).hexdigest()
+                set_assemble_status(AssembleTask.ARTIFACTS, 1, checksum, state)
+                with self.advance_cache_clock(61):
+                    status = get_assemble_status(AssembleTask.ARTIFACTS, 1, checksum)
+                self.assertEqual(status is not None, held)
+
+    async def test_reupload_after_result_expires_assembles_again(self):
+        """Re-uploading a bundle whose release files were deleted restores them."""
+        version = "app@v1"
+        data, checksum = build_bundle(
+            {
+                "org": self.organization.slug,
+                "release": version,
+                "files": {
+                    "files/_/_/app.js": {"type": "minified_source", "url": "~/app.js"}
+                },
+            },
+            {"files/_/_/app.js": "function a(){}"},
+        )
+        await FileBlob.objects.acreate(
+            blob=SimpleUploadedFile(checksum, data), size=len(data), checksum=checksum
+        )
+        url = reverse("api:assemble_release", args=[self.organization.slug, version])
+        payload = {"checksum": checksum, "chunks": [checksum]}
+
+        async def post():
+            res = await self.async_client.post(
+                url, payload, content_type="application/json"
+            )
+            return res.json()["state"]
+
+        with patch(
+            "apps.files.tasks.assemble_artifacts", wraps=assemble_artifacts
+        ) as run:
+            self.assertEqual(await post(), "created")
+            self.assertEqual(await post(), "ok")
+            release = await Release.objects.aget(
+                organization=self.organization, version=version
+            )
+            await release.files.all().adelete()
+
+            with self.advance_cache_clock(61):
+                self.assertEqual(await post(), "created")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(await release.files.acount(), 1)
