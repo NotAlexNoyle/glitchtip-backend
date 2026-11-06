@@ -53,18 +53,31 @@ def _get_cache_key(task, scope, checksum):
     return f"assemble-status:{digest}"
 
 
+# A finished state only needs to outlive the upload tool's polling. Kept
+# longer, retrying the same bundle (after deleting its files, or after fixing
+# whatever made it fail) would be answered from cache instead of assembled.
+TERMINAL_STATUS_TTL = 60
+# Long enough for a slow queue, so polls don't enqueue the same bundle twice.
+ASSEMBLING_STATUS_TTL = 600
+
+
 def set_assemble_status(
     task: AssembleTask, scope, checksum, state: ChunkFileState, detail=None
 ):
     """
-    Updates the status of an assembling task. It is cached for 10 minutes.
+    Updates the status of an assembling task.
 
     The state is stored as its string value. The Valkey cache hands an enum
     back as a plain string while the test cache pickles it, so code comparing
     a stored enum passes its tests and fails in production.
     """
     cache_key = _get_cache_key(task, scope, checksum)
-    cache.set(cache_key, (state.value, detail), 600)
+    timeout = (
+        ASSEMBLING_STATUS_TTL
+        if state == ChunkFileState.ASSEMBLING
+        else TERMINAL_STATUS_TTL
+    )
+    cache.set(cache_key, (state.value, detail), timeout)
 
 
 def claim_assemble(task: AssembleTask, scope, checksum) -> bool:
@@ -75,7 +88,9 @@ def claim_assemble(task: AssembleTask, scope, checksum) -> bool:
     the caller that wins the claim should enqueue the work.
     """
     cache_key = _get_cache_key(task, scope, checksum)
-    return cache.add(cache_key, (ChunkFileState.ASSEMBLING.value, None), 600)
+    return cache.add(
+        cache_key, (ChunkFileState.ASSEMBLING.value, None), ASSEMBLING_STATUS_TTL
+    )
 
 
 def get_assemble_status(
