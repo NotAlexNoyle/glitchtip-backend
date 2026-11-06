@@ -14,7 +14,7 @@ from ninja.pagination import paginate
 
 from apps.organizations_ext.utils import is_member_guard_violation
 from apps.shared.types import MeID
-from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.authentication import AuthHttpRequest, SessionOnlyAuth
 
 from .models import User
 from .schema import (
@@ -28,7 +28,7 @@ from .schema import (
     UserSchema,
 )
 
-router = Router()
+router = Router(auth=SessionOnlyAuth())
 
 
 """

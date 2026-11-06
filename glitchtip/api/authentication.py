@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth import SESSION_KEY
 from django.contrib.auth.models import AnonymousUser
 from django.http import HttpRequest
+from ninja.errors import HttpError
 from ninja.security import HttpBearer
 from ninja.security import SessionAuth as BaseSessionAuth
 
@@ -39,6 +40,19 @@ class SessionAuth(BaseSessionAuth):
         else:
             user_id = await sync_to_async(request.session.get)(SESSION_KEY)
         return Auth(int(user_id), "session") if user_id else None
+
+
+class SessionOnlyAuth(SessionAuth):
+    """Session auth for account routes, which answers an API token with a 403."""
+
+    def __call__(self, request: HttpRequest) -> Any | None:
+        # Runs before the CSRF check, which would answer a token's POST with "CSRF check Failed".
+        scheme = request.headers.get("Authorization", "").split(" ", 1)[0]
+        if scheme.lower() == "bearer":
+            raise HttpError(
+                403, "API tokens can't manage the account. Sign in to do this."
+            )
+        return super().__call__(request)
 
 
 class TokenAuth(HttpBearer):

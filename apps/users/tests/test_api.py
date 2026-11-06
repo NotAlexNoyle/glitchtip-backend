@@ -4,7 +4,7 @@ from allauth.mfa.models import Authenticator
 from allauth.mfa.recovery_codes.internal.auth import RecoveryCodes
 from allauth_async.mfa.adapter import AsyncDefaultMFAAdapter
 from django.core import mail
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from model_bakery import baker
 
@@ -469,3 +469,41 @@ class UsersTestCase(GlitchTestCase):
             user=self.user, type=Authenticator.Type.RECOVERY_CODES
         )
         self.assertEqual(RecoveryCodes(authenticator).generate_codes(), previewed)
+
+
+class AccountRoutesTokenTestCase(GlitchTestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.create_user()
+
+    def test_api_token_refused(self):
+        token = baker.make("api_tokens.APIToken", user=self.user, scopes=0)
+        client = Client(enforce_csrf_checks=True)
+        auth_headers = {"HTTP_AUTHORIZATION": f"Bearer {token.token}"}
+        routes = [
+            ("get", "api:list_users", []),
+            ("get", "api:get_user", ["me"]),
+            ("put", "api:update_user", ["me"]),
+            ("get", "api:list_emails", ["me"]),
+            ("post", "api:create_email", ["me"]),
+            ("put", "api:set_email_as_primary", ["me"]),
+            ("delete", "api:delete_email", ["me"]),
+            ("post", "api:send_confirm_email", ["me"]),
+            ("get", "api:get_notifications", ["me"]),
+            ("put", "api:update_notifications", ["me"]),
+            ("get", "api:generate_recovery_codes", []),
+            ("post", "api:set_recovery_codes", []),
+            ("post", "api:setup_wizard_set_token", []),
+            ("delete", "api:delete_user", ["me"]),
+        ]
+        for method, name, args in routes:
+            with self.subTest(route=name):
+                res = getattr(client, method)(
+                    reverse(name, args=args),
+                    {},
+                    content_type="application/json",
+                    **auth_headers,
+                )
+                self.assertEqual(res.status_code, 403)
+                # CSRF rejections are 403 too; the message shows the token was refused.
+                self.assertIn("API tokens", res.json()["detail"])

@@ -10,7 +10,7 @@ from apps.api_tokens.models import APIToken
 from apps.api_tokens.schema import APITokenSchema
 from apps.projects.models import Project
 from apps.projects.schema import ProjectWithKeysSchema
-from glitchtip.api.authentication import AuthHttpRequest
+from glitchtip.api.authentication import AuthHttpRequest, SessionOnlyAuth
 from glitchtip.schema import CamelSchema
 
 from .constants import (
@@ -83,7 +83,7 @@ async def setup_wizard_delete(request, wizard_hash: str, auth=None):
     await cache.adelete(SETUP_WIZARD_CACHE_KEY + wizard_hash)
 
 
-@router.post("wizard-set-token/")
+@router.post("wizard-set-token/", auth=SessionOnlyAuth())
 async def setup_wizard_set_token(request: AuthHttpRequest, payload: SetupWizardSchema):
     """
     Authenticated api for storing projects data to later be used by sentry-wizard
