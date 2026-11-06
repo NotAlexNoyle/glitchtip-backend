@@ -62,7 +62,7 @@ dependencies = [
 # `uv lock --upgrade` drop hundreds of new findings into an unrelated
 # dependency MR. Widening this is a deliberate edit plus a tree sweep.
 lint = [
-    "ruff~=0.16.0",
+    "ruff~=0.17.4",
     "vulture~=2.16",
 ]
 dev = [
