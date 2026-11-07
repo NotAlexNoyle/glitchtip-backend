@@ -58,16 +58,15 @@ def is_unsafe_path(path):
 
 
 def find_common_prefix(members):
-    qualifying_members = []
+    top_levels = set()
     for member in members:
-        pieces = member.split("/")
-        if pieces and pieces[0].startswith("."):
+        top = member.split("/", 1)[0]
+        if top.startswith("."):
             continue
-        qualifying_members.append(pieces)
+        top_levels.add(top)
 
-    rv = os.path.commonprefix(qualifying_members)
-    if rv:
-        return rv[0] + "/"
+    if len(top_levels) == 1:
+        return top_levels.pop() + "/"
     return ""
 
 
