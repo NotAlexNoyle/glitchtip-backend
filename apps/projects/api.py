@@ -1,12 +1,18 @@
+from datetime import datetime, time, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from django.db.models import QuerySet
+from django.db.models import Count, Max, Q, QuerySet, Sum
+from django.db.models.functions import TruncDate
 from django.http import Http404, HttpResponse
 from django.shortcuts import aget_object_or_404
-from ninja import Router, Status
+from django.utils import timezone
+from ninja import Query, Router, Status
 from ninja.errors import ValidationError
 from ninja.pagination import paginate
 
+from apps.issue_events.constants import EventStatus
+from apps.issue_events.models import Issue
 from apps.shared.types import MeID
 from apps.teams.models import Team
 from apps.teams.schema import ProjectTeamSchema
@@ -18,13 +24,20 @@ from glitchtip.api.permissions import (
     org_scoped_list,
 )
 
-from .models import Project, ProjectKey, UserProjectAlert
+from .models import (
+    IssueEventProjectHourlyStatistic,
+    Project,
+    ProjectKey,
+    UserProjectAlert,
+)
 from .schema import (
     ProjectIn,
     ProjectKeyIn,
     ProjectKeySchema,
     ProjectOrganizationSchema,
     ProjectSchema,
+    ProjectSummaryQuery,
+    ProjectSummarySchema,
     StrKeyIntValue,
 )
 
@@ -44,7 +57,10 @@ DELETE /api/0/projects/{organization_slug}/{project_slug}/keys/{key_id}/
 GET /api/0/teams/{organization_slug}/{team_slug}/projects/
 POST /api/0/teams/{organization_slug}/{team_slug}/projects/
 GET /api/0/organizations/{organization_slug}/projects/
+GET /api/0/organizations/{organization_slug}/projects/summary/
 """
+
+SUMMARY_DAYS = 14
 
 
 def get_projects_queryset(
@@ -221,6 +237,86 @@ async def list_organization_projects(
                 if query_name == "!team":
                     queryset = queryset.exclude(teams__slug=query_value)
     return queryset
+
+
+@router.get(
+    "organizations/{slug:organization_id_or_slug}/projects/summary/",
+    response=list[ProjectSummarySchema],
+    by_alias=True,
+)
+@org_scoped(["event:read", "event:write", "event:admin"], Project)
+async def list_project_summaries(
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Project],
+    organization_id_or_slug: str,
+    filters: Query[ProjectSummaryQuery],
+):
+    """Unresolved count, last seen and daily error counts per project, in ``tz``"""
+    project_ids = [
+        pk
+        async for pk in qs.filter(pk__in=filters.project)
+        .order_by("id")
+        .values_list("id", flat=True)
+    ]
+    if not project_ids:
+        raise Http404
+    org_id = request.org_scope.org_id
+    tz = ZoneInfo(filters.tz)
+    now = timezone.now()
+    today = now.astimezone(tz).date()
+    days = [today - timedelta(days=n) for n in range(SUMMARY_DAYS - 1, -1, -1)]
+
+    summaries = {
+        project_id: {
+            "id": str(project_id),
+            "unresolved": 0,
+            "last_seen": None,
+            "days": dict.fromkeys(days, 0),
+        }
+        for project_id in project_ids
+    }
+
+    # index__organization_id lets Postgres prune to one IssueIndex partition
+    issues = (
+        Issue.undeleted_objects.filter(
+            project_id__in=project_ids, index__organization_id=org_id
+        )
+        .values("project_id")
+        .annotate(
+            unresolved=Count("pk", filter=Q(index__status=EventStatus.UNRESOLVED)),
+            last_seen=Max("index__last_seen"),
+        )
+        .order_by()
+    )
+    async for row in issues:
+        summary = summaries[row["project_id"]]
+        summary["unresolved"] = row["unresolved"]
+        summary["last_seen"] = row["last_seen"]
+
+    stats = (
+        IssueEventProjectHourlyStatistic.objects.filter(
+            organization_id=org_id,
+            project_id__in=project_ids,
+            date__gte=datetime.combine(days[0], time(), tzinfo=tz),
+            date__lte=now,
+        )
+        .annotate(day=TruncDate("date", tzinfo=tz))
+        .values("project_id", "day")
+        .annotate(total=Sum("count"))
+        .order_by()
+    )
+    async for row in stats:
+        project_days = summaries[row["project_id"]]["days"]
+        if row["day"] in project_days:  # A DST gap can shift the start bound
+            project_days[row["day"]] = row["total"]
+
+    return [
+        {
+            **summary,
+            "days": [{"date": day, "count": n} for day, n in summary["days"].items()],
+        }
+        for summary in summaries.values()
+    ]
 
 
 @router.get(

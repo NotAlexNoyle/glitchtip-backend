@@ -28,6 +28,17 @@ class ProjectAPIPermissionTests(APIPermissionTestCase):
         self.assertGetReqStatusCode(self.list_url, 200)
         self.assertGetReqStatusCode(self.team_list_url, 200)
 
+    def test_summary(self):
+        url = (
+            reverse("api:list_project_summaries", args=[self.organization.slug])
+            + f"?project={self.project.id}"
+        )
+        self.auth_token.add_permission("project:read")
+        self.assertGetReqStatusCode(url, 403)
+
+        self.auth_token.add_permission("event:read")
+        self.assertGetReqStatusCode(url, 200)
+
     def test_retrieve(self):
         self.assertGetReqStatusCode(self.detail_url, 403)
 

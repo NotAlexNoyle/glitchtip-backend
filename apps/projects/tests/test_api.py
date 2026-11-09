@@ -1,11 +1,17 @@
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
+from freezegun import freeze_time
 from model_bakery import baker
 
+from apps.issue_events.constants import EventStatus
+from apps.issue_events.models import IssueIndex
 from apps.organizations_ext.constants import OrganizationUserRole
 
-from ..models import Project, ProjectKey
+from ..models import IssueEventProjectHourlyStatistic, Project, ProjectKey
 
 
 class ProjectsAPITestCase(TestCase):
@@ -234,6 +240,106 @@ class ProjectsAPITestCase(TestCase):
             )
         )
         self.assertEqual(res.status_code, 404)
+
+
+class ProjectSummaryAPITestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = baker.make("users.user")
+        cls.organization = baker.make("organizations_ext.Organization")
+        cls.organization.add_user(cls.user, role=OrganizationUserRole.MEMBER)
+        # The user is on no team, so neither project is theirs
+        cls.project = baker.make("projects.Project", organization=cls.organization)
+        cls.quiet_project = baker.make(
+            "projects.Project", organization=cls.organization
+        )
+        cls.url = reverse("api:list_project_summaries", args=[cls.organization.slug])
+
+    def setUp(self):
+        self.async_client.force_login(self.user)
+
+    async def make_issue(self, status=EventStatus.UNRESOLVED, last_seen=None, **kwargs):
+        issue = await baker.amake("issue_events.Issue", project=self.project, **kwargs)
+        await IssueIndex.objects.filter(issue=issue).aupdate(
+            status=status, last_seen=last_seen or timezone.now()
+        )
+        return issue
+
+    async def make_stat(self, date, count, project=None):
+        await IssueEventProjectHourlyStatistic.objects.acreate(
+            project=project or self.project,
+            organization=self.organization,
+            date=date.replace(minute=0, second=0, microsecond=0),
+            count=count,
+        )
+
+    async def get(self, *project_ids, **params):
+        return await self.async_client.get(
+            self.url, {"project": list(project_ids), **params}
+        )
+
+    # Midday UTC keeps every day boundary away from the test
+    @freeze_time(timezone.now().replace(hour=12))
+    async def test_summary(self):
+        now = timezone.now()
+        latest = now - timedelta(hours=1)
+        await self.make_issue(last_seen=now - timedelta(days=2))
+        await self.make_issue(last_seen=latest - timedelta(minutes=5))
+        await self.make_issue(EventStatus.RESOLVED, last_seen=latest)
+        await self.make_issue(EventStatus.IGNORED, last_seen=now - timedelta(days=1))
+        await self.make_issue(is_deleted=True, last_seen=now)
+        await self.make_stat(now, 5)
+        await self.make_stat(now - timedelta(days=3), 7)
+        await self.make_stat(now - timedelta(days=20), 100)
+
+        res = await self.get(self.project.id, self.quiet_project.id)
+        self.assertEqual(res.status_code, 200)
+        summary, quiet = res.json()
+        self.assertEqual(summary["id"], str(self.project.id))
+        self.assertEqual(summary["unresolved"], 2)
+        self.assertAlmostEqual(
+            datetime.fromisoformat(summary["lastSeen"]),
+            latest,
+            delta=timedelta(milliseconds=1),
+        )
+        self.assertEqual(len(summary["days"]), 14)
+        self.assertEqual(summary["days"][-1]["date"], now.date().isoformat())
+        self.assertEqual(summary["days"][-1]["count"], 5)
+        self.assertEqual(summary["days"][-4]["count"], 7)
+        self.assertEqual(sum(day["count"] for day in summary["days"]), 12)
+
+        self.assertEqual(quiet["unresolved"], 0)
+        self.assertIsNone(quiet["lastSeen"])
+        self.assertEqual([day["count"] for day in quiet["days"]], [0] * 14)
+
+    @freeze_time(timezone.now().replace(hour=12))
+    async def test_days_follow_time_zone(self):
+        tz = ZoneInfo("Pacific/Kiritimati")  # UTC+14, so its day differs from UTC
+        hour = timezone.now() - timedelta(hours=1)
+        await self.make_stat(hour, 3)
+
+        res = await self.get(self.project.id, tz="Pacific/Kiritimati")
+        days = {day["date"]: day["count"] for day in res.json()[0]["days"]}
+        self.assertEqual(days[hour.astimezone(tz).date().isoformat()], 3)
+        self.assertEqual(max(days), timezone.now().astimezone(tz).date().isoformat())
+
+    async def test_other_projects_are_left_out(self):
+        other_org_project = await baker.amake("projects.Project")
+        deleted_project = await baker.amake(
+            "projects.Project", organization=self.organization, is_deleted=True
+        )
+        res = await self.get(self.project.id, other_org_project.id, deleted_project.id)
+        self.assertEqual([row["id"] for row in res.json()], [str(self.project.id)])
+
+        res = await self.get(other_org_project.id)
+        self.assertEqual(res.status_code, 404)
+
+    async def test_invalid_params(self):
+        self.assertEqual((await self.async_client.get(self.url)).status_code, 422)
+        res = await self.get(self.project.id, tz="Mars/Olympus")
+        self.assertEqual(res.status_code, 422)
+        res = await self.get(*range(1, 102))
+        self.assertEqual(res.status_code, 422)
 
 
 class TeamProjectsAPITestCase(TestCase):
