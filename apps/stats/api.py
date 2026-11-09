@@ -13,40 +13,48 @@ from .schema import StatsV2Schema
 
 router = Router()
 
+# Sum per bucket first, then join to the series so empty buckets stay
 EVENT_TIME_SERIES_SQL = """
-SELECT gs.ts, sum(event_stat.count)
-FROM generate_series(%s, %s, %s::interval) gs (ts)
-LEFT JOIN projects_issueeventprojecthourlystatistic event_stat
-ON event_stat.date >= gs.ts AND event_stat.date < gs.ts +  interval '1 hour'
-WHERE event_stat.project_id = ANY(%s) or event_stat is null
-GROUP BY gs.ts ORDER BY gs.ts;
+SELECT gs.ts, stat.total
+FROM generate_series(%(start)s, %(end)s, %(interval)s::interval) gs (ts)
+LEFT JOIN (
+    SELECT date_bin(%(interval)s::interval, date, %(start)s) AS ts, sum(count) AS total
+    FROM projects_issueeventprojecthourlystatistic
+    WHERE organization_id = %(organization_id)s
+    AND project_id = ANY(%(project_ids)s)
+    AND date >= %(start)s AND date < %(end)s::timestamptz + %(interval)s::interval
+    GROUP BY 1
+) stat USING (ts)
+ORDER BY gs.ts;
 """
 TRANSACTION_TIME_SERIES_SQL = """
-SELECT gs.ts, sum(transaction_stat.count)
-FROM generate_series(%s, %s, %s::interval) gs (ts)
-LEFT JOIN projects_transactioneventprojecthourlystatistic transaction_stat
-ON transaction_stat.date >= gs.ts AND transaction_stat.date < gs.ts +  interval '1 hour'
-WHERE transaction_stat.project_id = ANY(%s) or transaction_stat is null
-GROUP BY gs.ts ORDER BY gs.ts;
+SELECT gs.ts, stat.total
+FROM generate_series(%(start)s, %(end)s, %(interval)s::interval) gs (ts)
+LEFT JOIN (
+    SELECT date_bin(%(interval)s::interval, date, %(start)s) AS ts, sum(count) AS total
+    FROM projects_transactioneventprojecthourlystatistic
+    WHERE organization_id = %(organization_id)s
+    AND project_id = ANY(%(project_ids)s)
+    AND date >= %(start)s AND date < %(end)s::timestamptz + %(interval)s::interval
+    GROUP BY 1
+) stat USING (ts)
+ORDER BY gs.ts;
 """
 
 
 @sync_to_async
-def get_timeseries(category, start, end, interval, project_ids):
-    if category == "error":
-        with connection.cursor() as cursor:
-            cursor.execute(
-                EVENT_TIME_SERIES_SQL,
-                [start, end, interval, project_ids],
-            )
-            return cursor.fetchall()
-    else:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                TRANSACTION_TIME_SERIES_SQL,
-                [start, end, interval, project_ids],
-            )
-            return cursor.fetchall()
+def get_timeseries(category, start, end, interval, organization_id, project_ids):
+    params = {
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "organization_id": organization_id,
+        "project_ids": project_ids,
+    }
+    sql = EVENT_TIME_SERIES_SQL if category == "error" else TRANSACTION_TIME_SERIES_SQL
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
 
 
 @router.get("organizations/{slug:organization_id_or_slug}/stats_v2/")
@@ -80,7 +88,14 @@ async def stats_v2(
     if not project_ids:
         raise Http404()
 
-    series = await get_timeseries(category, start, end, interval, project_ids)
+    series = await get_timeseries(
+        category,
+        start,
+        end,
+        interval,
+        organization_id=request.org_scope.org_id,
+        project_ids=project_ids,
+    )
 
     return {
         "intervals": [
