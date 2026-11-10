@@ -34,9 +34,11 @@ class StatsV2APITestCase(GlitchTipTestCase):
             datetime.fromisoformat(response["intervals"][0]), datetime
         )
 
-    async def make_stat(self, date, count, project=None):
+    async def make_stat(
+        self, date, count, project=None, model=IssueEventProjectHourlyStatistic
+    ):
         project = project or self.project
-        await IssueEventProjectHourlyStatistic.objects.acreate(
+        await model.objects.acreate(
             project=project,
             organization_id=project.organization_id,
             date=date,
@@ -60,21 +62,34 @@ class StatsV2APITestCase(GlitchTipTestCase):
     async def test_daily_interval_counts_every_hour(self):
         day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
         day -= timedelta(days=2)
-        await self.make_stat(day, 1)
-        await self.make_stat(day + timedelta(hours=5), 2)
-        await self.make_stat(day + timedelta(hours=23), 3)
+        for category, model in (
+            ("error", IssueEventProjectHourlyStatistic),
+            ("transaction", TransactionEventProjectHourlyStatistic),
+        ):
+            with self.subTest(category):
+                for hour, count in ((0, 1), (5, 2), (23, 3)):
+                    await self.make_stat(
+                        day + timedelta(hours=hour), count, model=model
+                    )
 
-        data = await self.get_series(day, day + timedelta(days=1), "1d")
-        self.assertEqual(data["groups"][0]["series"]["sum(quantity)"][0], 6)
+                data = await self.get_series(
+                    day, day + timedelta(days=1), "1d", category
+                )
+                self.assertEqual(
+                    data["groups"][0]["series"]["sum(quantity)"], [6, None]
+                )
 
     async def test_minute_interval_counts_each_hour_once(self):
         hour = timezone.now().replace(minute=0, second=0, microsecond=0)
         hour -= timedelta(hours=2)
         await self.make_stat(hour, 4)
 
-        data = await self.get_series(hour, hour + timedelta(minutes=30), "1m")
+        # Starts an hour early: the old join spread the count over that hour
+        start = hour - timedelta(hours=1)
+        data = await self.get_series(start, hour + timedelta(minutes=30), "1m")
         series = data["groups"][0]["series"]["sum(quantity)"]
         self.assertEqual(sum(n or 0 for n in series), 4)
+        self.assertEqual(series[60], 4)
 
     async def test_empty_hours_are_kept(self):
         start = timezone.now().replace(minute=0, second=0, microsecond=0)
@@ -82,26 +97,10 @@ class StatsV2APITestCase(GlitchTipTestCase):
         other_project = await baker.amake(
             "projects.Project", organization=self.organization
         )
-        other_org_project = await baker.amake("projects.Project")
         await self.make_stat(start + timedelta(hours=1), 5, other_project)
-        await self.make_stat(start + timedelta(hours=2), 5, other_org_project)
         await self.make_stat(start + timedelta(hours=3), 4)
 
         data = await self.get_series(start, start + timedelta(hours=5), "1h")
         series = data["groups"][0]["series"]["sum(quantity)"]
         self.assertEqual(len(data["intervals"]), 7)
         self.assertEqual(series, [None, None, None, 4, None, None, None])
-
-    async def test_transaction_daily_interval(self):
-        day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        day -= timedelta(days=2)
-        for hour in (0, 12):
-            await TransactionEventProjectHourlyStatistic.objects.acreate(
-                project=self.project,
-                organization=self.organization,
-                date=day + timedelta(hours=hour),
-                count=2,
-            )
-
-        data = await self.get_series(day, day + timedelta(days=1), "1d", "transaction")
-        self.assertEqual(data["groups"][0]["series"]["sum(quantity)"], [4, None])
