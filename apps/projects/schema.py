@@ -1,9 +1,8 @@
 import uuid
-from datetime import date, datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime
 
 from ninja import Field, ModelSchema, Schema
-from pydantic import RootModel, field_validator
+from pydantic import RootModel
 
 from apps.organizations_ext.schema import OrganizationSchema
 from glitchtip.schema import CamelSchema
@@ -142,25 +141,10 @@ class StrKeyIntValue(RootModel):
 
 class ProjectSummaryQuery(Schema):
     project: list[int] = Field(min_length=1, max_length=100)
-    tz: str = "UTC"
-
-    @field_validator("tz")
-    @classmethod
-    def validate_tz(cls, value: str):
-        try:
-            ZoneInfo(value)
-        except (ZoneInfoNotFoundError, ValueError, OSError):
-            raise ValueError("Unknown time zone") from None
-        return value
-
-
-class ProjectSummaryDay(CamelSchema):
-    date: date
-    count: int
 
 
 class ProjectSummarySchema(CamelSchema):
     id: str
     unresolved: int
     last_seen: datetime | None
-    days: list[ProjectSummaryDay]
+    hours: list[list[int]]

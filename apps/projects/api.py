@@ -1,9 +1,7 @@
-from datetime import datetime, time, timedelta
+from datetime import timedelta
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
-from django.db.models import Count, Max, Q, QuerySet, Sum
-from django.db.models.functions import TruncDate
+from django.db.models import Count, Max, Q, QuerySet
 from django.http import Http404, HttpResponse
 from django.shortcuts import aget_object_or_404
 from django.utils import timezone
@@ -251,7 +249,7 @@ async def list_project_summaries(
     organization_id_or_slug: str,
     filters: Query[ProjectSummaryQuery],
 ):
-    """Unresolved count, last seen and daily error counts per project, in ``tz``"""
+    """Unresolved count, last seen and hourly error counts per project"""
     project_ids = [
         pk
         async for pk in qs.filter(pk__in=filters.project)
@@ -259,19 +257,16 @@ async def list_project_summaries(
         .values_list("id", flat=True)
     ]
     if not project_ids:
-        raise Http404
+        if error := await request.org_scope.explain_miss():
+            raise error
+        return []
     org_id = request.org_scope.org_id
-    tz = ZoneInfo(filters.tz)
-    now = timezone.now()
-    today = now.astimezone(tz).date()
-    days = [today - timedelta(days=n) for n in range(SUMMARY_DAYS - 1, -1, -1)]
-
     summaries = {
         project_id: {
             "id": str(project_id),
             "unresolved": 0,
             "last_seen": None,
-            "days": dict.fromkeys(days, 0),
+            "hours": [],
         }
         for project_id in project_ids
     }
@@ -293,30 +288,16 @@ async def list_project_summaries(
         summary["unresolved"] = row["unresolved"]
         summary["last_seen"] = row["last_seen"]
 
-    stats = (
-        IssueEventProjectHourlyStatistic.objects.filter(
-            organization_id=org_id,
-            project_id__in=project_ids,
-            date__gte=datetime.combine(days[0], time(), tzinfo=tz),
-            date__lte=now,
-        )
-        .annotate(day=TruncDate("date", tzinfo=tz))
-        .values("project_id", "day")
-        .annotate(total=Sum("count"))
-        .order_by()
-    )
-    async for row in stats:
-        project_days = summaries[row["project_id"]]["days"]
-        if row["day"] in project_days:  # A DST gap can shift the start bound
-            project_days[row["day"]] = row["total"]
+    # Hourly like the issue stats; the spare day covers a DST-lengthened window
+    stats = IssueEventProjectHourlyStatistic.objects.filter(
+        organization_id=org_id,
+        project_id__in=project_ids,
+        date__gte=timezone.now() - timedelta(days=SUMMARY_DAYS + 1),
+    ).values_list("project_id", "date", "count")
+    async for project_id, date, count in stats:
+        summaries[project_id]["hours"].append([int(date.timestamp()), count])
 
-    return [
-        {
-            **summary,
-            "days": [{"date": day, "count": n} for day, n in summary["days"].items()],
-        }
-        for summary in summaries.values()
-    ]
+    return list(summaries.values())
 
 
 @router.get(
