@@ -1,10 +1,8 @@
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
-from freezegun import freeze_time
 from model_bakery import baker
 
 from apps.issue_events.constants import EventStatus
@@ -273,13 +271,9 @@ class ProjectSummaryAPITestCase(TestCase):
             count=count,
         )
 
-    async def get(self, *project_ids, **params):
-        return await self.async_client.get(
-            self.url, {"project": list(project_ids), **params}
-        )
+    async def get(self, *project_ids):
+        return await self.async_client.get(self.url, {"project": list(project_ids)})
 
-    # Midday UTC keeps every day boundary away from the test
-    @freeze_time(timezone.now().replace(hour=12))
     async def test_summary(self):
         now = timezone.now()
         latest = now - timedelta(hours=1)
@@ -290,7 +284,8 @@ class ProjectSummaryAPITestCase(TestCase):
         await self.make_issue(is_deleted=True, last_seen=now)
         await self.make_stat(now, 5)
         await self.make_stat(now - timedelta(days=3), 7)
-        await self.make_stat(now - timedelta(days=20), 100)
+        await self.make_stat(now - timedelta(days=14, hours=23), 2)
+        await self.make_stat(now - timedelta(days=15, hours=1), 100)
 
         res = await self.get(self.project.id, self.quiet_project.id)
         self.assertEqual(res.status_code, 200)
@@ -302,26 +297,19 @@ class ProjectSummaryAPITestCase(TestCase):
             latest,
             delta=timedelta(milliseconds=1),
         )
-        self.assertEqual(len(summary["days"]), 14)
-        self.assertEqual(summary["days"][-1]["date"], now.date().isoformat())
-        self.assertEqual(summary["days"][-1]["count"], 5)
-        self.assertEqual(summary["days"][-4]["count"], 7)
-        self.assertEqual(sum(day["count"] for day in summary["days"]), 12)
+        hour = now.replace(minute=0, second=0, microsecond=0)
+        self.assertCountEqual(
+            summary["hours"],
+            [
+                [int(hour.timestamp()), 5],
+                [int((hour - timedelta(days=3)).timestamp()), 7],
+                [int((hour - timedelta(days=14, hours=23)).timestamp()), 2],
+            ],
+        )
 
         self.assertEqual(quiet["unresolved"], 0)
         self.assertIsNone(quiet["lastSeen"])
-        self.assertEqual([day["count"] for day in quiet["days"]], [0] * 14)
-
-    @freeze_time(timezone.now().replace(hour=12))
-    async def test_days_follow_time_zone(self):
-        tz = ZoneInfo("Pacific/Kiritimati")  # UTC+14, so its day differs from UTC
-        hour = timezone.now() - timedelta(hours=1)
-        await self.make_stat(hour, 3)
-
-        res = await self.get(self.project.id, tz="Pacific/Kiritimati")
-        days = {day["date"]: day["count"] for day in res.json()[0]["days"]}
-        self.assertEqual(days[hour.astimezone(tz).date().isoformat()], 3)
-        self.assertEqual(max(days), timezone.now().astimezone(tz).date().isoformat())
+        self.assertEqual(quiet["hours"], [])
 
     async def test_other_projects_are_left_out(self):
         other_org_project = await baker.amake("projects.Project")
@@ -332,14 +320,23 @@ class ProjectSummaryAPITestCase(TestCase):
         self.assertEqual([row["id"] for row in res.json()], [str(self.project.id)])
 
         res = await self.get(other_org_project.id)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), [])
+
+    async def test_non_member_gets_404(self):
+        await self.async_client.aforce_login(await baker.amake("users.user"))
+        res = await self.get(self.project.id)
         self.assertEqual(res.status_code, 404)
 
     async def test_invalid_params(self):
-        self.assertEqual((await self.async_client.get(self.url)).status_code, 422)
-        res = await self.get(self.project.id, tz="Mars/Olympus")
-        self.assertEqual(res.status_code, 422)
-        res = await self.get(*range(1, 102))
-        self.assertEqual(res.status_code, 422)
+        cases = {
+            "no projects": {},
+            "over 100 projects": {"project": list(range(1, 102))},
+        }
+        for name, params in cases.items():
+            with self.subTest(name):
+                res = await self.async_client.get(self.url, params)
+                self.assertEqual(res.status_code, 422)
 
 
 class TeamProjectsAPITestCase(TestCase):
