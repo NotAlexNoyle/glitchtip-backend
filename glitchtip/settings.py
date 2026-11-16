@@ -1388,15 +1388,19 @@ ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 # default "optional" behavior (login allowed, confirmation sent in background).
 ACCOUNT_EMAIL_VERIFICATION = "optional" if EMAIL_ENABLED else "none"
 ACCOUNT_REAUTHENTICATION_TIMEOUT = SESSION_COOKIE_AGE  # Disabled for now
-LOGIN_REDIRECT_URL = "/"
-LOGIN_URL = "/login"
+# Absolute, so emailed links and redirects keep BASE_PATH and the public host.
+_FRONTEND_URL = GLITCHTIP_URL.geturl().rstrip("/")
+LOGIN_REDIRECT_URL = f"{_FRONTEND_URL}/"
+LOGIN_URL = f"{_FRONTEND_URL}/login"
 HEADLESS_ONLY = True
 HEADLESS_FRONTEND_URLS = {
-    "account_signup": "/login",
-    "account_reset_password": "/reset-password",
-    "account_confirm_email": "/profile/confirm-email/{key}/",
-    "account_reset_password_from_key": "/reset-password/set-new-password/{key}",
-    "socialaccount_login_error": "/login?socialLoginError=true",
+    "account_signup": f"{_FRONTEND_URL}/login",
+    "account_reset_password": f"{_FRONTEND_URL}/reset-password",
+    "account_confirm_email": f"{_FRONTEND_URL}/profile/confirm-email/{{key}}/",
+    "account_reset_password_from_key": (
+        f"{_FRONTEND_URL}/reset-password/set-new-password/{{key}}"
+    ),
+    "socialaccount_login_error": f"{_FRONTEND_URL}/login?socialLoginError=true",
 }
 HEADLESS_CLIENTS = ("browser",)
 HEADLESS_SERVE_SPECIFICATION = True

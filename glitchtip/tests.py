@@ -1660,6 +1660,8 @@ def _load_deploy_settings(
         "print('ALLOWED_HOSTS', settings.ALLOWED_HOSTS);"
         "print('CONN_MAX_AGE', settings.DATABASES['default']['CONN_MAX_AGE']);"
         "print('POOL', bool(settings.DATABASES['default']['OPTIONS'].get('pool')));"
+        "print('CONFIRM_URL', settings.HEADLESS_FRONTEND_URLS['account_confirm_email']);"
+        "print('LOGIN_URL', settings.LOGIN_URL);"
     )
     env = {
         **os.environ,
@@ -1707,6 +1709,27 @@ class PersistentConnectionsTests(SimpleTestCase):
         parsed = _parse_deploy_report(r.stdout)
         self.assertEqual(parsed["CONN_MAX_AGE"], "0")
         self.assertEqual(parsed["POOL"], "True")
+
+
+class FrontendUrlsTests(SimpleTestCase):
+    def test_frontend_urls_keep_base_path(self):
+        for glitchtip_url in (
+            "https://example.com/glitchtip",
+            "https://example.com/glitchtip/",
+        ):
+            with self.subTest(glitchtip_url=glitchtip_url):
+                r = _load_deploy_settings(
+                    {"GLITCHTIP_URL": glitchtip_url, "BASE_PATH": "/glitchtip"}
+                )
+                self.assertEqual(r.returncode, 0, r.stderr)
+                parsed = _parse_deploy_report(r.stdout)
+                self.assertEqual(
+                    parsed["CONFIRM_URL"],
+                    "https://example.com/glitchtip/profile/confirm-email/{key}/",
+                )
+                self.assertEqual(
+                    parsed["LOGIN_URL"], "https://example.com/glitchtip/login"
+                )
 
 
 class CookieSecureDefaultsTests(SimpleTestCase):
