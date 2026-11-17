@@ -153,9 +153,9 @@ class ProjectsAPITestCase(TestCase):
             await project.arefresh_from_db()
 
     async def test_project_invalid_delete(self):
-        """Cannot delete projects that are not in the organization the user is an admin of"""
+        """Cannot delete projects that are not in the organization the user is a manager of"""
         organization = await baker.amake("organizations_ext.Organization")
-        await organization.aadd_user(self.user, OrganizationUserRole.ADMIN)
+        await organization.aadd_user(self.user, OrganizationUserRole.MANAGER)
         project = await baker.amake("projects.Project")
         url = reverse("api:delete_project", args=[organization.slug, project.slug])
         res = await self.async_client.delete(url)

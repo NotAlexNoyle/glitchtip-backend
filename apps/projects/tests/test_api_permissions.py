@@ -54,6 +54,9 @@ class ProjectAPIPermissionTests(APIPermissionTestCase):
         self.assertDeleteReqStatusCode(self.detail_url, 403)
 
         self.auth_token.add_permission("project:admin")
+        self.assertDeleteReqStatusCode(self.detail_url, 403)
+
+        self.auth_token.add_permission("org:write")
         self.assertDeleteReqStatusCode(self.detail_url, 204)
 
     def test_user_destroy(self):
@@ -62,7 +65,10 @@ class ProjectAPIPermissionTests(APIPermissionTestCase):
         self.set_user_role(OrganizationUserRole.MEMBER)
         self.assertDeleteReqStatusCode(self.detail_url, 403)
 
-        self.set_user_role(OrganizationUserRole.OWNER)
+        self.set_user_role(OrganizationUserRole.ADMIN)
+        self.assertDeleteReqStatusCode(self.detail_url, 403)
+
+        self.set_user_role(OrganizationUserRole.MANAGER)
         self.assertDeleteReqStatusCode(self.detail_url, 204)
 
     def test_update(self):

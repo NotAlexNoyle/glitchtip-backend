@@ -125,7 +125,7 @@ async def update_project(
     "projects/{slug:organization_id_or_slug}/{slug:project_slug}/",
     response={204: None},
 )
-@org_scoped(["project:admin"], Project)
+@org_scoped(["org:write", "org:admin"], Project)
 async def delete_project(
     request: OrgScopedHttpRequest,
     qs: QuerySet[Project],
