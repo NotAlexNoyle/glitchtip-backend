@@ -200,12 +200,33 @@ class TeamAPITestCase(TestCase):
         res = await self.async_client.post(url)
         self.assertEqual(res.status_code, 403)
 
-        # Can add someone when admin, in the team or not
-        self.org_user.role = OrganizationUserRole.ADMIN
-        await self.org_user.asave()
-        res = await self.async_client.post(url)
-        self.assertEqual(res.status_code, 201)
+        # Can add someone when admin or above, in the team or not
+        for role in (OrganizationUserRole.ADMIN, OrganizationUserRole.MANAGER):
+            with self.subTest(role=role.label):
+                self.org_user.role = role
+                await self.org_user.asave()
+                res = await self.async_client.post(url)
+                self.assertEqual(res.status_code, 201)
+                await team.members.aremove(other_org_user)
         self.assertFalse(await team.members.filter(id=self.org_user.id).aexists())
+
+    async def test_admin_joins_team_without_open_membership(self):
+        self.organization.open_membership = False
+        await self.organization.asave()
+        team = await baker.amake("teams.Team", organization=self.organization)
+        url = reverse(
+            "api:add_member_to_team",
+            args=[self.organization.slug, self.org_user.id, team.slug],
+        )
+        for role, status in (
+            (OrganizationUserRole.MEMBER, 403),
+            (OrganizationUserRole.ADMIN, 201),
+        ):
+            with self.subTest(role=role.label):
+                self.org_user.role = role
+                await self.org_user.asave()
+                res = await self.async_client.post(url)
+                self.assertEqual(res.status_code, status)
 
     async def test_list_project_teams(self):
         project = await baker.amake("projects.Project", organization=self.organization)
@@ -252,13 +273,36 @@ class TeamAPITestCase(TestCase):
         for role, status in (
             (OrganizationUserRole.MEMBER, 403),
             (OrganizationUserRole.ADMIN, 201),
+            (OrganizationUserRole.MANAGER, 201),
         ):
             with self.subTest(role=role.label):
+                await new_project.teams.aclear()
                 self.org_user.role = role
                 await self.org_user.asave()
                 res = await self.async_client.post(url)
                 self.assertEqual(res.status_code, status)
                 self.assertEqual(await new_project.teams.aexists(), status == 201)
+
+    def test_team_add_project_token_scopes(self):
+        """project:* and org:* tokens can both link teams; read-only can't."""
+        team = baker.make("teams.Team", organization=self.organization)
+        project = baker.make("projects.Project", organization=self.organization)
+        url = reverse(
+            "api:add_team_to_project",
+            args=[self.organization.slug, project.slug, team.slug],
+        )
+        self.client.logout()
+        for scope, status in (
+            ("project:read", 403),
+            ("project:write", 201),
+            ("org:write", 201),
+        ):
+            with self.subTest(scope=scope):
+                project.teams.clear()
+                token = baker.make("api_tokens.APIToken", user=self.user)
+                token.add_permission(scope)
+                res = self.client.post(url, HTTP_AUTHORIZATION=f"Bearer {token.token}")
+                self.assertEqual(res.status_code, status)
 
     async def test_add_team_to_project_ignores_other_org_team(self):
         project = await baker.amake("projects.Project", organization=self.organization)
