@@ -1,5 +1,6 @@
-# Unreleased
+# 7.0.1 (Unreleased)
 
+- Fix: On billing-enabled installs, the throttle sweep no longer reports overage above a spend cap that was lowered, or after overage was switched off, while the sweep was running. The sweep loads organizations in batches and could reach one after the owner's change and report from the earlier cap. A lowered cap never retracts what was already reported, so that figure stood for the rest of the period. The cap and the opt-in are now re-read under the per-customer report lock before anything is sent.
 - Change: **Breaking:** deleting a project needs the manager role or above; admins could before. API tokens need `org:write` or `org:admin` to delete a project instead of `project:admin`.
 
 # 7.0.0
