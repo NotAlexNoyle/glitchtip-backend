@@ -25,6 +25,7 @@ from glitchtip.test_utils.test_case import (
 
 from ..constants import EventStatus, LogLevel
 from ..models import Issue, IssueEvent, IssueIndex
+from ..services import filter_issue_list
 from ..tasks import update_issues_task
 
 logger = logging.getLogger(__name__)
@@ -753,6 +754,106 @@ class IssueAPITestCase(GlitchTestCase):
 
         res = await self.async_client.get(self.list_url)
         self.assertEqual(len(res.json()), 3)
+
+    async def test_filter_by_assignee(self):
+        """assigned: takes me, my_teams, none, #team-slug or an email."""
+        teammate = await baker.amake("users.User", email="Teammate@Acme.test")
+        teammate_org_user = await baker.amake(
+            "organizations_ext.OrganizationUser",
+            organization=self.organization,
+            user=teammate,
+        )
+        other_team = await baker.amake("teams.Team", organization=self.organization)
+        mine = await amake_issue(
+            project=self.project, assigned_to_org_user=self.org_user
+        )
+        theirs = await amake_issue(
+            project=self.project, assigned_to_org_user=teammate_org_user
+        )
+        my_team = await amake_issue(project=self.project, assigned_to_team=self.team)
+        other = await amake_issue(project=self.project, assigned_to_team=other_team)
+        nobody = await amake_issue(project=self.project)
+
+        async def ids(query: str) -> set[str]:
+            res = await self.async_client.get(self.list_url, {"query": query})
+            self.assertEqual(res.status_code, 200)
+            return {issue["id"] for issue in res.json()}
+
+        self.assertEqual(await ids("assigned:me"), {str(mine.id)})
+        self.assertEqual(await ids("assigned:my_teams"), {str(my_team.id)})
+        self.assertEqual(await ids("assigned:none"), {str(nobody.id)})
+        self.assertEqual(await ids(f"assigned:#{other_team.slug}"), {str(other.id)})
+        # Email matching ignores case.
+        self.assertEqual(await ids("assigned:teammate@acme.test"), {str(theirs.id)})
+        self.assertEqual(await ids("assigned:#no-such-team"), set())
+        # Combines with other terms.
+        await IssueIndex.objects.filter(issue=mine).aupdate(status=EventStatus.RESOLVED)
+        self.assertEqual(await ids("is:resolved assigned:me"), {str(mine.id)})
+        self.assertEqual(await ids("is:unresolved assigned:me"), set())
+
+    async def test_assigned_me_without_a_user_matches_nothing(self):
+        await amake_issue(project=self.project, assigned_to_org_user=self.org_user)
+        await amake_issue(project=self.project, assigned_to_team=self.team)
+        for term in ("assigned:me", "assigned:my_teams"):
+            qs = filter_issue_list(
+                Issue.objects.filter(project=self.project), {"query": term}
+            )
+            self.assertEqual(await qs.acount(), 0, term)
+
+    async def test_filter_by_assignee_keywords_ignore_case(self):
+        mine = await amake_issue(
+            project=self.project, assigned_to_org_user=self.org_user
+        )
+        res = await self.async_client.get(self.list_url, {"query": "assigned:Me"})
+        self.assertEqual([issue["id"] for issue in res.json()], [str(mine.id)])
+
+    async def test_filter_by_assignee_stays_in_the_organization(self):
+        """A same-named team or same email in another org never matches."""
+        other_org = await baker.amake("organizations_ext.Organization")
+        other_project = await baker.amake("projects.Project", organization=other_org)
+        twin_team = await baker.amake(
+            "teams.Team", organization=other_org, slug=self.team.slug
+        )
+        twin_member = await baker.amake(
+            "organizations_ext.OrganizationUser",
+            organization=other_org,
+            user=self.user,
+        )
+        await amake_issue(project=other_project, assigned_to_team=twin_team)
+        await amake_issue(project=other_project, assigned_to_org_user=twin_member)
+        ours = await amake_issue(project=self.project, assigned_to_team=self.team)
+
+        for query, expected in (
+            (f"assigned:#{self.team.slug}", {str(ours.id)}),
+            (f"assigned:{self.user.email}", set()),
+            ("assigned:me", set()),
+        ):
+            res = await self.async_client.get(self.list_url, {"query": query})
+            self.assertEqual({issue["id"] for issue in res.json()}, expected, query)
+
+    async def test_bulk_update_background_task_filters_by_assigned_me(self):
+        mine = await amake_issue(
+            project=self.project, assigned_to_org_user=self.org_user
+        )
+        nobody = await amake_issue(project=self.project)
+        await asyncio.wait_for(
+            update_issues_task.func(
+                organization_slug=self.organization.slug,
+                user_id=self.user.id,
+                filter_params={"query": "assigned:me"},
+                update_params={"status": "resolved"},
+                exclude_ids=[],
+                max_id=max(mine.id, nobody.id),
+            ),
+            timeout=30,
+        )
+        self.assertEqual(
+            (await IssueIndex.objects.aget(issue=mine)).status, EventStatus.RESOLVED
+        )
+        self.assertEqual(
+            (await IssueIndex.objects.aget(issue=nobody)).status,
+            EventStatus.UNRESOLVED,
+        )
 
     async def test_issue_update(self):
         issue = await baker.amake("issue_events.Issue", project=self.project)

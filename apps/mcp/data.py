@@ -69,7 +69,7 @@ async def get_issues(
         filters["first_seen__gte"] = start
     if end:
         filters["first_seen__lte"] = end
-    qs = filter_issue_list(qs, filters, sort=sort)
+    qs = filter_issue_list(qs, filters, sort=sort, user_id=user_id)
     qs = _apply_compliance_filter(qs)
     limit = min(limit, AsyncLinkHeaderPagination.max_page_size)
     return [issue async for issue in qs[:limit]]

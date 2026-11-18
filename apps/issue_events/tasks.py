@@ -32,7 +32,7 @@ async def update_issues_task(
     """
     filters = IssueFilters(**filter_params)
     qs = await get_queryset(user_id, organization_slug=organization_slug)
-    qs = filter_issue_list(qs, filters).filter(id__lte=max_id)
+    qs = filter_issue_list(qs, filters, user_id=user_id).filter(id__lte=max_id)
     remaining_qs = qs.exclude(id__in=exclude_ids)
 
     # IssueIndex partition key, so the leaf writes below prune to one

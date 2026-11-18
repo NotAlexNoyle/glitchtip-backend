@@ -465,7 +465,12 @@ async def list_issues(
     # Both text search (index join) and client-SDK UUIDv4 event-id lookups
     # scan org-partitioned tables; the org id lets Postgres prune them.
     return filter_issue_list(
-        qs, filters, sort, event_id, organization_id=request.org_scope.org_id
+        qs,
+        filters,
+        sort,
+        event_id,
+        organization_id=request.org_scope.org_id,
+        user_id=request.auth.user_id,
     )
 
 
@@ -480,7 +485,9 @@ async def delete_issues(
     filters: Query[IssueFilters],
 ):
     qs = filter_issue_list(
-        qs.filter(index__organization_id=request.org_scope.org_id), filters
+        qs.filter(index__organization_id=request.org_scope.org_id),
+        filters,
+        user_id=request.auth.user_id,
     )
     # Ids first: the gated qs excludes deleted issues, so it can't find them
     # again after the update.
@@ -561,7 +568,9 @@ async def bulk_update_issues(
     # GROUP BY that turns the id selections below into a scan of every org's
     # issues, and DISTINCT does the same. Tag filters may repeat an issue (one
     # IssueTag row per day); the selections below tolerate duplicate ids.
-    qs = filter_issue_list(qs.filter(index__organization_id=organization_id), filters)
+    qs = filter_issue_list(
+        qs.filter(index__organization_id=organization_id), filters, user_id=user_id
+    )
 
     # Mirrors update_issue_status: resolving may pin a release, any other
     # status clears it.
@@ -731,7 +740,12 @@ async def list_project_issues(
     # Both text search (index join) and client-SDK UUIDv4 event-id lookups
     # scan org-partitioned tables; the org id lets Postgres prune them.
     return filter_issue_list(
-        qs, filters, sort, event_id, organization_id=request.org_scope.org_id
+        qs,
+        filters,
+        sort,
+        event_id,
+        organization_id=request.org_scope.org_id,
+        user_id=request.auth.user_id,
     )
 
 

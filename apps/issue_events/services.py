@@ -14,6 +14,7 @@ from ninja import Field, Schema
 from pydantic.functional_validators import BeforeValidator
 
 from apps.organizations_ext.models import Organization
+from apps.teams.models import Team
 
 from .constants import EventStatus, LogLevel
 from .models import Issue
@@ -136,12 +137,35 @@ def with_issue_details(
     )
 
 
+def assigned_filter(value: str, user_id: int | None) -> Q:
+    """Q for an ``assigned:`` search term: me, my_teams, none, #team-slug or an email.
+
+    ``me`` and ``my_teams`` need the requesting user; without one they match
+    nothing rather than everything.
+    """
+    keyword = value.lower()
+    if keyword == "none":
+        return Q(assigned_to_org_user__isnull=True, assigned_to_team__isnull=True)
+    if keyword in ("me", "my_teams") and not user_id:
+        return Q(pk__in=[])
+    if keyword == "me":
+        return Q(assigned_to_org_user__user_id=user_id)
+    if keyword == "my_teams":
+        # A subquery, so an issue doesn't repeat once per membership row.
+        my_teams = Team.objects.filter(members__user_id=user_id).values("id")
+        return Q(assigned_to_team__in=my_teams)
+    if value.startswith("#"):
+        return Q(assigned_to_team__slug=value[1:])
+    return Q(assigned_to_org_user__user__email__iexact=value)
+
+
 def filter_issue_list(
     qs: QuerySet[Issue],
     filters: IssueFilters,
     sort: sort_options | None = None,
     event_id: UUID | None = None,
     organization_id: int | None = None,
+    user_id: int | None = None,
 ) -> QuerySet[Issue]:
     # Handle both Pydantic model and dict
     if isinstance(filters, dict):
@@ -193,6 +217,8 @@ def filter_issue_list(
                     )
                 elif query_name == "level":
                     qs = qs.filter(index__level=LogLevel.from_string(query_value))
+                elif query_name == "assigned":
+                    qs = qs.filter(assigned_filter(query_value, user_id))
                 else:
                     qs = qs.filter(
                         issuetag__tag_key__key=query_name,
