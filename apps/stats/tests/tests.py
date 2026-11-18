@@ -97,7 +97,12 @@ class StatsV2APITestCase(GlitchTipTestCase):
         other_project = await baker.amake(
             "projects.Project", organization=self.organization
         )
+        other_org_project = await baker.amake(
+            "projects.Project",
+            organization=await baker.amake("organizations_ext.Organization"),
+        )
         await self.make_stat(start + timedelta(hours=1), 5, other_project)
+        await self.make_stat(start + timedelta(hours=2), 7, other_org_project)
         await self.make_stat(start + timedelta(hours=3), 4)
 
         data = await self.get_series(start, start + timedelta(hours=5), "1h")
