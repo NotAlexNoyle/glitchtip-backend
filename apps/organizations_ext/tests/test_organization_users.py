@@ -149,6 +149,17 @@ class OrganizationUsersTestCase(TestCase):
             ).aexists()
         )
 
+        # An accepted invite link can't be viewed or reused by another account
+        other_user = await baker.amake("users.user")
+        await self.async_client.aforce_login(other_user)
+        res = await self.async_client.get(url)
+        self.assertEqual(res.status_code, 403)
+        res = await self.async_client.post(url, data, content_type="application/json")
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(
+            (await OrganizationUser.objects.aget(pk=org_user_id)).user_id, user.id
+        )
+
     @override_settings(
         EMAIL_INVITE_THROTTLE_COUNT=1,
         EMAIL_INVITE_REQUIRE_VERIFICATION=True,

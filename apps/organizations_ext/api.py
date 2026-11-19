@@ -438,6 +438,8 @@ async def validate_token(org_user_id: int, token: str) -> OrganizationUser:
     )
     if not InvitationTokenGenerator().check_token(org_user, token):
         raise HttpError(403, "Invalid invite token")
+    if org_user.user_id is not None:
+        raise HttpError(403, "This invite has already been accepted")
     return org_user
 
 
