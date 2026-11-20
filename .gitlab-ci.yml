@@ -46,7 +46,7 @@ test-min:
     ENABLE_ORGANIZATION_CREATION: "true"
     VALKEY_URL: "redis://redis:6379"
   services:
-    - postgres:15
+    - postgres:19
     - name: redis:7
       alias: redis
   cache:
@@ -75,7 +75,7 @@ test-postgres-only:
     ENABLE_ORGANIZATION_CREATION: "true"
     VALKEY_URL: ""
   services:
-    - name: postgres:18
+    - name: postgres:19
       alias: postgres
   cache:
     - key:
@@ -109,7 +109,7 @@ test-latest:
     AWS_SECRET_ACCESS_KEY: "0000000000000000000000000000000000000000000000000000000000000001"
     AWS_S3_ENDPOINT_URL: "http://garage:3900"
   services:
-    - name: postgres:18
+    - name: postgres:19
       alias: postgres
     - name: valkey/valkey:9
       alias: redis
