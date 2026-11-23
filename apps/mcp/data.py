@@ -475,6 +475,7 @@ async def get_transaction_trend(
         transaction_name=group.transaction,
         start_dt=start,
         end_dt=end,
+        project_ids=[group.project_id],
     )
 
 
