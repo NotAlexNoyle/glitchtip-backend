@@ -76,7 +76,7 @@ def native_crash() -> dict:
 @contextlib.contextmanager
 def counted_waits(virtual_clock=False):
     """The delays the store sleeps for while polling a build, in order;
-    the sleeps still happen. Counting them keeps budget assertions off the
+    the sleeps still happen unless ``virtual_clock`` is set. Counting them keeps budget assertions off the
     wall clock, which also counts database round trips.
 
     An event's own budget is a wall-clock deadline, so on a slow runner the
@@ -501,8 +501,8 @@ class LookupTests(CacheTestCase):
             counted_waits(virtual_clock=True) as waits,
         ):
             run_async_closing(lookups)
-        # All three waited, within one budget between them; a budget per
-        # cache would sleep up to three times as long.
+        # The first lookup spends the event's budget and the others don't
+        # wait; a budget per cache would sleep three times as long.
         self.assertGreater(len(waits), 0)
         self.assertLessEqual(sum(waits), 0.2 + 1e-6)
 
