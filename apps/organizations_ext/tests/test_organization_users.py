@@ -1,4 +1,5 @@
 import json
+from unittest import mock
 
 from django.core import mail
 from django.core.cache import cache
@@ -7,7 +8,9 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from model_bakery import baker
 
+from .. import api
 from ..constants import OrganizationUserRole
+from ..invitation_backend import InvitationTokenGenerator
 from ..models import OrganizationOwner, OrganizationUser
 
 
@@ -159,6 +162,28 @@ class OrganizationUsersTestCase(TestCase):
         self.assertEqual(
             (await OrganizationUser.objects.aget(pk=org_user_id)).user_id, user.id
         )
+
+    async def test_organization_users_accept_invite_race(self):
+        org_user = await OrganizationUser.objects.acreate(
+            organization=self.organization,
+            email="race@example.com",
+            role=OrganizationUserRole.MEMBER,
+        )
+        token = InvitationTokenGenerator().make_token(org_user)
+        url = reverse("api:accept_invite", args=[org_user.pk, token])
+        winner, loser = await baker.amake("users.user", _quantity=2)
+        # Both requests passed validate_token before the winner's write landed
+        stale = await OrganizationUser.objects.aget(pk=org_user.pk)
+        await OrganizationUser.objects.filter(pk=org_user.pk).aupdate(user=winner)
+
+        await self.async_client.aforce_login(loser)
+        with mock.patch.object(api, "validate_token", return_value=stale):
+            res = await self.async_client.post(
+                url, {"acceptInvite": True}, content_type="application/json"
+            )
+        self.assertEqual(res.status_code, 403)
+        await org_user.arefresh_from_db()
+        self.assertEqual(org_user.user_id, winner.id)
 
     @override_settings(
         EMAIL_INVITE_THROTTLE_COUNT=1,
