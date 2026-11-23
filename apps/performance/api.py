@@ -145,6 +145,7 @@ async def list_transaction_spans(
         transaction_name=group.transaction,
         start_dt=start_dt,
         end_dt=end_dt,
+        project_id=group.project_id,
     )
 
 
@@ -240,4 +241,5 @@ async def get_transaction_trend(
         transaction_name=group.transaction,
         start_dt=start_dt,
         end_dt=end_dt,
+        project_ids=[group.project_id],
     )
