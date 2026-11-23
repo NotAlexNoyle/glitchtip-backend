@@ -307,6 +307,76 @@ class LoadPublicIdKeyTestCase(TransactionTestCase):
         self.assertTrue(public_id.key_loaded())
         self.assertEqual(len(attempts), 3)
 
+    async def test_request_wakes_a_backed_off_retry(self):
+        """A recovered database is picked up on the next request, not at the
+        end of the backoff."""
+        load_key_sync = public_id.load_key_sync
+        attempts = []
+        up = threading.Event()
+
+        def down_until_up():
+            attempts.append(1)
+            if not up.is_set():
+                raise OperationalError("down")
+            load_key_sync()
+
+        async def inner(scope, receive, send):
+            pass
+
+        async def backed_off():
+            while len(attempts) < 8:
+                await asyncio.sleep(0.01)
+
+        wrapper = LoadPublicIdKey(inner)
+        with (
+            mock.patch.object(public_id, "load_key_sync", down_until_up),
+            mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.01),
+            mock.patch.object(LoadPublicIdKey, "RETRY_MAX_SECONDS", 60),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
+        ):
+            try:
+                wrapper._retry_soon()
+                # Eight failures put the next attempt 2.56 s away.
+                await asyncio.wait_for(backed_off(), 10)
+                up.set()
+                await wrapper({"type": "http", "path": "/api/0/"}, None, None)
+                for _ in range(50):
+                    if public_id.key_loaded():
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                wrapper._stop_background()
+        self.assertTrue(public_id.key_loaded())
+        self.assertEqual(len(attempts), 9)
+
+    async def test_requests_do_not_hammer_a_failing_database(self):
+        attempts = []
+
+        def down():
+            attempts.append(1)
+            raise OperationalError("down")
+
+        async def inner(scope, receive, send):
+            pass
+
+        loop = asyncio.get_running_loop()
+        wrapper = LoadPublicIdKey(inner)
+        with (
+            mock.patch.object(public_id, "load_key_sync", down),
+            mock.patch.object(LoadPublicIdKey, "RETRY_SECONDS", 0.1),
+            self.assertLogs("glitchtip.asgi", "WARNING"),
+        ):
+            started = loop.time()
+            try:
+                wrapper._retry_soon()
+                for _ in range(30):
+                    await wrapper({"type": "http", "path": "/api/0/"}, None, None)
+                    await asyncio.sleep(0.01)
+            finally:
+                wrapper._stop_background()
+            elapsed = loop.time() - started
+        self.assertLessEqual(len(attempts), elapsed / 0.1 + 1)
+
     async def test_repeated_failures_log_one_line_naming_the_cause(self):
         class UndefinedTable(Exception):
             sqlstate = "42P01"

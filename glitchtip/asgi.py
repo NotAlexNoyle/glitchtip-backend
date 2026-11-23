@@ -328,6 +328,11 @@ class LoadPublicIdKey:
     lifespan, the first request makes the first attempt, and async code
     that needs the key early starts the retry through ``public_id``.
 
+    While the retry backs off, each request and each such call wakes it
+    instead of waiting: a recovered database is picked up within
+    ``RETRY_SECONDS`` rather than the full backoff, and no request waits on
+    a database that is already failing.
+
     Each attempt runs on a thread of its own and is waited on for at most
     ``LOAD_TIMEOUT_SECONDS``. Startup awaits it, and a hung database would
     otherwise hold startup indefinitely, failing the readiness probe. The
@@ -356,18 +361,17 @@ class LoadPublicIdKey:
         self._retry: asyncio.Task | None = None
         self._revalidate: asyncio.Task | None = None
         self._attempt: asyncio.Future | None = None
+        self._wake: asyncio.Event | None = None
         self._failing = False
-        public_id.set_load_trigger(self._start_retry)
+        public_id.set_load_trigger(self._retry_soon)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
             receive = self._lifespan_receive(receive)
-        elif (
-            not public_id.key_loaded()
-            and not self._retrying()
-            and not await self._load()
+        elif not public_id.key_loaded() and (
+            self._retrying() or not await self._load()
         ):
-            self._start_retry()
+            self._retry_soon()
         await self.app(scope, receive, send)
 
     def _lifespan_receive(self, receive):
@@ -375,7 +379,7 @@ class LoadPublicIdKey:
             message = await receive()
             if message["type"] == "lifespan.startup":
                 if not await self._load():
-                    self._start_retry()
+                    self._retry_soon()
             elif message["type"] == "lifespan.shutdown":
                 self._stop_background()
             return message
@@ -390,17 +394,25 @@ class LoadPublicIdKey:
             if task is not None:
                 task.cancel()
 
-    def _start_retry(self) -> None:
-        if not self._retrying():
-            # Held on self: the loop keeps only a weak reference to a task.
-            self._retry = asyncio.get_running_loop().create_task(
-                self._retry_until_loaded()
-            )
+    def _retry_soon(self) -> None:
+        if self._retrying():
+            self._wake.set()
+            return
+        self._wake = asyncio.Event()
+        # Held on self: the loop keeps only a weak reference to a task.
+        self._retry = asyncio.get_running_loop().create_task(self._retry_until_loaded())
 
     async def _retry_until_loaded(self):
+        loop = asyncio.get_running_loop()
         delay = self.RETRY_SECONDS
         while not public_id.key_loaded():
-            await asyncio.sleep(delay)
+            last_try = loop.time()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), delay)
+            self._wake.clear()
+            # Woken or not, attempts stay RETRY_SECONDS apart, so traffic
+            # during an outage can't hammer the database.
+            await asyncio.sleep(last_try + self.RETRY_SECONDS - loop.time())
             if await self._load():
                 return
             delay = min(delay * 2, self.RETRY_MAX_SECONDS)
