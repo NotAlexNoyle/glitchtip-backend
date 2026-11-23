@@ -74,21 +74,43 @@ def native_crash() -> dict:
 
 
 @contextlib.contextmanager
-def counted_waits():
+def counted_waits(virtual_clock=False):
     """The delays the store sleeps for while polling a build, in order;
-    the sleeps still happen. Counting them keeps budget assertions off the
-    wall clock, which also counts database round trips."""
+    the sleeps still happen unless ``virtual_clock`` is set. Counting them keeps budget assertions off the
+    wall clock, which also counts database round trips.
+
+    An event's own budget is a wall-clock deadline, so on a slow runner the
+    round trips before the first poll can spend all of a short test budget.
+    ``virtual_clock`` gives the store a clock that only its sleeps advance
+    (and skips the real sleep); use it only where the store polls one
+    lookup at a time, since concurrent sleeps would add up instead of
+    overlapping."""
     waits = []
+    now = time.monotonic()
 
     class CountingAsyncio:
         def __getattr__(self, name):
             return getattr(asyncio, name)
 
         async def sleep(self, delay, *args, **kwargs):
+            nonlocal now
             waits.append(delay)
+            if virtual_clock:
+                now += delay
+                return await asyncio.sleep(0)
             return await asyncio.sleep(delay, *args, **kwargs)
 
-    with mock.patch.object(store, "asyncio", CountingAsyncio()):
+    class VirtualTime:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def monotonic(self):
+            return now
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(store, "asyncio", CountingAsyncio()))
+        if virtual_clock:
+            stack.enter_context(mock.patch.object(store, "time", VirtualTime()))
         yield waits
 
 
@@ -468,19 +490,19 @@ class LookupTests(CacheTestCase):
             sources_.append(
                 store.CacheSource(CacheKind.SYMCACHE, f"{blob.checksum}::", blob.id)
             )
-        context = store.LookupContext.for_event()
 
         async def lookups():
+            context = store.LookupContext.for_event()
             for source in sources_:
                 await store.get_cache(source, context)
 
         with (
             mock.patch.object(store, "_enqueue", mock.AsyncMock()),
-            counted_waits() as waits,
+            counted_waits(virtual_clock=True) as waits,
         ):
             run_async_closing(lookups)
-        # All three waited, within one budget between them; a budget per
-        # cache would sleep up to three times as long.
+        # The first lookup spends the event's budget and the others don't
+        # wait; a budget per cache would sleep three times as long.
         self.assertGreater(len(waits), 0)
         self.assertLessEqual(sum(waits), 0.2 + 1e-6)
 
@@ -488,11 +510,11 @@ class LookupTests(CacheTestCase):
     def test_a_key_given_up_on_is_not_waited_for_again(self):
         dif = self.upload_elf()
         with mock.patch.object(store, "_enqueue", mock.AsyncMock()):
-            with counted_waits() as waits:
+            with counted_waits(virtual_clock=True) as waits:
                 self.assertIsNone(self.get(self.source_for(dif)))
             self.assertGreater(len(waits), 0)
             # The rest of the process: a quick look, no wait.
-            with counted_waits() as waits:
+            with counted_waits(virtual_clock=True) as waits:
                 self.assertIsNone(self.get(self.source_for(dif)))
             self.assertEqual(waits, [])
         # Once built, that quick look finds it.
