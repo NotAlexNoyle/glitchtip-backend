@@ -1,9 +1,12 @@
 import json
 from datetime import timedelta
+from unittest import mock
 
 from django.conf import settings
 from django.core import mail
+from django.core.cache import cache, caches
 from django.tasks import task_backends
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from freezegun import freeze_time
@@ -12,11 +15,13 @@ from model_bakery import baker
 from apps.issue_events.models import EventStatus, Issue, IssueIndex
 from apps.organizations_ext.constants import OrganizationUserRole
 from apps.projects.models import ProjectAlertStatus
+from glitchtip.partition_manager import UUID7Helper
 from glitchtip.test_utils.test_case import (
     GlitchTipTestCase,
     GlitchTipTransactionTestCase,
 )
 
+from ..constants import LAST_RUN_KEY
 from ..models import Notification
 from ..tasks import process_event_alerts
 
@@ -152,42 +157,78 @@ class AlertTestCase(GlitchTipTransactionTestCase):
         process_event_alerts.call()
         self.assertEqual(Notification.objects.count(), 1)
 
-    def _alert_after_run(self, event_after_run_seconds):
-        """Runs start slightly more than ALERT_NOTIFICATION_INTERVAL apart: the scheduler checks once per
-        second whether the interval has passed. Here 60.8 s, for the default of 60 s."""
+    def run_alerts_at(self, seconds: float, pending_issue_ids: set[int]):
+        """Run the task as it runs with valkey: it drains the issue ids ingest noted"""
+
+        async def drain(*args):
+            drained = [str(i).encode() for i in pending_issue_ids]
+            pending_issue_ids.clear()
+            return drained
+
+        driver = mock.Mock(eval=drain)
+        with (
+            freeze_time(self.now + timedelta(seconds=seconds)),
+            override_settings(CACHE_IS_VALKEY=True),
+            mock.patch.object(
+                caches["default"], "get_raw_client", return_value=driver, create=True
+            ),
+        ):
+            process_event_alerts.call()
+
+    def test_alert_for_an_event_between_runs(self):
+        """Run N is at 0 s. The event is received at `received` and noted for
+        alerts at `noted`; run N+1 is at `next_run`."""
+        cases = [
+            # Runs start slightly more than ALERT_NOTIFICATION_INTERVAL apart
+            ("run boundary", {"received": 0.3, "noted": 0.3, "next_run": 60.8}),
+            ("late run", {"received": 5, "noted": 5, "next_run": 90}),
+            ("ingest latency", {"received": -8, "noted": 1, "next_run": 60.2}),
+        ]
+        for name, case in cases:
+            with self.subTest(name):
+                cache.delete(LAST_RUN_KEY)
+                Notification.objects.all().delete()
+                alert = baker.make(
+                    "alerts.ProjectAlert",
+                    project=self.project,
+                    timespan_minutes=1,
+                    quantity=1,
+                )
+                issue = baker.make("issue_events.Issue", project=self.project)
+                pending = set()
+                self.run_alerts_at(0, pending)
+                received = self.now + timedelta(seconds=case["received"])
+                baker.make(
+                    "issue_events.IssueEvent",
+                    id=UUID7Helper.from_datetime(received),
+                    issue=issue,
+                    organization=issue.project.organization,
+                )
+                pending.add(issue.id)
+                self.run_alerts_at(case["next_run"], pending)
+                self.assertEqual(alert.notification_set.count(), 1)
+
+    def test_on_time_runs_keep_timespan(self):
+        cache.delete(LAST_RUN_KEY)
         baker.make(
             "alerts.ProjectAlert",
             project=self.project,
-            timespan_minutes=1,
-            quantity=1,
+            timespan_minutes=10,
+            quantity=2,
         )
         issue = baker.make("issue_events.Issue", project=self.project)
-
-        with freeze_time(self.now):
-            process_event_alerts.call()  # run N
-
-        with freeze_time(self.now + timedelta(seconds=event_after_run_seconds)):
+        pending = set()
+        self.run_alerts_at(0, pending)
+        for received in [60.2 - 605, 30]:
             baker.make(
                 "issue_events.IssueEvent",
+                id=UUID7Helper.from_datetime(self.now + timedelta(seconds=received)),
                 issue=issue,
                 organization=issue.project.organization,
             )
-
-        with freeze_time(self.now + timedelta(seconds=60.8)):
-            process_event_alerts.call()  # run N+1
-
-        with freeze_time(self.now + timedelta(seconds=121.6)):
-            process_event_alerts.call()  # run N+2
-
-        return Notification.objects.count()
-
-    def test_alert_for_an_event_right_after_a_run(self):
-        # The event is 60.5 s old at run N+1, more than the 1 minute timespan
-        self.assertEqual(self._alert_after_run(0.3), 1)
-
-    def test_alert_for_an_event_a_second_after_a_run(self):
-        # The event is 59.8 s old at run N+1, inside the 1 minute timespan
-        self.assertEqual(self._alert_after_run(1.0), 1)
+        pending.add(issue.id)
+        self.run_alerts_at(60.2, pending)
+        self.assertEqual(Notification.objects.count(), 0)
 
     def test_multiple_alerts(self):
         baker.make(

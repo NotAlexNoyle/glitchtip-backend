@@ -2,6 +2,7 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 ISSUE_IDS_KEY = "alert_issue_ids"
+LAST_RUN_KEY = "alert_last_run"
 
 # Upper bound on ProjectAlert.environments. An alert naming this many
 # environments is already unusual; the cap is there so an API client cannot

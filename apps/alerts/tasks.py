@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.core.cache import caches
@@ -9,11 +9,14 @@ from django.utils import timezone
 from apps.issue_events.models import Issue
 from glitchtip.partition_manager import UUID7Helper
 
-from .constants import ISSUE_IDS_KEY
+from .constants import ISSUE_IDS_KEY, LAST_RUN_KEY
 from .models import Notification, ProjectAlert
 
-# Covers the delay between two runs beyond ALERT_NOTIFICATION_INTERVAL
-ALERT_WINDOW_GRACE_SECONDS = 10
+# An event is checked at the first run after ingest finishes it, but windows
+# are measured from when it was received
+INGEST_GRACE = timedelta(seconds=10)
+# ISSUE_IDS_KEY expires after an hour, so nothing older is left to check
+MAX_LOOKBACK = timedelta(hours=1)
 
 # Lua script for atomic smembers + del
 LUA_SCRIPT = """
@@ -29,10 +32,23 @@ async def process_alert(project_alert_id: int, issue_ids: list[int]):
     await send_notification.aenqueue(notification.pk)
 
 
+async def get_lookback_start(now: datetime) -> datetime:
+    """Earliest receive time not yet covered by a previous run's window"""
+    last_run = await caches["default"].aget(LAST_RUN_KEY)
+    if last_run is None:
+        last_run = now - timedelta(seconds=settings.ALERT_NOTIFICATION_INTERVAL)
+    return max(last_run - INGEST_GRACE, now - MAX_LOOKBACK)
+
+
+async def set_last_run(now: datetime):
+    await caches["default"].aset(LAST_RUN_KEY, now, MAX_LOOKBACK.total_seconds())
+
+
 @task
 async def process_event_alerts():
     """Inspect alerts and determine if new notifications need sent"""
     now = timezone.now()
+    lookback_start = await get_lookback_start(now)
 
     issue_ids: list[int] | None = None
     # Support not having valkey, in theory
@@ -45,6 +61,7 @@ async def process_event_alerts():
         quantity__isnull=False, timespan_minutes__isnull=False
     ).select_related("project")
     if issue_ids == []:
+        await set_last_run(now)
         return  # There are no new issues, no work to do
 
     if issue_ids:
@@ -53,11 +70,10 @@ async def process_event_alerts():
         ).distinct()
 
     async for alert in project_alerts:
-        # Runs start slightly more than ALERT_NOTIFICATION_INTERVAL apart (the scheduler checks once per
-        # second, then the task waits in the queue). Without a grace period an event received just after
-        # a run is older than the timespan at the next one and never alerts.
-        start_time = now - timedelta(
-            minutes=alert.timespan_minutes, seconds=ALERT_WINDOW_GRACE_SECONDS
+        # Runs are never exactly ALERT_NOTIFICATION_INTERVAL apart. Reaching
+        # back to the last run keeps events received in between in some window.
+        start_time = min(
+            now - timedelta(minutes=alert.timespan_minutes), lookback_start
         )
         # Pruning partition optimization
         start_uuid = UUID7Helper._uuid7_for_timestamp(start_time, min_random=True)
@@ -89,6 +105,7 @@ async def process_event_alerts():
             notification = await alert.notification_set.acreate()
             await notification.issues.aset(issue_id_list)
             await send_notification.aenqueue(notification.pk)
+    await set_last_run(now)
 
 
 @task
