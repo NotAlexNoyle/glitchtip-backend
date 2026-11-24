@@ -82,10 +82,9 @@ def ff1_decrypt(aes: Cipher, tweak: bytes, radix: int, n: int, x: int) -> int:
     return _ff1(aes, tweak, radix, n, x, decrypt=True)
 
 
-def _ff1(aes: Cipher, tweak: bytes, radix: int, n: int, x: int, decrypt: bool):
+def _ff1_params(radix: int, n: int, tweak: bytes):
     u = n // 2
     v = n - u
-    a, b = divmod(x, radix**v)
     # ceil(ceil(v * log2(radix)) / 8), in integers.
     b_len = ((radix**v - 1).bit_length() + 7) // 8
     d = 4 * ((b_len + 3) // 4) + 4
@@ -98,6 +97,12 @@ def _ff1(aes: Cipher, tweak: bytes, radix: int, n: int, x: int, decrypt: bool):
         + t.to_bytes(4, "big")
     )
     q_prefix = tweak + bytes((-t - b_len - 1) % 16)
+    return u, v, b_len, d, p, q_prefix
+
+
+def _ff1(aes: Cipher, tweak: bytes, radix: int, n: int, x: int, decrypt: bool):
+    u, v, b_len, d, p, q_prefix = _ff1_params(radix, n, tweak)
+    a, b = divmod(x, radix**v)
     # ECB holds no state between blocks, but a context object is not safe to
     # share across threads, so each call takes its own.
     ecb = aes.encryptor()
@@ -127,12 +132,55 @@ def _ff1(aes: Cipher, tweak: bytes, radix: int, n: int, x: int, decrypt: bool):
     return a * radix**v + b
 
 
+@functools.lru_cache(maxsize=8)
+def _public_id_ff1(aes: Cipher, tweak: bytes) -> Callable[[int, bool], int]:
+    """``_ff1`` for public ids, with its first AES call done once per key.
+
+    For radix 2 over ``PUBLIC_ID_BITS`` digits and a short tweak, P || Q is
+    exactly two blocks, so each round's PRF is AES(AES(P) xor Q). P depends
+    only on the parameters, so AES(P) is computed here, once, and each round
+    makes one AES call instead of two. Same output as ``_ff1``.
+    """
+    u, v, b_len, d, p, q_prefix = _ff1_params(2, PUBLIC_ID_BITS, tweak)
+    if len(q_prefix) + 1 + b_len != 16 or d > 16:
+        return functools.partial(_ff1, aes, tweak, 2, PUBLIC_ID_BITS)
+    # Q is the tweak and padding, then the round number, then one half.
+    q_base = int.from_bytes(aes.encryptor().update(p), "big") ^ (
+        int.from_bytes(q_prefix, "big") << 8 * (1 + b_len)
+    )
+    round_shift = 8 * b_len
+    # The first d bytes of R; d <= 16, so no further blocks are needed.
+    s_shift = 128 - 8 * d
+    mod_u, mod_v = 2**u, 2**v
+
+    def ff1(x: int, decrypt: bool) -> int:
+        ecb = aes.encryptor()
+
+        def round_value(i: int, half: int) -> int:
+            block = q_base ^ (i << round_shift) ^ half
+            r = ecb.update(block.to_bytes(16, "big"))
+            return int.from_bytes(r, "big") >> s_shift
+
+        a, b = divmod(x, mod_v)
+        if not decrypt:
+            for i in range(10):
+                m = mod_u if i % 2 == 0 else mod_v
+                a, b = b, (a + round_value(i, b)) % m
+        else:
+            for i in reversed(range(10)):
+                m = mod_u if i % 2 == 0 else mod_v
+                a, b = (b - round_value(i, a)) % m, a
+        return a * mod_v + b
+
+    return ff1
+
+
 def _permute(aes: Cipher, tweak: bytes, x: int) -> int:
-    return ff1_encrypt(aes, tweak, 2, PUBLIC_ID_BITS, x)
+    return _public_id_ff1(aes, tweak)(x, False)
 
 
 def _unpermute(aes: Cipher, tweak: bytes, y: int) -> int:
-    return ff1_decrypt(aes, tweak, 2, PUBLIC_ID_BITS, y)
+    return _public_id_ff1(aes, tweak)(y, True)
 
 
 def encode_with(aes: Cipher, internal: int) -> int:
@@ -183,6 +231,7 @@ def _decode_cached(aes: Cipher, public: int) -> int:
 def _clear_caches() -> None:
     _encode_cached.cache_clear()
     _decode_cached.cache_clear()
+    _public_id_ff1.cache_clear()
 
 
 def make_aes(secret: SecretKey) -> Cipher:

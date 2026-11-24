@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 import threading
 from pathlib import Path
 from unittest import mock
@@ -86,6 +87,17 @@ class PublicIdTestCase(SimpleTestCase):
             with self.subTest(internal=internal):
                 self.assertEqual(encode_with(self.aes, internal), public)
                 self.assertEqual(decode_with(self.aes, public), internal)
+
+    def test_fast_path_matches_generic_ff1(self):
+        rng = random.Random(0)
+        values = [0, 1, MAX_ORG_ID, 2**48 - 1]
+        values += [rng.randrange(2**48) for _ in range(2000)]
+        for tweak in (public_id._ORG_TWEAK, b"project", b"x" * 13):
+            for x in values:
+                with self.subTest(tweak=tweak, x=x):
+                    y = ff1_encrypt(self.aes, tweak, 2, 48, x)
+                    self.assertEqual(public_id._permute(self.aes, tweak, x), y)
+                    self.assertEqual(public_id._unpermute(self.aes, tweak, y), x)
 
     def test_out_of_range_public_ids_name_no_org(self):
         # Just past int4: a public id that decrypts to no possible org.
