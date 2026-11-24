@@ -300,3 +300,110 @@ class ArtifactBundleAssembleTests(GlitchTipTestCaseMixin, TestCase):
         self.assertAssembleState(checksum, ChunkFileState.OK)
         bundle = await DebugSymbolBundle.objects.aget(organization=self.organization)
         self.assertEqual(bundle.debug_id, debug_id)
+
+    async def upload_with_own_map(self, name: str, debug_id: str) -> str:
+        """Upload one minified file paired with its own source map."""
+        manifest = {
+            "org": self.organization.slug,
+            "project": self.project.slug,
+            "files": {
+                f"files/_/_/{name}": {
+                    "type": "minified_source",
+                    "url": f"~/{name}",
+                    "headers": {"debug-id": debug_id, "sourcemap": f"{name}.map"},
+                },
+                f"files/_/_/{name}.map": {
+                    "type": "source_map",
+                    "url": f"~/{name}.map",
+                    "headers": {"debug-id": debug_id},
+                },
+            },
+        }
+        return await self.assemble(
+            manifest, {f"files/_/_/{name}": "x", f"files/_/_/{name}.map": "{}"}
+        )
+
+    async def test_replacing_a_bundle_keeps_a_source_map_another_bundle_shares(self):
+        """Re-uploading one debug id must not strip another bundle's map.
+
+        The replaced bundle's old files are deleted, but here its source map
+        also serves a second debug id outside the new upload.
+        """
+        x, y = str(uuid.uuid4()), str(uuid.uuid4())
+        manifest = {
+            "org": self.organization.slug,
+            "project": self.project.slug,
+            "files": {
+                "files/_/_/x.js": {
+                    "type": "minified_source",
+                    "url": "~/x.js",
+                    "headers": {"debug-id": x, "sourcemap": "shared.js.map"},
+                },
+                "files/_/_/y.js": {
+                    "type": "minified_source",
+                    "url": "~/y.js",
+                    "headers": {"debug-id": y, "sourcemap": "shared.js.map"},
+                },
+                "files/_/_/shared.js.map": {
+                    "type": "source_map",
+                    "url": "~/shared.js.map",
+                    "headers": {},
+                },
+            },
+        }
+        checksum = await self.assemble(
+            manifest,
+            {
+                "files/_/_/x.js": "x",
+                "files/_/_/y.js": "y",
+                "files/_/_/shared.js.map": "{}",
+            },
+        )
+        self.assertAssembleState(checksum, ChunkFileState.OK)
+
+        checksum = await self.upload_with_own_map("x.js", x)
+
+        self.assertAssembleState(checksum, ChunkFileState.OK)
+        bundle = await DebugSymbolBundle.objects.select_related("sourcemap_file").aget(
+            organization=self.organization, debug_id=y
+        )
+        self.assertEqual(bundle.sourcemap_file.name, "shared.js.map")
+        # Files nothing references any more are still cleaned up.
+        self.assertEqual(await File.objects.filter(name="x.js").acount(), 1)
+
+    async def test_replacing_a_bundle_keeps_a_bundle_built_on_its_source_map(self):
+        """A replaced map that is another bundle's file must not cascade it away.
+
+        The map carries its own debug id, so it is the ``file`` of a bundle of
+        its own, and that foreign key cascades on delete.
+        """
+        x, z = str(uuid.uuid4()), str(uuid.uuid4())
+        manifest = {
+            "org": self.organization.slug,
+            "project": self.project.slug,
+            "files": {
+                "files/_/_/x.js": {
+                    "type": "minified_source",
+                    "url": "~/x.js",
+                    "headers": {"debug-id": x, "sourcemap": "z.js.map"},
+                },
+                "files/_/_/z.js.map": {
+                    "type": "source_map",
+                    "url": "~/z.js.map",
+                    "headers": {"debug-id": z},
+                },
+            },
+        }
+        checksum = await self.assemble(
+            manifest, {"files/_/_/x.js": "x", "files/_/_/z.js.map": "{}"}
+        )
+        self.assertAssembleState(checksum, ChunkFileState.OK)
+
+        checksum = await self.upload_with_own_map("x.js", x)
+
+        self.assertAssembleState(checksum, ChunkFileState.OK)
+        self.assertTrue(
+            await DebugSymbolBundle.objects.filter(
+                organization=self.organization, debug_id=z, file__name="z.js.map"
+            ).aexists()
+        )

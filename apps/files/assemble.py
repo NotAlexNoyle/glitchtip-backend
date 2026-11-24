@@ -10,6 +10,7 @@ from os import path
 from uuid import UUID
 
 from django.core.cache import cache
+from django.db.models import Exists, OuterRef, Q
 
 from apps.organizations_ext.models import Organization
 from apps.releases.models import Release
@@ -328,20 +329,18 @@ def assemble_artifacts(
             ignore_conflicts=True,
         )
 
-    # Clean up replaced files, plus the skipped artifacts uploaded above. Both
-    # run only once the inserts have succeeded, and only for files no surviving
-    # bundle points at — a skipped source map can still be another bundle's
-    # sourcemap_file. Deleting the File row moves its blob from the multi-day
-    # retention pass onto the 24 hour orphan pass in maintenance.py.
-    if old_file_ids or unreferenceable_files:
-        new_file_ids = {b.file_id for b in bundles if b.file_id} | {
-            b.sourcemap_file_id for b in bundles if b.sourcemap_file_id
-        }
-        orphaned_ids = (
-            old_file_ids | {f.id for f in unreferenceable_files}
-        ) - new_file_ids
-        if orphaned_ids:
-            File.objects.filter(id__in=orphaned_ids).delete()
+    # Delete replaced files and the skipped artifacts above unless any bundle,
+    # in this upload or not, still points at them: one source map can serve
+    # several debug ids. The blob then moves onto the 24 hour orphan pass.
+    candidate_ids = old_file_ids | {f.id for f in unreferenceable_files}
+    if candidate_ids:
+        File.objects.filter(id__in=candidate_ids).exclude(
+            Exists(
+                DebugSymbolBundle.objects.filter(
+                    Q(file=OuterRef("pk")) | Q(sourcemap_file=OuterRef("pk"))
+                )
+            )
+        ).delete()
 
     set_assemble_status(
         AssembleTask.ARTIFACTS, organization.pk, checksum, ChunkFileState.OK
