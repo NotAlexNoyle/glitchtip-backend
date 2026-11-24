@@ -1,8 +1,12 @@
 import io
 import json
+import os
+import shutil
+import tempfile
 import uuid
 import zipfile
 from hashlib import sha1
+from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -11,7 +15,12 @@ from django.urls import reverse
 from apps.sourcecode.models import DebugSymbolBundle
 from glitchtip.test_utils.test_case import GlitchTipTestCaseMixin
 
-from ..assemble import AssembleTask, ChunkFileState, get_assemble_status
+from ..assemble import (
+    AssembleTask,
+    ChunkFileState,
+    assemble_artifacts,
+    get_assemble_status,
+)
 from ..models import File, FileBlob
 
 
@@ -300,3 +309,238 @@ class ArtifactBundleAssembleTests(GlitchTipTestCaseMixin, TestCase):
         self.assertAssembleState(checksum, ChunkFileState.OK)
         bundle = await DebugSymbolBundle.objects.aget(organization=self.organization)
         self.assertEqual(bundle.debug_id, debug_id)
+
+
+class AssembleArtifactsCleanupTests(GlitchTipTestCaseMixin, TestCase):
+    """
+    Every way out of assemble_artifacts must remove the scratchpad and bundle
+    file and leave a terminal status, or a polling client waits forever.
+    """
+
+    def setUp(self):
+        self.create_project()
+        self.scratchpads: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            scratchpad = real_mkdtemp(*args, **kwargs)
+            self.scratchpads.append(scratchpad)
+            return scratchpad
+
+        # Patched on the tempfile module so TemporaryDirectory is caught too.
+        patcher = mock.patch("tempfile.mkdtemp", side_effect=recording_mkdtemp)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(
+            lambda: [shutil.rmtree(p, ignore_errors=True) for p in self.scratchpads]
+        )
+
+    def run_assemble(
+        self, manifest, contents: dict[str, str], may_raise: bool = True
+    ) -> str:
+        data, checksum = build_bundle(manifest, contents)
+        FileBlob.objects.create(
+            blob=SimpleUploadedFile(checksum, data),
+            size=len(data),
+            checksum=checksum,
+        )
+        if not may_raise:
+            assemble_artifacts(self.organization, None, checksum, [checksum])
+            return checksum
+        try:
+            assemble_artifacts(self.organization, None, checksum, [checksum])
+        except Exception:
+            # Re-raising after cleanup is fine; only the cleanup is pinned.
+            pass
+        return checksum
+
+    def manifest(self, files: dict) -> dict:
+        return {
+            "org": self.organization.slug,
+            "project": self.project.slug,
+            "files": files,
+        }
+
+    def artifact(self, name: str, debug_id: str, **extra) -> dict:
+        return {
+            "type": "minified_source",
+            "url": f"~/{name}",
+            "headers": {"debug-id": debug_id},
+            **extra,
+        }
+
+    def assertCleanedUp(self, checksum: str, state: ChunkFileState):
+        status = get_assemble_status(
+            AssembleTask.ARTIFACTS, self.organization.pk, checksum
+        )
+        self.assertIsNotNone(status, "assemble status was never set")
+        self.assertEqual(status[0], state, status[1])
+        self.assertTrue(self.scratchpads, "no scratchpad was created")
+        for scratchpad in self.scratchpads:
+            self.assertFalse(os.path.exists(scratchpad), "scratchpad left on disk")
+        self.assertFalse(
+            File.objects.filter(type="release.bundle").exists(),
+            "bundle file left in storage",
+        )
+        if state == ChunkFileState.ERROR:
+            self.assertFalse(File.objects.exists(), "artifact files left behind")
+            self.assertFalse(DebugSymbolBundle.objects.exists())
+
+    def test_success_cleans_up(self):
+        checksum = self.run_assemble(
+            self.manifest({"files/_/_/a.js": self.artifact("a.js", str(uuid.uuid4()))}),
+            {"files/_/_/a.js": "function a(){}"},
+            may_raise=False,
+        )
+        self.assertCleanedUp(checksum, ChunkFileState.OK)
+        self.assertEqual(DebugSymbolBundle.objects.count(), 1)
+
+    def test_handled_failure_does_not_raise(self):
+        """A failure the code already handles must not clean up twice."""
+        manifest = self.manifest({})
+        manifest["org"] = "some-other-org"
+        checksum = self.run_assemble(manifest, {}, may_raise=False)
+        self.assertCleanedUp(checksum, ChunkFileState.ERROR)
+
+    def test_handled_failure_after_files_created_does_not_raise(self):
+        checksum = self.run_assemble(
+            self.manifest(
+                {
+                    "files/_/_/a.js": self.artifact("a.js", str(uuid.uuid4())),
+                    "../escape.js": self.artifact("escape.js", str(uuid.uuid4())),
+                }
+            ),
+            {"files/_/_/a.js": "function a(){}"},
+            may_raise=False,
+        )
+        self.assertCleanedUp(checksum, ChunkFileState.ERROR)
+
+    def test_manifest_not_an_object(self):
+        checksum = self.run_assemble([], {})
+        self.assertCleanedUp(checksum, ChunkFileState.ERROR)
+
+    def test_artifact_missing_type(self):
+        """The first artifact's File row is already written when the second fails."""
+        bad = self.artifact("b.js", str(uuid.uuid4()))
+        del bad["type"]
+        checksum = self.run_assemble(
+            self.manifest(
+                {
+                    "files/_/_/a.js": self.artifact("a.js", str(uuid.uuid4())),
+                    "files/_/_/b.js": bad,
+                }
+            ),
+            {"files/_/_/a.js": "function a(){}", "files/_/_/b.js": "function b(){}"},
+        )
+        self.assertCleanedUp(checksum, ChunkFileState.ERROR)
+
+    def test_listed_artifact_missing_from_zip(self):
+        checksum = self.run_assemble(
+            self.manifest(
+                {"files/_/_/gone.js": self.artifact("gone.js", str(uuid.uuid4()))}
+            ),
+            {},
+        )
+        self.assertCleanedUp(checksum, ChunkFileState.ERROR)
+
+    def test_bundle_insert_fails(self):
+        with mock.patch.object(
+            DebugSymbolBundle.objects,
+            "bulk_create",
+            side_effect=RuntimeError("insert failed"),
+        ):
+            checksum = self.run_assemble(
+                self.manifest(
+                    {"files/_/_/a.js": self.artifact("a.js", str(uuid.uuid4()))}
+                ),
+                {"files/_/_/a.js": "function a(){}"},
+            )
+        self.assertCleanedUp(checksum, ChunkFileState.ERROR)
+
+    def test_cleanup_failure_after_success_keeps_upload(self):
+        """A failed bundle-file delete must not undo a saved upload."""
+        real_delete = File.delete
+        failed = []
+
+        def flaky_delete(file, *args, **kwargs):
+            if file.type == "release.bundle" and not failed:
+                failed.append(file.id)
+                raise OSError("storage unavailable")
+            return real_delete(file, *args, **kwargs)
+
+        with mock.patch.object(File, "delete", flaky_delete):
+            checksum = self.run_assemble(
+                self.manifest(
+                    {"files/_/_/a.js": self.artifact("a.js", str(uuid.uuid4()))}
+                ),
+                {"files/_/_/a.js": "function a(){}"},
+            )
+
+        self.assertTrue(failed, "bundle file delete was never attempted")
+        status = get_assemble_status(
+            AssembleTask.ARTIFACTS, self.organization.pk, checksum
+        )
+        self.assertEqual(status[0], ChunkFileState.OK, status[1])
+        self.assertEqual(DebugSymbolBundle.objects.count(), 1)
+        self.assertTrue(File.objects.filter(name="a.js").exists())
+        for scratchpad in self.scratchpads:
+            self.assertFalse(os.path.exists(scratchpad), "scratchpad left on disk")
+
+    def test_partial_insert_keeps_existing_bundle(self):
+        """
+        When the second insert fails, the upsert before it must be rolled back.
+        Otherwise the existing bundle is repointed at the new files, and
+        deleting those cascades to the bundle.
+        """
+        debug_id = str(uuid.uuid4())
+        complete_pair = {
+            "files/_/_/a.js": self.artifact("a.js", debug_id),
+            "files/_/_/a.js.map": {
+                "type": "source_map",
+                "url": "~/a.js.map",
+                "headers": {"debug-id": debug_id},
+            },
+        }
+        self.run_assemble(
+            self.manifest(complete_pair),
+            {"files/_/_/a.js": "function a(){}", "files/_/_/a.js.map": "{}"},
+            may_raise=False,
+        )
+        existing = DebugSymbolBundle.objects.get(debug_id=debug_id)
+        self.assertIsNotNone(existing.sourcemap_file_id)
+
+        real_bulk_create = DebugSymbolBundle.objects.bulk_create
+
+        def fail_incomplete_insert(objs, **kwargs):
+            if kwargs.get("ignore_conflicts"):
+                raise RuntimeError("insert failed")
+            return real_bulk_create(objs, **kwargs)
+
+        with mock.patch.object(
+            DebugSymbolBundle.objects,
+            "bulk_create",
+            side_effect=fail_incomplete_insert,
+        ):
+            checksum = self.run_assemble(
+                self.manifest(
+                    {
+                        **complete_pair,
+                        "files/_/_/b.js": self.artifact("b.js", str(uuid.uuid4())),
+                    }
+                ),
+                {
+                    "files/_/_/a.js": "function a(){return 2}",
+                    "files/_/_/a.js.map": '{"version":3}',
+                    "files/_/_/b.js": "function b(){}",
+                },
+            )
+
+        status = get_assemble_status(
+            AssembleTask.ARTIFACTS, self.organization.pk, checksum
+        )
+        self.assertEqual(status[0], ChunkFileState.ERROR, status[1])
+        bundle = DebugSymbolBundle.objects.get(debug_id=debug_id)
+        self.assertEqual(bundle.file_id, existing.file_id)
+        self.assertEqual(bundle.sourcemap_file_id, existing.sourcemap_file_id)
+        self.assertEqual(DebugSymbolBundle.objects.count(), 1)
+        self.assertFalse(File.objects.filter(name="b.js").exists())

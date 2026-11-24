@@ -10,6 +10,7 @@ from os import path
 from uuid import UUID
 
 from django.core.cache import cache
+from django.db import transaction
 
 from apps.organizations_ext.models import Organization
 from apps.releases.models import Release
@@ -124,7 +125,7 @@ def assemble_artifacts(
     scratchpad = tempfile.mkdtemp()
     files: list[File] = []
 
-    def _fail_and_cleanup(detail: str):
+    def _fail(detail: str):
         set_assemble_status(
             AssembleTask.ARTIFACTS,
             organization.pk,
@@ -134,220 +135,233 @@ def assemble_artifacts(
         )
         if files:
             File.objects.filter(id__in=[f.id for f in files]).delete()
-        shutil.rmtree(scratchpad)
-        bundle_file.delete()
 
+    # The finally owns scratchpad and bundle cleanup, so _fail must not do it.
     try:
-        safe_extract_zip(temp_file, scratchpad, strip_toplevel=False)
-    except ZipExtractionLimitExceeded as err:
-        # An over-sized bundle is a rejected upload, not a server fault. Record
-        # it on the assemble status and log the reason. The assemble endpoints
-        # answer before this task runs and do not read the status back, so for
-        # now the log is what an operator has to go on.
-        logger.warning(
-            "assemble_artifacts: bundle over extraction limits for org %s "
-            "checksum %s: %s",
-            organization.pk,
-            checksum,
-            err,
-        )
-        _fail_and_cleanup(f"Failed to extract bundle: {err}")
-        return
-    except Exception:
-        # Catch broadly: zipfile raises BadZipFile, but other I/O errors are
-        # possible. All mean the uploaded blob is not a usable zip bundle.
-        logger.warning(
-            "assemble_artifacts: invalid zip bundle for org %s checksum %s",
-            organization.pk,
-            checksum,
-            exc_info=True,
-        )
-        _fail_and_cleanup(
-            "Failed to extract bundle: uploaded file is not a valid zip archive"
-        )
-        return
-
-    try:
-        manifest_path = path.join(scratchpad, "manifest.json")
-        with open(manifest_path, "rb") as manifest:
-            manifest = json.loads(manifest.read())
-    except Exception:
-        # Missing or malformed manifest.json inside the zip.
-        logger.warning(
-            "assemble_artifacts: bad manifest for org %s checksum %s",
-            organization.pk,
-            checksum,
-            exc_info=True,
-        )
-        _fail_and_cleanup("Failed to open release manifest")
-        return
-
-    if organization.slug != manifest.get("org"):
-        _fail_and_cleanup("Organization does not match uploaded bundle")
-        return
-
-    release_name = manifest.get("release")
-    if release_name != version:
-        _fail_and_cleanup("Release does not match uploaded bundle")
-        return
-
-    release: Release | None = None
-    if release_name:
-        release, _ = Release.objects.get_or_create(
-            organization=organization, version=release_name
-        )
-
-    # Sentry OSS would add dist to release here
-
-    artifacts = manifest.get("files", {})
-    for rel_path, artifact in artifacts.items():
-        full_path = path.normpath(path.join(scratchpad, rel_path))
-        if not full_path.startswith(path.normpath(scratchpad) + path.sep):
-            _fail_and_cleanup("Invalid path in manifest")
+        try:
+            safe_extract_zip(temp_file, scratchpad, strip_toplevel=False)
+        except ZipExtractionLimitExceeded as err:
+            # An over-sized bundle is a rejected upload, not a server fault. Record
+            # it on the assemble status and log the reason. The assemble endpoints
+            # answer before this task runs and do not read the status back, so for
+            # now the log is what an operator has to go on.
+            logger.warning(
+                "assemble_artifacts: bundle over extraction limits for org %s "
+                "checksum %s: %s",
+                organization.pk,
+                checksum,
+                err,
+            )
+            _fail(f"Failed to extract bundle: {err}")
+            return
+        except Exception:
+            # Catch broadly: zipfile raises BadZipFile, but other I/O errors are
+            # possible. All mean the uploaded blob is not a usable zip bundle.
+            logger.warning(
+                "assemble_artifacts: invalid zip bundle for org %s checksum %s",
+                organization.pk,
+                checksum,
+                exc_info=True,
+            )
+            _fail("Failed to extract bundle: uploaded file is not a valid zip archive")
             return
 
-        artifact_url = artifact.get("url", rel_path)
-        artifact_basename = artifact_url.rsplit("/", 1)[-1]
-        headers = artifact.get("headers")
-        if not isinstance(headers, dict):
-            # An explicit ``"headers": null`` returns None from .get(), and the
-            # manifest is client-supplied, so the value can be any JSON type.
-            headers = {}
+        try:
+            manifest_path = path.join(scratchpad, "manifest.json")
+            with open(manifest_path, "rb") as manifest:
+                manifest = json.loads(manifest.read())
+        except Exception:
+            # Missing or malformed manifest.json inside the zip.
+            logger.warning(
+                "assemble_artifacts: bad manifest for org %s checksum %s",
+                organization.pk,
+                checksum,
+                exc_info=True,
+            )
+            _fail("Failed to open release manifest")
+            return
 
-        file = File.objects.create(
-            name=artifact_basename,
-            type=artifact["type"],
-            headers=headers,
-        )
-        files.append(file)
+        if organization.slug != manifest.get("org"):
+            _fail("Organization does not match uploaded bundle")
+            return
 
-        with open(full_path, "rb") as fp:
-            file.putfile(fp)
+        release_name = manifest.get("release")
+        if release_name != version:
+            _fail("Release does not match uploaded bundle")
+            return
 
-    # Parse debug ids once per artifact, in canonical form. Two spellings of
-    # one uuid (upper case, or unhyphenated) would otherwise be distinct here
-    # but collide in the unique index at insert time.
-    debug_ids: dict[int, str] = {}
-    for file in files:
-        if parsed := parse_debug_id(file.headers.get("debug-id")):
-            debug_ids[file.id] = parsed
+        release: Release | None = None
+        if release_name:
+            release, _ = Release.objects.get_or_create(
+                organization=organization, version=release_name
+            )
 
-    # Build bundles, deduplicating by debug_id. When a minified_source and its
-    # source_map share the same debug-id, keep only the minified_source bundle
-    # (which carries the sourcemap_file reference).
-    bundles_by_debug_id: dict[str, DebugSymbolBundle] = {}
-    bundles_without_debug_id: list[DebugSymbolBundle] = []
-    unreferenceable_files: list[File] = []
-    for file in files:
-        debug_id = debug_ids.get(file.id)
-        if debug_id is None and release is None:
-            # Nothing could ever resolve this artifact: bundles are looked up
-            # by debug_id, or by release plus file name. Storing it is also
-            # rejected by the debug_id_or_release_required check constraint,
-            # which would abort the whole bulk insert and lose the rest of
-            # the upload.
-            unreferenceable_files.append(file)
-            continue
+        # Sentry OSS would add dist to release here
 
-        sourcemap_file = None
-        if file.type == "minified_source":
-            try:
-                sourcemap_file = next(
-                    value
-                    for value in files
-                    if value.type == "source_map"
-                    and (
-                        file.headers.get("sourcemap", file.headers.get("Sourcemap"))
-                        == value.name
-                        or (
-                            debug_id is not None and debug_ids.get(value.id) == debug_id
+        artifacts = manifest.get("files", {})
+        for rel_path, artifact in artifacts.items():
+            full_path = path.normpath(path.join(scratchpad, rel_path))
+            if not full_path.startswith(path.normpath(scratchpad) + path.sep):
+                _fail("Invalid path in manifest")
+                return
+
+            artifact_url = artifact.get("url", rel_path)
+            artifact_basename = artifact_url.rsplit("/", 1)[-1]
+            headers = artifact.get("headers")
+            if not isinstance(headers, dict):
+                # An explicit ``"headers": null`` returns None from .get(), and the
+                # manifest is client-supplied, so the value can be any JSON type.
+                headers = {}
+
+            file = File.objects.create(
+                name=artifact_basename,
+                type=artifact["type"],
+                headers=headers,
+            )
+            files.append(file)
+
+            with open(full_path, "rb") as fp:
+                file.putfile(fp)
+
+        # Parse debug ids once per artifact, in canonical form. Two spellings of
+        # one uuid (upper case, or unhyphenated) would otherwise be distinct here
+        # but collide in the unique index at insert time.
+        debug_ids: dict[int, str] = {}
+        for file in files:
+            if parsed := parse_debug_id(file.headers.get("debug-id")):
+                debug_ids[file.id] = parsed
+
+        # Build bundles, deduplicating by debug_id. When a minified_source and its
+        # source_map share the same debug-id, keep only the minified_source bundle
+        # (which carries the sourcemap_file reference).
+        bundles_by_debug_id: dict[str, DebugSymbolBundle] = {}
+        bundles_without_debug_id: list[DebugSymbolBundle] = []
+        unreferenceable_files: list[File] = []
+        for file in files:
+            debug_id = debug_ids.get(file.id)
+            if debug_id is None and release is None:
+                # Nothing could ever resolve this artifact: bundles are looked up
+                # by debug_id, or by release plus file name. Storing it is also
+                # rejected by the debug_id_or_release_required check constraint,
+                # which would abort the whole bulk insert and lose the rest of
+                # the upload.
+                unreferenceable_files.append(file)
+                continue
+
+            sourcemap_file = None
+            if file.type == "minified_source":
+                try:
+                    sourcemap_file = next(
+                        value
+                        for value in files
+                        if value.type == "source_map"
+                        and (
+                            file.headers.get("sourcemap", file.headers.get("Sourcemap"))
+                            == value.name
+                            or (
+                                debug_id is not None
+                                and debug_ids.get(value.id) == debug_id
+                            )
                         )
                     )
+                except StopIteration:
+                    pass
+
+            bundle = DebugSymbolBundle(
+                organization=organization,
+                debug_id=debug_id,
+                release=release,
+                sourcemap_file=sourcemap_file,
+                file=file,
+            )
+            if debug_id is None:
+                bundles_without_debug_id.append(bundle)
+            elif debug_id not in bundles_by_debug_id or sourcemap_file is not None:
+                bundles_by_debug_id[debug_id] = bundle
+
+        bundles = list(bundles_by_debug_id.values()) + bundles_without_debug_id
+
+        if unreferenceable_files:
+            # One aggregate line per upload, not one per artifact: a large bundle
+            # can hold thousands of files. Symbolication silently not working is
+            # otherwise hard to trace back to the upload.
+            logger.warning(
+                "assemble_artifacts: skipped %d artifact(s) for org %s checksum %s: "
+                "no debug-id header and no release, so they could never be matched "
+                "to an event. Upload with a release version, or use an SDK build "
+                "that emits debug ids.",
+                len(unreferenceable_files),
+                organization.pk,
+                checksum,
+            )
+
+        # Split bundles: complete bundles (with sourcemap_file) can upsert to
+        # replace stale data. Incomplete bundles (no sourcemap_file) should only
+        # insert if the debug_id doesn't exist yet — partial re-uploads from the
+        # SDK must not overwrite a complete bundle.
+        complete_bundles = [b for b in bundles if b.sourcemap_file is not None]
+        incomplete_bundles = [b for b in bundles if b.sourcemap_file is None]
+
+        # Atomic so a failed insert rolls back the upsert before it. Otherwise
+        # existing bundles point at the new files, and _fail deletes those.
+        with transaction.atomic():
+            # Collect old file IDs before upsert so we can clean them up
+            old_file_ids: set[int] = set()
+            if complete_bundles:
+                complete_debug_ids = [
+                    b.debug_id for b in complete_bundles if b.debug_id
+                ]
+                if complete_debug_ids:
+                    for file_id, sm_id in DebugSymbolBundle.objects.filter(
+                        organization=organization, debug_id__in=complete_debug_ids
+                    ).values_list("file_id", "sourcemap_file_id"):
+                        if file_id:
+                            old_file_ids.add(file_id)
+                        if sm_id:
+                            old_file_ids.add(sm_id)
+
+                DebugSymbolBundle.objects.bulk_create(
+                    complete_bundles,
+                    update_conflicts=True,
+                    unique_fields=["organization", "debug_id"],
+                    update_fields=["file", "sourcemap_file", "release"],
                 )
-            except StopIteration:
-                pass
 
-        bundle = DebugSymbolBundle(
-            organization=organization,
-            debug_id=debug_id,
-            release=release,
-            sourcemap_file=sourcemap_file,
-            file=file,
+            if incomplete_bundles:
+                DebugSymbolBundle.objects.bulk_create(
+                    incomplete_bundles,
+                    ignore_conflicts=True,
+                )
+
+            # Clean up replaced files, plus the skipped artifacts uploaded
+            # above. Both run only once the inserts have succeeded, and only
+            # for files no surviving bundle points at — a skipped source map
+            # can still be another bundle's sourcemap_file. Deleting the File
+            # row moves its blob from the multi-day retention pass onto the 24
+            # hour orphan pass in maintenance.py.
+            if old_file_ids or unreferenceable_files:
+                new_file_ids = {b.file_id for b in bundles if b.file_id} | {
+                    b.sourcemap_file_id for b in bundles if b.sourcemap_file_id
+                }
+                orphaned_ids = (
+                    old_file_ids | {f.id for f in unreferenceable_files}
+                ) - new_file_ids
+                if orphaned_ids:
+                    File.objects.filter(id__in=orphaned_ids).delete()
+
+        set_assemble_status(
+            AssembleTask.ARTIFACTS, organization.pk, checksum, ChunkFileState.OK
         )
-        if debug_id is None:
-            bundles_without_debug_id.append(bundle)
-        elif debug_id not in bundles_by_debug_id or sourcemap_file is not None:
-            bundles_by_debug_id[debug_id] = bundle
-
-    bundles = list(bundles_by_debug_id.values()) + bundles_without_debug_id
-
-    if unreferenceable_files:
-        # One aggregate line per upload, not one per artifact: a large bundle
-        # can hold thousands of files. Symbolication silently not working is
-        # otherwise hard to trace back to the upload.
-        logger.warning(
-            "assemble_artifacts: skipped %d artifact(s) for org %s checksum %s: "
-            "no debug-id header and no release, so they could never be matched "
-            "to an event. Upload with a release version, or use an SDK build "
-            "that emits debug ids.",
-            len(unreferenceable_files),
+    except Exception:
+        logger.exception(
+            "assemble_artifacts: failed for org %s checksum %s",
             organization.pk,
             checksum,
         )
-
-    # Split bundles: complete bundles (with sourcemap_file) can upsert to
-    # replace stale data. Incomplete bundles (no sourcemap_file) should only
-    # insert if the debug_id doesn't exist yet — partial re-uploads from the
-    # SDK must not overwrite a complete bundle.
-    complete_bundles = [b for b in bundles if b.sourcemap_file is not None]
-    incomplete_bundles = [b for b in bundles if b.sourcemap_file is None]
-
-    # Collect old file IDs before upsert so we can clean them up
-    old_file_ids: set[int] = set()
-    if complete_bundles:
-        complete_debug_ids = [b.debug_id for b in complete_bundles if b.debug_id]
-        if complete_debug_ids:
-            for file_id, sm_id in DebugSymbolBundle.objects.filter(
-                organization=organization, debug_id__in=complete_debug_ids
-            ).values_list("file_id", "sourcemap_file_id"):
-                if file_id:
-                    old_file_ids.add(file_id)
-                if sm_id:
-                    old_file_ids.add(sm_id)
-
-        DebugSymbolBundle.objects.bulk_create(
-            complete_bundles,
-            update_conflicts=True,
-            unique_fields=["organization", "debug_id"],
-            update_fields=["file", "sourcemap_file", "release"],
-        )
-
-    if incomplete_bundles:
-        DebugSymbolBundle.objects.bulk_create(
-            incomplete_bundles,
-            ignore_conflicts=True,
-        )
-
-    # Clean up replaced files, plus the skipped artifacts uploaded above. Both
-    # run only once the inserts have succeeded, and only for files no surviving
-    # bundle points at — a skipped source map can still be another bundle's
-    # sourcemap_file. Deleting the File row moves its blob from the multi-day
-    # retention pass onto the 24 hour orphan pass in maintenance.py.
-    if old_file_ids or unreferenceable_files:
-        new_file_ids = {b.file_id for b in bundles if b.file_id} | {
-            b.sourcemap_file_id for b in bundles if b.sourcemap_file_id
-        }
-        orphaned_ids = (
-            old_file_ids | {f.id for f in unreferenceable_files}
-        ) - new_file_ids
-        if orphaned_ids:
-            File.objects.filter(id__in=orphaned_ids).delete()
-
-    set_assemble_status(
-        AssembleTask.ARTIFACTS, organization.pk, checksum, ChunkFileState.OK
-    )
-    shutil.rmtree(scratchpad)
-    bundle_file.delete()
+        _fail("Failed to assemble bundle")
+    finally:
+        shutil.rmtree(scratchpad, ignore_errors=True)
+        bundle_file.delete()
 
 
 def assemble_file(
