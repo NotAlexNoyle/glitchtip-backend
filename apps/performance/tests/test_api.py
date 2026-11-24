@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.utils import timezone
 from model_bakery import baker
@@ -151,6 +152,26 @@ class TransactionGroupAPITestCase(GlitchTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
 
+    async def test_spans_endpoint_passes_project_id(self):
+        group = await self.create_group()
+        url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/spans/"
+        with patch("apps.performance.api.query_span_groups_for_transaction") as mock_query:
+            mock_query.return_value = []
+            res = await self.async_client.get(url)
+            self.assertEqual(res.status_code, 200)
+            mock_query.assert_called_once()
+            self.assertEqual(mock_query.call_args.kwargs["project_id"], group.project_id)
+
+    async def test_trend_endpoint_passes_project_id(self):
+        group = await self.create_group()
+        url = f"/api/0/organizations/{self.organization.slug}/transaction-groups/{group.id}/trend/"
+        with patch("apps.performance.api.query_transaction_trend") as mock_query:
+            mock_query.return_value = []
+            res = await self.async_client.get(url)
+            self.assertEqual(res.status_code, 200)
+            mock_query.assert_called_once()
+            self.assertEqual(mock_query.call_args.kwargs["project_ids"], [group.project_id])
+
     async def test_span_groups_endpoint_empty(self):
         url = f"/api/0/organizations/{self.organization.slug}/span-groups/"
         res = await self.async_client.get(url)
@@ -209,3 +230,18 @@ class TransactionGroupAPITestCase(GlitchTestCase):
         res = await self.async_client.get(trend_url)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
+
+        # Cold storage routes return empty without querying cold storage
+        for path, target in (
+            ("span-groups", "query_span_groups"),
+            ("n-plus-one", "query_n_plus_one_patterns"),
+        ):
+            with (
+                self.subTest(path),
+                patch(f"apps.performance.api.{target}") as cold_query,
+            ):
+                url = f"/api/0/organizations/{self.organization.slug}/{path}/"
+                res = await self.async_client.get(url)
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.json(), [])
+                cold_query.assert_not_called()

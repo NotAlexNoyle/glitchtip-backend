@@ -18,6 +18,9 @@ from glitchtip.base_models import (
     SoftDeleteModel,
 )
 
+# The web app routes settings/projects/new to its create-project page.
+RESERVED_PROJECT_SLUGS = ("new",)
+
 
 class ProjectSoftDeleteManager(SoftDeleteManager):
     def get_queryset(self):
@@ -117,12 +120,10 @@ class Project(OrgScopedModel, CreatedModel, SoftDeleteModel):
         Make the slug the project name. Validate uniqueness with both name and org id.
         This works because when it runs on organization_id it returns an empty string.
         """
-        reserved_words = ["new"]
-
         slug = ""
         if isinstance(content, str):
             slug = slugify(self.name)
-            if slug in reserved_words:
+            if slug in RESERVED_PROJECT_SLUGS:
                 slug += "-1"
         return slug
 
@@ -139,8 +140,11 @@ class ProjectCounter(models.Model):
     value = models.PositiveIntegerField()
 
 
-class ProjectKey(CreatedModel):
+class ProjectKey(OrgScopedModel, CreatedModel):
     """Authentication key for a Project"""
+
+    org_field = "project__organization_id"
+    undeleted_through = ("project",)
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
     is_active = models.BooleanField(default=True)

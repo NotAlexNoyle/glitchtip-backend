@@ -120,6 +120,7 @@ def query_span_groups_for_transaction(
     start_dt: datetime,
     end_dt: datetime,
     limit: int = 50,
+    project_id: int | None = None,
 ) -> list[dict]:
     """
     Query span groups for a specific transaction.
@@ -127,6 +128,7 @@ def query_span_groups_for_transaction(
     Args:
         transaction_name: The resolved transaction name (caller must look up the
             TransactionGroup and pass group.transaction).
+        project_id: Optional project id to restrict spans to a single project.
 
     Returns list of {op, description, count, avg_duration, p95_duration, total_time}
     grouped by (op, description), ordered by total_time DESC.
@@ -142,7 +144,14 @@ def query_span_groups_for_transaction(
     if not duckdb_paths:
         return []
 
-    params = [transaction_name, start_dt, end_dt, limit]
+    extra_where = ""
+    params: list = [transaction_name, start_dt, end_dt]
+    param_idx = 4
+    if project_id is not None:
+        extra_where += f" AND project_id = ${param_idx}"
+        params.append(project_id)
+        param_idx += 1
+    params.append(limit)
 
     def sql_builder(paths_list):
         return f"""
@@ -157,9 +166,10 @@ def query_span_groups_for_transaction(
             WHERE transaction_name = $1
               AND timestamp >= $2
               AND timestamp < $3
+              {extra_where}
             GROUP BY op, description
             ORDER BY total_time DESC
-            LIMIT $4
+            LIMIT ${param_idx}
         """
 
     rows = _execute_resilient_query(storage, duckdb_paths, sql_builder, params)

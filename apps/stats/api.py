@@ -2,57 +2,59 @@ from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.db import connection
+from django.db.models import QuerySet
 from django.http import Http404
 from ninja import Query, Router
 
 from apps.projects.models import Project
-from glitchtip.api.authentication import AuthHttpRequest
-from glitchtip.api.permissions import has_permission
+from glitchtip.api.permissions import OrgScopedHttpRequest, org_scoped
 
 from .schema import StatsV2Schema
 
 router = Router()
 
-EVENT_TIME_SERIES_SQL = """
-SELECT gs.ts, sum(event_stat.count)
-FROM generate_series(%s, %s, %s::interval) gs (ts)
-LEFT JOIN projects_issueeventprojecthourlystatistic event_stat
-ON event_stat.date >= gs.ts AND event_stat.date < gs.ts +  interval '1 hour'
-WHERE event_stat.project_id = ANY(%s) or event_stat is null
-GROUP BY gs.ts ORDER BY gs.ts;
+# Sum per bucket first, then join to the series so empty buckets stay
+TIME_SERIES_SQL = """
+SELECT gs.ts, stat.total
+FROM generate_series(%(start)s, %(end)s, %(interval)s::interval) gs (ts)
+LEFT JOIN (
+    SELECT date_bin(%(interval)s::interval, date, %(start)s) AS ts, sum(count) AS total
+    FROM {table}
+    WHERE organization_id = %(organization_id)s
+    AND project_id = ANY(%(project_ids)s)
+    AND date >= %(start)s AND date < %(end)s::timestamptz + %(interval)s::interval
+    GROUP BY 1
+) stat USING (ts)
+ORDER BY gs.ts;
 """
-TRANSACTION_TIME_SERIES_SQL = """
-SELECT gs.ts, sum(transaction_stat.count)
-FROM generate_series(%s, %s, %s::interval) gs (ts)
-LEFT JOIN projects_transactioneventprojecthourlystatistic transaction_stat
-ON transaction_stat.date >= gs.ts AND transaction_stat.date < gs.ts +  interval '1 hour'
-WHERE transaction_stat.project_id = ANY(%s) or transaction_stat is null
-GROUP BY gs.ts ORDER BY gs.ts;
-"""
+STAT_TABLES = {
+    "error": "projects_issueeventprojecthourlystatistic",
+    "transaction": "projects_transactioneventprojecthourlystatistic",
+}
 
 
 @sync_to_async
-def get_timeseries(category, start, end, interval, project_ids):
-    if category == "error":
-        with connection.cursor() as cursor:
-            cursor.execute(
-                EVENT_TIME_SERIES_SQL,
-                [start, end, interval, project_ids],
-            )
-            return cursor.fetchall()
-    else:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                TRANSACTION_TIME_SERIES_SQL,
-                [start, end, interval, project_ids],
-            )
-            return cursor.fetchall()
+def get_timeseries(category, start, end, interval, organization_id, project_ids):
+    params = {
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "organization_id": organization_id,
+        "project_ids": project_ids,
+    }
+    sql = TIME_SERIES_SQL.format(table=STAT_TABLES[category])
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
 
 
-@router.get("organizations/{slug:organization_slug}/stats_v2/")
-@has_permission(["org:read", "org:write", "org:admin"])
+@router.get("organizations/{slug:organization_id_or_slug}/stats_v2/")
+@org_scoped(["org:read", "org:write", "org:admin"], Project)
 async def stats_v2(
-    request: AuthHttpRequest, organization_slug: str, filters: Query[StatsV2Schema]
+    request: OrgScopedHttpRequest,
+    qs: QuerySet[Project],
+    organization_id_or_slug: str,
+    filters: Query[StatsV2Schema],
 ):
     """
     Reverse engineered stats v2 endpoint. Endpoint in sentry not documented.
@@ -70,17 +72,21 @@ async def stats_v2(
     category = filters.category
     # Get projects that are authorized, filtered by organization, and selected by user
     # Intentionally separate SQL call to simplify raw SQL
-    projects = Project.objects.filter(
-        organization__slug=organization_slug,
-        organization__users=request.auth.user_id,
-    )
+    projects = qs
     if filters.project:
         projects = projects.filter(pk__in=filters.project)
     project_ids = [id async for id in projects.values_list("id", flat=True)]
     if not project_ids:
         raise Http404()
 
-    series = await get_timeseries(category, start, end, interval, project_ids)
+    series = await get_timeseries(
+        category,
+        start,
+        end,
+        interval,
+        organization_id=request.org_scope.org_id,
+        project_ids=project_ids,
+    )
 
     return {
         "intervals": [

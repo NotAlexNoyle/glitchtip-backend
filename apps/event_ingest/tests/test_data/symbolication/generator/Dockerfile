@@ -7,7 +7,7 @@
 # timestamp, esbuild by version. ../TOOLCHAIN.txt is the expected tool
 # versions; a rebuild that prints different ones will produce different
 # fixtures.
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS build
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS build
 
 ARG SNAPSHOT=20260920T000000Z
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
