@@ -75,6 +75,7 @@ class GlitchTipOAuthProvider(
 
         data = {
             "client_id": client.client_id,
+            "client_name": client.client_name,
             "state": params.state,
             "scopes": scopes,
             "code_challenge": params.code_challenge,
@@ -178,6 +179,7 @@ class GlitchTipOAuthProvider(
             refresh_token,
             application_id=client.client_id,
             is_revoked=False,
+            user__is_active=True,
         )
         if rt is None:
             return None

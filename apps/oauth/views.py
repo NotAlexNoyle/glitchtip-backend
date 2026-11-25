@@ -1,5 +1,6 @@
 import json
 import time
+from urllib.parse import urlencode, urlsplit
 
 from django.contrib.auth.decorators import login_required
 from django.core import signing
@@ -23,18 +24,25 @@ async def oauth_consent(request):
     except (signing.BadSignature, signing.SignatureExpired):
         return HttpResponseBadRequest("Invalid or expired authorization request.")
 
+    redirect_uri = data["redirect_uri"]
     if request.method == "GET":
         return TemplateResponse(
             request,
             "oauth/consent.html",
             {
+                "client_name": data.get("client_name") or "",
                 "client_id": data.get("client_id", ""),
+                "redirect_host": urlsplit(redirect_uri).netloc,
                 "scopes": data.get("scopes") or [],
                 "signed_data": request.GET["data"],
             },
         )
 
-    # POST — user approved
+    if "deny" in request.POST:
+        return _redirect_to_client(
+            redirect_uri, {"error": "access_denied"}, data.get("state")
+        )
+
     user = await request.auser()
     code = generate_token()
     now = int(time.time())
@@ -54,9 +62,11 @@ async def oauth_consent(request):
     )
     await cache.aset(_grant_cache_key(code), grant_data, AUTH_CODE_LIFETIME)
 
-    redirect_uri = data["redirect_uri"]
+    return _redirect_to_client(redirect_uri, {"code": code}, data.get("state"))
+
+
+def _redirect_to_client(redirect_uri: str, params: dict, state: str | None):
+    if state:
+        params["state"] = state
     separator = "&" if "?" in redirect_uri else "?"
-    location = f"{redirect_uri}{separator}code={code}"
-    if data.get("state"):
-        location += f"&state={data['state']}"
-    return HttpResponseRedirect(location)
+    return HttpResponseRedirect(f"{redirect_uri}{separator}{urlencode(params)}")

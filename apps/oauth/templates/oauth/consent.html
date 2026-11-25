@@ -9,13 +9,20 @@
     h1 { font-size: 1.4em; }
     .scopes { margin: 1em 0; padding: 0; list-style: none; }
     .scopes li { padding: 4px 0; font-family: monospace; }
-    button { background: #4a54e1; color: #fff; border: none; padding: 10px 24px; border-radius: 4px; font-size: 1em; cursor: pointer; }
-    button:hover { background: #3b44c4; }
+    .redirect { padding: 10px 12px; background: #f3f4f8; border-radius: 4px; }
+    .client-id { color: #777; font-size: 0.85em; word-break: break-all; }
+    .actions { display: flex; gap: 12px; }
+    button { border: none; padding: 10px 24px; border-radius: 4px; font-size: 1em; cursor: pointer; }
+    button.approve { background: #4a54e1; color: #fff; }
+    button.approve:hover { background: #3b44c4; }
+    button.deny { background: #e4e5eb; color: #333; }
+    button.deny:hover { background: #d4d5dd; }
   </style>
 </head>
 <body>
-  <h1>Authorize {{ client_id }}</h1>
-  <p>This application is requesting access to your GlitchTip account with the following permissions:</p>
+  <h1>Authorize {{ client_name|default:"an application" }}</h1>
+  <p class="redirect">After you authorize, you will be sent to <strong>{{ redirect_host }}</strong>. Only continue if you started this connection from there.</p>
+  <p>The application is requesting access to your GlitchTip account with the following permissions:</p>
   {% if scopes %}
   <ul class="scopes">
     {% for scope in scopes %}
@@ -27,7 +34,11 @@
   {% endif %}
   <form method="post" action="?data={{ signed_data }}">
     {% csrf_token %}
-    <button type="submit">Authorize</button>
+    <div class="actions">
+      <button type="submit" class="approve">Authorize</button>
+      <button type="submit" name="deny" value="1" class="deny">Deny</button>
+    </div>
   </form>
+  <p class="client-id">Client ID: {{ client_id }}</p>
 </body>
 </html>

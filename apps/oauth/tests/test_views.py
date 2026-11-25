@@ -1,4 +1,5 @@
 import json
+from urllib.parse import parse_qs, urlparse
 
 from django.core import signing
 from django.core.cache import cache
@@ -12,6 +13,7 @@ from apps.oauth.provider import _grant_cache_key
 def _make_signed_data(**overrides):
     data = {
         "client_id": "test-client-id",
+        "client_name": "Test Client",
         "state": "test-state",
         "scopes": ["org:read", "event:read"],
         "code_challenge": "challenge123",
@@ -43,7 +45,8 @@ class OAuthConsentViewTest(TestCase):
         signed = _make_signed_data()
         resp = self.client.get(reverse("oauth_consent") + f"?data={signed}")
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "test-client-id")
+        self.assertContains(resp, "Test Client")
+        self.assertContains(resp, "localhost:3000")
         self.assertContains(resp, "org:read")
         self.assertContains(resp, "event:read")
         self.assertContains(resp, "Authorize")
@@ -61,8 +64,6 @@ class OAuthConsentViewTest(TestCase):
         self.assertIn("state=test-state", location)
 
         # Extract the code from redirect URL
-        from urllib.parse import parse_qs, urlparse
-
         parsed = urlparse(location)
         params = parse_qs(parsed.query)
         code = params["code"][0]
@@ -74,6 +75,24 @@ class OAuthConsentViewTest(TestCase):
         self.assertEqual(grant["client_id"], "test-client-id")
         self.assertEqual(grant["user_id"], self.user.id)
         self.assertEqual(grant["scopes"], ["org:read", "event:read"])
+
+    def test_post_encodes_state(self):
+        self.client.force_login(self.user)
+        state = "a&b=c d#e+f"
+        signed = _make_signed_data(state=state)
+        resp = self.client.post(reverse("oauth_consent") + f"?data={signed}")
+        params = parse_qs(urlparse(resp["Location"]).query)
+        self.assertEqual(params["state"], [state])
+
+    def test_post_deny_redirects_without_grant(self):
+        self.client.force_login(self.user)
+        signed = _make_signed_data()
+        resp = self.client.post(
+            reverse("oauth_consent") + f"?data={signed}", {"deny": "1"}
+        )
+        self.assertEqual(resp.status_code, 302)
+        params = parse_qs(urlparse(resp["Location"]).query)
+        self.assertEqual(params, {"error": ["access_denied"], "state": ["test-state"]})
 
     def test_post_without_state(self):
         self.client.force_login(self.user)

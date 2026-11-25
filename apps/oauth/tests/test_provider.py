@@ -2,6 +2,7 @@ import json
 import time
 
 from asgiref.sync import sync_to_async
+from django.core import signing
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from mcp.server.auth.provider import AccessToken, RefreshToken
@@ -70,7 +71,7 @@ class OAuthProviderAuthorizeTest(TestCase):
         from mcp.server.auth.provider import AuthorizationParams
         from pydantic import AnyUrl
 
-        info = _make_client_info()
+        info = _make_client_info(client_name="Claude")
         params = AuthorizationParams(
             state="test-state",
             scopes=["org:read"],
@@ -80,7 +81,8 @@ class OAuthProviderAuthorizeTest(TestCase):
         )
         url = await self.provider.authorize(info, params)
         self.assertIn("/oauth/authorize/", url)
-        self.assertIn("data=", url)
+        signed = url.split("data=", 1)[1]
+        self.assertEqual(signing.loads(signed)["client_name"], "Claude")
 
 
 class OAuthProviderAuthCodeFlowTest(TestCase):
@@ -190,6 +192,22 @@ class OAuthProviderRefreshTokenTest(TestCase):
             access_token_digest=_hash_token("old-access"),
             scopes="org:read",
             is_revoked=True,
+        )
+        result = await self.provider.load_refresh_token(self.info, plaintext)
+        self.assertIsNone(result)
+
+    async def test_load_refresh_token_inactive_user(self):
+        await self.provider.register_client(self.info)
+        plaintext = "inactive-user-token"
+        self.user.is_active = False
+        await self.user.asave(update_fields=["is_active"])
+        await OAuthRefreshToken.objects.acreate(
+            token_prefix=_token_prefix(plaintext),
+            token_digest=_hash_token(plaintext),
+            application_id="test-client-id",
+            user_id=self.user.id,
+            access_token_digest=_hash_token("old-access"),
+            scopes="org:read",
         )
         result = await self.provider.load_refresh_token(self.info, plaintext)
         self.assertIsNone(result)
