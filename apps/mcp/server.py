@@ -12,7 +12,9 @@ from mcp.server.auth.settings import (
     RevocationOptions,
 )
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp_types import ToolAnnotations
 from starlette.applications import Starlette
 
 from apps.oauth.mcp_provider import GlitchTipOAuthProvider
@@ -73,6 +75,20 @@ mcp = MCPServer(
 )
 
 
+_READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+_WRITE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+
+
+def _tool(title: str, annotations: ToolAnnotations = _READ):
+    # Tools return JSON text; structured output would echo it as one string field.
+    return mcp.tool(title=title, annotations=annotations, structured_output=False)
+
+
 def build_http_app() -> Starlette:
     """Build the streamable-HTTP ASGI app for this server.
 
@@ -112,10 +128,6 @@ def _parse_datetime(value: str | None) -> datetime | None:
         )
 
 
-def _error(message: str) -> str:
-    return json.dumps({"error": message})
-
-
 def _get_user_id() -> int:
     """Extract user_id from the MCP auth context.
 
@@ -140,7 +152,7 @@ def _check_scopes(required_scopes: list[str]) -> int:
     return int(access_token.client_id)
 
 
-@mcp.tool()
+@_tool("List organizations")
 async def list_organizations() -> str:
     """List all organizations the authenticated user has access to."""
     try:
@@ -148,10 +160,10 @@ async def list_organizations() -> str:
         orgs = await data.get_organizations(user_id)
         return json.dumps([serializers.serialize_organization(o) for o in orgs])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List projects")
 async def list_projects(organization_slug: str) -> str:
     """List all projects in an organization."""
     try:
@@ -159,10 +171,10 @@ async def list_projects(organization_slug: str) -> str:
         projects = await data.get_projects(user_id, organization_slug)
         return json.dumps([serializers.serialize_project(p) for p in projects])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List issues")
 async def list_issues(
     organization_slug: str,
     project_slug: str | None = None,
@@ -200,7 +212,7 @@ async def list_issues(
     try:
         user_id = _check_scopes(["event:read", "event:write", "event:admin"])
         if limit < 1:
-            return _error("limit must be at least 1")
+            raise ToolError("limit must be at least 1")
         issues = await data.get_issues(
             user_id,
             organization_slug,
@@ -214,14 +226,14 @@ async def list_issues(
         )
         return json.dumps([serializers.serialize_issue(i) for i in issues])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
     except Http404:
-        return _error(f"Organization '{organization_slug}' not found")
+        raise ToolError(f"Organization '{organization_slug}' not found")
     except FieldError:
-        return _error(f"Invalid sort field: {sort}")
+        raise ToolError(f"Invalid sort field: {sort}")
 
 
-@mcp.tool()
+@_tool("Get issue")
 async def get_issue(issue_id: int | str, organization_slug: str | None = None) -> str:
     """Get details for a single issue by ID or short ID (e.g. "PROJECT-1A").
 
@@ -235,16 +247,16 @@ async def get_issue(issue_id: int | str, organization_slug: str | None = None) -
         user_id = _check_scopes(["event:read", "event:write", "event:admin"])
         resolved_id = await data.resolve_issue_id(user_id, issue_id, organization_slug)
         if resolved_id is None:
-            return _error("Issue not found")
+            raise ToolError("Issue not found")
         issue = await data.get_issue(user_id, resolved_id)
         if issue is None:
-            return _error("Issue not found")
+            raise ToolError("Issue not found")
         return json.dumps(serializers.serialize_issue(issue))
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Get latest event for an issue")
 async def get_latest_event(
     issue_id: int | str, organization_slug: str | None = None
 ) -> str:
@@ -265,16 +277,16 @@ async def get_latest_event(
         user_id = _check_scopes(["event:read", "event:write", "event:admin"])
         resolved_id = await data.resolve_issue_id(user_id, issue_id, organization_slug)
         if resolved_id is None:
-            return _error("Issue not found")
+            raise ToolError("Issue not found")
         event = await data.get_latest_event(user_id, resolved_id)
         if event is None:
-            return _error("No events found for this issue")
+            raise ToolError("No events found for this issue")
         return json.dumps(event_payload.serialize_event_lean(event))
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Get event")
 async def get_event(event_id: str, organization_slug: str | None = None) -> str:
     """Look up a specific event by its ID and return it with its parent issue.
 
@@ -303,16 +315,16 @@ async def get_event(event_id: str, organization_slug: str | None = None) -> str:
         user_id = _check_scopes(["event:read", "event:write", "event:admin"])
         event = await data.get_event(user_id, event_id, organization_slug)
         if event is None:
-            return _error("Event not found")
+            raise ToolError("Event not found")
         result = event_payload.serialize_event_lean(
             event, issue=serializers.serialize_issue(event.issue)
         )
         return json.dumps(result)
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Get event detail")
 async def get_event_detail(
     event_id: str,
     section: str,
@@ -360,16 +372,16 @@ async def get_event_detail(
         user_id = _check_scopes(["event:read", "event:write", "event:admin"])
         event = await data.get_event(user_id, event_id, organization_slug)
         if event is None:
-            return _error("Event not found")
+            raise ToolError("Event not found")
         result = event_payload.serialize_event_detail(
             event, section, frame=frame, offset=offset, limit=limit
         )
         return json.dumps(result)
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Update issue status", _WRITE)
 async def update_issue(
     issue_id: int | str,
     status: str,
@@ -396,12 +408,12 @@ async def update_issue(
         user_id = _check_scopes(["event:write", "event:admin"])
         valid_statuses = ("resolved", "unresolved", "ignored")
         if status not in valid_statuses:
-            return _error(
+            raise ToolError(
                 f"Invalid status: {status!r}. Must be one of: {', '.join(valid_statuses)}"
             )
         resolved_id = await data.resolve_issue_id(user_id, issue_id, organization_slug)
         if resolved_id is None:
-            return _error("Issue not found")
+            raise ToolError("Issue not found")
         issue = await data.update_issue(
             user_id,
             resolved_id,
@@ -410,13 +422,13 @@ async def update_issue(
             in_release=in_release,
         )
         if issue is None:
-            return _error("Issue not found")
+            raise ToolError("Issue not found")
         return json.dumps(serializers.serialize_issue(issue))
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List alert rules")
 async def list_alerts(
     organization_slug: str,
     project_slug: str | None = None,
@@ -434,10 +446,10 @@ async def list_alerts(
         )
         return json.dumps([serializers.serialize_alert(a) for a in alerts])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List uptime monitors")
 async def list_monitors(organization_slug: str) -> str:
     """List uptime monitors for an organization."""
     try:
@@ -445,10 +457,10 @@ async def list_monitors(organization_slug: str) -> str:
         monitors = await data.get_monitors(user_id, organization_slug)
         return json.dumps([serializers.serialize_monitor(m) for m in monitors])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List transaction groups")
 async def list_transaction_groups(
     organization_slug: str,
     project_id: int | None = None,
@@ -485,10 +497,10 @@ async def list_transaction_groups(
         )
         return json.dumps([serializers.serialize_transaction_group(g) for g in groups])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Get transaction group")
 async def get_transaction_group(organization_slug: str, group_id: int) -> str:
     """Get details for a single transaction group by ID.
 
@@ -503,13 +515,13 @@ async def get_transaction_group(organization_slug: str, group_id: int) -> str:
         user_id = _check_scopes(["event:read", "event:write", "event:admin"])
         group = await data.get_transaction_group(user_id, organization_slug, group_id)
         if group is None:
-            return _error("Transaction group not found")
+            raise ToolError("Transaction group not found")
         return json.dumps(serializers.serialize_transaction_group(group))
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List transaction spans")
 async def list_transaction_spans(
     organization_slug: str,
     group_id: int,
@@ -543,10 +555,10 @@ async def list_transaction_spans(
         )
         return json.dumps([serializers.serialize_span_group(s) for s in spans])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("List span groups")
 async def list_span_groups(
     organization_slug: str,
     project_id: int | None = None,
@@ -590,10 +602,10 @@ async def list_span_groups(
         )
         return json.dumps([serializers.serialize_span_group(s) for s in spans])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Detect N+1 queries")
 async def detect_n_plus_one(
     organization_slug: str,
     project_id: int | None = None,
@@ -641,10 +653,10 @@ async def detect_n_plus_one(
             [serializers.serialize_n_plus_one_pattern(p) for p in patterns]
         )
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
-@mcp.tool()
+@_tool("Get transaction trend")
 async def get_transaction_trend(
     organization_slug: str,
     group_id: int,
@@ -676,12 +688,12 @@ async def get_transaction_trend(
         )
         return json.dumps([serializers.serialize_transaction_trend(t) for t in trend])
     except ValueError as e:
-        return _error(str(e))
+        raise ToolError(str(e)) from e
 
 
 if django_settings.GLITCHTIP_ENABLE_LOGS:
 
-    @mcp.tool()
+    @_tool("List logs")
     async def list_logs(
         organization_slug: str,
         project_id: int | None = None,
@@ -736,9 +748,9 @@ if django_settings.GLITCHTIP_ENABLE_LOGS:
             )
             return json.dumps([serializers.serialize_log_event(log) for log in logs])
         except ValueError as e:
-            return _error(str(e))
+            raise ToolError(str(e)) from e
 
-    @mcp.tool()
+    @_tool("Get log")
     async def get_log(organization_slug: str, log_id: str) -> str:
         """Get a single log event by its ID.
 
@@ -753,7 +765,7 @@ if django_settings.GLITCHTIP_ENABLE_LOGS:
             user_id = _check_scopes(["event:read", "event:write", "event:admin"])
             log = await data.get_log(user_id, organization_slug, log_id)
             if log is None:
-                return _error("Log event not found")
+                raise ToolError("Log event not found")
             return json.dumps(serializers.serialize_log_event(log))
         except ValueError as e:
-            return _error(str(e))
+            raise ToolError(str(e)) from e

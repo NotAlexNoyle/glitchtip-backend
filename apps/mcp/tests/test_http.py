@@ -205,6 +205,42 @@ class MCPHttpIntegrationTest(TestCase):
             orgs = json.loads(content[0]["text"])
             self.assertIsInstance(orgs, list)
 
+    async def _rpc(self, method: str, params: dict | None = None) -> dict:
+        app = build_http_app()
+        async with _run_lifespan(app), _client(app) as client:
+            resp = await client.post(
+                "/mcp",
+                json=_jsonrpc(method, params),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": ACCEPT_HEADERS,
+                    "Authorization": f"Bearer {self.token}",
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        return (_parse_sse_response(resp.text) or resp.json())["result"]
+
+    async def test_tools_list_annotations(self):
+        """The Claude connector directory rejects tools without a title and hints."""
+        tools = (await self._rpc("tools/list"))["tools"]
+        for tool in tools:
+            with self.subTest(tool=tool["name"]):
+                self.assertTrue(tool.get("title"))
+                self.assertNotIn("outputSchema", tool)
+                writes = tool["name"] == "update_issue"
+                self.assertEqual(tool["annotations"]["readOnlyHint"], not writes)
+                self.assertEqual(
+                    tool["annotations"].get("destructiveHint", False), writes
+                )
+
+    async def test_tool_failure_sets_is_error(self):
+        result = await self._rpc(
+            "tools/call",
+            {"name": "get_issue", "arguments": {"issue_id": "not an id"}},
+        )
+        self.assertTrue(result["isError"])
+        self.assertIn("Not an issue id", result["content"][0]["text"])
+
     async def test_api_token_auth(self):
         """MCP endpoint should accept regular API tokens, not just OAuth tokens."""
 
