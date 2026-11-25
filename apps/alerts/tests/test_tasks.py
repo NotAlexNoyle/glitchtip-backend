@@ -21,6 +21,17 @@ from ..models import Notification
 from ..tasks import process_event_alerts
 
 
+def make_events(issue, **kwargs):
+    """Make events for issue, moving its last_seen forward as ingest does."""
+    baker.make(
+        "issue_events.IssueEvent",
+        issue=issue,
+        organization=issue.project.organization,
+        **kwargs,
+    )
+    IssueIndex.objects.filter(issue=issue).update(last_seen=timezone.now())
+
+
 class AlertTestCase(GlitchTipTransactionTestCase):
     def setUp(self):
         super().setUp()
@@ -200,27 +211,12 @@ class AlertTestCase(GlitchTipTransactionTestCase):
         # time 0: 4 events
         # time 5: 4 more events (8 total)
         # time 11: 4 more events (12 total)
-        baker.make(
-            "issue_events.IssueEvent",
-            issue=issue,
-            organization=issue.project.organization,
-            _quantity=4,
-        )
+        make_events(issue, _quantity=4)
         with freeze_time(self.now + timedelta(minutes=5)):
-            baker.make(
-                "issue_events.IssueEvent",
-                issue=issue,
-                organization=issue.project.organization,
-                _quantity=4,
-            )
+            make_events(issue, _quantity=4)
             process_event_alerts.call()
         with freeze_time(self.now + timedelta(minutes=11)):
-            baker.make(
-                "issue_events.IssueEvent",
-                issue=issue,
-                organization=issue.project.organization,
-                _quantity=4,
-            )
+            make_events(issue, _quantity=4)
             process_event_alerts.call()
 
         # Not sufficient rate of events to trigger alert.
@@ -228,14 +224,40 @@ class AlertTestCase(GlitchTipTransactionTestCase):
 
         # time 12: 4 more events (16 total, 12 in past 10 minutes)
         with freeze_time(self.now + timedelta(minutes=12)):
-            baker.make(
-                "issue_events.IssueEvent",
-                issue=issue,
-                organization=issue.project.organization,
-                _quantity=4,
-            )
+            make_events(issue, _quantity=4)
             process_event_alerts.call()
         self.assertEqual(Notification.objects.count(), 1)
+
+    def test_alert_window_ends_at_newest_event(self):
+        """However late a run is, it judges the events in the timespan that ends
+        at the issue's newest event."""
+        cases = [
+            # (event times, run time, quantity, alerts). Seconds after a run.
+            ([0.3], 60.8, 1, 1),  # Next run is 60.5 s after the event
+            ([0, 30], 150, 2, 1),  # Run is late
+            ([0, 90], 150, 2, 0),  # Events are further apart than the timespan
+        ]
+        for event_times, run_time, quantity, alerts in cases:
+            with self.subTest(event_times=event_times, run_time=run_time):
+                project = baker.make("projects.Project", organization=self.organization)
+                baker.make(
+                    "alerts.ProjectAlert",
+                    project=project,
+                    timespan_minutes=1,
+                    quantity=quantity,
+                )
+                issue = baker.make("issue_events.Issue", project=project)
+                with freeze_time(self.now):
+                    process_event_alerts.call()
+                for event_time in event_times:
+                    with freeze_time(self.now + timedelta(seconds=event_time)):
+                        make_events(issue)
+                with freeze_time(self.now + timedelta(seconds=run_time)):
+                    process_event_alerts.call()
+                self.assertEqual(
+                    Notification.objects.filter(project_alert__project=project).count(),
+                    alerts,
+                )
 
     def test_alert_one_event(self):
         """Use same logic to send alert for every new issue"""

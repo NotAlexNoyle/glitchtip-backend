@@ -229,7 +229,10 @@ class WebhookTestCase(GlitchTipTestCase):
         mock_constructor, mock_post = _mock_aiohttp_session()
         MockSession.side_effect = mock_constructor
 
-        project = baker.make("projects.Project")
+        issue = self.generate_issue_with_tags()
+        project = baker.make(
+            "projects.Project", organization=issue.project.organization
+        )
         alert = baker.make(
             "alerts.ProjectAlert",
             project=project,
@@ -243,7 +246,6 @@ class WebhookTestCase(GlitchTipTestCase):
             url="example.com",
             tags_to_add=["custom_tag"],
         )
-        issue = self.generate_issue_with_tags()
         issue.project = project
         issue.save()
 

@@ -1141,21 +1141,6 @@ async def process_issue_events(
 
     await update_issues(processing_events)
 
-    if settings.CACHE_IS_VALKEY:
-        # Add set of issue_ids for alerts to process later
-        # Lua script: atomically SADD + EXPIRE in a single round-trip
-        driver = caches["default"].get_raw_client()
-        issue_ids_bytes = [str(event.issue_id).encode() for event in processing_events]
-        await driver.eval(
-            "local added = redis.call('SADD', KEYS[1], unpack(ARGV))\n"
-            "if added > 0 then\n"
-            "  redis.call('EXPIRE', KEYS[1], 3600)\n"
-            "end\n"
-            "return added",
-            [ISSUE_IDS_KEY],
-            issue_ids_bytes,
-        )
-
     if issues_to_reopen:
         # issues_to_reopen holds (issue_id, organization_id) pairs.
         reopen_ids = [p[0] for p in issues_to_reopen]
@@ -1274,6 +1259,23 @@ async def process_issue_events(
                 ),
                 value_params=value_params,
             )
+
+    if settings.CACHE_IS_VALKEY:
+        # Add set of issue_ids for alerts to process later. Only after the
+        # events are written: an alert run that drains an id must find its
+        # events, or the issue is never looked at again.
+        # Lua script: atomically SADD + EXPIRE in a single round-trip
+        driver = caches["default"].get_raw_client()
+        issue_ids_bytes = [str(event.issue_id).encode() for event in processing_events]
+        await driver.eval(
+            "local added = redis.call('SADD', KEYS[1], unpack(ARGV))\n"
+            "if added > 0 then\n"
+            "  redis.call('EXPIRE', KEYS[1], 3600)\n"
+            "end\n"
+            "return added",
+            [ISSUE_IDS_KEY],
+            issue_ids_bytes,
+        )
 
     await update_tags(processing_events)
     await update_statistics(
