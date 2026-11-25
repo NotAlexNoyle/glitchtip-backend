@@ -179,7 +179,6 @@ class GlitchTipOAuthProvider(
             refresh_token,
             application_id=client.client_id,
             is_revoked=False,
-            user__is_active=True,
         )
         if rt is None:
             return None
@@ -198,7 +197,10 @@ class GlitchTipOAuthProvider(
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        old_rt = await _find_refresh_token(refresh_token.token, is_revoked=False)
+        # Not in load_refresh_token: /revoke loads through it too and must still work.
+        old_rt = await _find_refresh_token(
+            refresh_token.token, is_revoked=False, user__is_active=True
+        )
         if old_rt is None:
             from mcp.server.auth.provider import TokenError
 

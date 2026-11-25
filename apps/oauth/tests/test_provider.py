@@ -196,22 +196,6 @@ class OAuthProviderRefreshTokenTest(TestCase):
         result = await self.provider.load_refresh_token(self.info, plaintext)
         self.assertIsNone(result)
 
-    async def test_load_refresh_token_inactive_user(self):
-        await self.provider.register_client(self.info)
-        plaintext = "inactive-user-token"
-        self.user.is_active = False
-        await self.user.asave(update_fields=["is_active"])
-        await OAuthRefreshToken.objects.acreate(
-            token_prefix=_token_prefix(plaintext),
-            token_digest=_hash_token(plaintext),
-            application_id="test-client-id",
-            user_id=self.user.id,
-            access_token_digest=_hash_token("old-access"),
-            scopes="org:read",
-        )
-        result = await self.provider.load_refresh_token(self.info, plaintext)
-        self.assertIsNone(result)
-
     async def test_refresh_token_rotation(self):
         await self.provider.register_client(self.info)
 

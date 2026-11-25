@@ -17,7 +17,8 @@ from model_bakery import baker
 
 from apps.api_tokens.models import APIToken, generate_token
 from apps.mcp.server import build_http_app
-from apps.oauth.provider import _access_cache_key
+from apps.oauth.models import OAuthApplication, OAuthRefreshToken
+from apps.oauth.provider import _access_cache_key, _hash_token, _token_prefix
 from glitchtip.asgi import MCPDjangoDispatcher
 
 INITIALIZE_PARAMS = {
@@ -307,6 +308,63 @@ class MCPHttpIntegrationTest(TestCase):
                 )
             self.assertNotEqual(resp.status_code, 421)
             self.assertEqual(resp.status_code, 200)
+
+
+class OAuthInactiveUserTest(TestCase):
+    """A deactivated user's refresh token can be revoked but not exchanged."""
+
+    def setUp(self):
+        super().setUp()
+        self.user = baker.make("users.user", is_active=False)
+        OAuthApplication.objects.create(
+            client_id="test-client",
+            client_secret="test-secret",
+            client_id_issued_at=int(time.time()),
+            client_info={
+                "client_id": "test-client",
+                "client_secret": "test-secret",
+                "redirect_uris": ["http://localhost:3000/callback"],
+                "token_endpoint_auth_method": "client_secret_post",
+            },
+        )
+        self.access = _store_oauth_token(self.user)
+        self.refresh = generate_token()
+        self.rt = OAuthRefreshToken.objects.create(
+            token_prefix=_token_prefix(self.refresh),
+            token_digest=_hash_token(self.refresh),
+            application_id="test-client",
+            user=self.user,
+            access_token_digest=_hash_token(self.access),
+            scopes="org:read",
+            expires_at=int(time.time()) + 86400,
+        )
+
+    def tearDown(self):
+        cache.clear()
+        super().tearDown()
+
+    async def _post(self, path: str, data: dict):
+        app = build_http_app()
+        form = {"client_id": "test-client", "client_secret": "test-secret", **data}
+        async with _run_lifespan(app), _client(app) as client:
+            return await client.post(path, data=form)
+
+    async def test_revoke_refresh_token(self):
+        resp = await self._post(
+            "/revoke", {"token": self.refresh, "token_type_hint": "refresh_token"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        await self.rt.arefresh_from_db()
+        self.assertTrue(self.rt.is_revoked)
+        self.assertIsNone(await cache.aget(_access_cache_key(self.access)))
+
+    async def test_refresh_grant_refused(self):
+        resp = await self._post(
+            "/token", {"grant_type": "refresh_token", "refresh_token": self.refresh}
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"], "invalid_grant")
+        self.assertEqual(await OAuthRefreshToken.objects.acount(), 1)
 
 
 class MCPDjangoDispatcherRewriteTest(TestCase):
