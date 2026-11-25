@@ -7,6 +7,7 @@ from django.db.models.functions import Cast
 from django.tasks import task
 from django.utils import timezone
 
+from apps.issue_events.constants import EventStatus
 from apps.issue_events.models import Issue
 from glitchtip.partition_manager import UUID7Helper
 
@@ -19,6 +20,9 @@ local members = redis.call('SMEMBERS', KEYS[1])
 redis.call('DEL', KEYS[1])
 return members
 """
+
+# The ids drained from the set expire after an hour (see process_event.py)
+MAX_ALERT_LAG = timedelta(hours=1)
 
 
 class UUID7Floor(Func):
@@ -66,23 +70,32 @@ async def process_event_alerts():
     async for alert in project_alerts:
         timespan = timedelta(minutes=alert.timespan_minutes)
         organization_id = alert.project.organization_id
-        candidates = Issue.objects.filter(
-            project_id=alert.project_id, index__organization_id=organization_id
-        ).exclude(notification__project_alert=alert)
         if issue_ids:
-            candidates = candidates.filter(id__in=issue_ids)
+            # Issues seen longer ago (a stalled scheduler, events redriven from
+            # a dead-letter queue) are too late to alert on, and would pull the
+            # scan below back over every partition since.
+            seen_after = now - timespan - MAX_ALERT_LAG
         else:
             # Without the set of new issues, every run looks at issues seen
             # within the timespan, plus one run interval so an event seen just
             # before a late run is not skipped.
-            candidates = candidates.filter(
-                index__last_seen__gte=now
-                - timespan
-                - timedelta(seconds=settings.ALERT_NOTIFICATION_INTERVAL)
+            seen_after = (
+                now - timespan - timedelta(seconds=settings.ALERT_NOTIFICATION_INTERVAL)
             )
+        candidates = Issue.objects.filter(
+            project_id=alert.project_id,
+            index__organization_id=organization_id,
+            # Every status, so the (organization, status, last_seen) index
+            # can seek on last_seen
+            index__status__in=EventStatus.values,
+            index__last_seen__gte=seen_after,
+        ).exclude(notification__project_alert=alert)
+        if issue_ids:
+            candidates = candidates.filter(id__in=issue_ids)
         # The window ends at the issue's newest event (last_seen, the server
-        # receive time), not at the time of this run. However late the run is,
-        # it judges the same events, and only the ingest clock is compared.
+        # receive time), not at the time of this run, so a late run judges the
+        # same events as a punctual one would have, and only the ingest clock
+        # is compared. Events that arrive before the run move the window on.
         oldest = (await candidates.aaggregate(oldest=Min("index__last_seen")))["oldest"]
         if oldest is None:
             continue

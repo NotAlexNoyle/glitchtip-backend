@@ -259,6 +259,26 @@ class AlertTestCase(GlitchTipTransactionTestCase):
                     alerts,
                 )
 
+    def test_alert_window_is_per_issue(self):
+        """Each issue's window ends at its own newest event, not the oldest
+        candidate's."""
+        baker.make(
+            "alerts.ProjectAlert",
+            project=self.project,
+            timespan_minutes=1,
+            quantity=2,
+        )
+        quiet_issue, issue = baker.make(
+            "issue_events.Issue", project=self.project, _quantity=2
+        )
+        for event_issue, event_time in [(quiet_issue, 0), (issue, 10), (issue, 100)]:
+            with freeze_time(self.now + timedelta(seconds=event_time)):
+                make_events(event_issue)
+        # issue's window is [40, 100]: its event at 10 doesn't count
+        with freeze_time(self.now + timedelta(seconds=100.5)):
+            process_event_alerts.call()
+        self.assertEqual(Notification.objects.count(), 0)
+
     def test_alert_one_event(self):
         """Use same logic to send alert for every new issue"""
         baker.make(
