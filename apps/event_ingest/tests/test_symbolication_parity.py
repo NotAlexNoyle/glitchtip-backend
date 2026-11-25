@@ -566,6 +566,35 @@ class JavascriptBundleSelectionTests(SimpleTestCase):
         app, _, bundles = self.bundles(decoy_first=True)
         self.assertEqual(self.find(bundles), (app.file, app.sourcemap_file))
 
+    def test_url_match_beats_a_debug_id_found_by_file_name(self):
+        """c/index.js has no debug id, and a/index.js on the same page does.
+        A frame from c must not take a's debug id through the shared name."""
+        a = DebugSymbolBundle(
+            id=1,
+            debug_id=APP_DEBUG_ID,
+            file=File(id=10, name="index.js"),
+            sourcemap_file=File(id=11, name="index.js.map"),
+            data={"url": "~/a/index.js"},
+        )
+        c = DebugSymbolBundle(
+            id=2,
+            file=File(id=20, name="index.js"),
+            sourcemap_file=File(id=21, name="index.js.map"),
+            data={"url": "~/c/index.js"},
+        )
+        processor = JavascriptEventProcessor(None, None, [a, c])
+        frame = StackTraceFrame(
+            abs_path="https://example.com/c/index.js", lineno=1, colno=1
+        )
+        debug_id_map = {
+            "https://example.com/a/index.js": APP_DEBUG_ID,
+            "index.js": APP_DEBUG_ID,
+        }
+        self.assertEqual(
+            processor.find_source_files(frame, debug_id_map),
+            (c.file, c.sourcemap_file),
+        )
+
     def test_url_match_takes_the_newest_upload_with_a_map(self):
         """Repeat uploads of one URL: the newest bundle with a sourcemap
         wins, in either list order."""

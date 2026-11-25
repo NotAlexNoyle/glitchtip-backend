@@ -238,27 +238,37 @@ class JavascriptEventProcessor:
                     debug_id_map[filename] = str(image.debug_id)
         return debug_id_map
 
+    def bundle_with_debug_id(self, debug_id) -> DebugSymbolBundle | None:
+        """A debug id identifies the bundle exactly, wherever it falls in the
+        list. One uploaded without its sourcemap cannot be used, though."""
+        for debug_bundle in self.debug_bundles:
+            if (
+                debug_bundle.debug_id
+                and debug_bundle.sourcemap_file
+                and str(debug_id) == str(debug_bundle.debug_id)
+            ):
+                return debug_bundle
+        return None
+
     def find_source_files(self, frame, debug_id_map):
         abs_path = frame.abs_path or ""
         minified_filename = abs_path.split("/")[-1]
-        debug_id = debug_id_map.get(abs_path) or debug_id_map.get(minified_filename)
-        # A debug id identifies the bundle exactly: it wins over any file name
-        # match, wherever the bundles fall in the list. One uploaded without
-        # its sourcemap cannot be used, though, so then fall back to names.
-        if debug_id:
-            for debug_bundle in self.debug_bundles:
-                if (
-                    debug_bundle.debug_id
-                    and debug_bundle.sourcemap_file
-                    and str(debug_id) == str(debug_bundle.debug_id)
-                ):
-                    return debug_bundle.file, debug_bundle.sourcemap_file
+        # Exact matches first: the debug id named for this URL, then the file
+        # uploaded under it. A file name can stand for several files
+        # (a/index.js, b/index.js), so matches by name come last.
+        if (debug_id := debug_id_map.get(abs_path)) and (
+            bundle := self.bundle_with_debug_id(debug_id)
+        ):
+            return bundle.file, bundle.sourcemap_file
 
-        # Then the file uploaded under the frame's URL, as several files can
-        # share a name (a/index.js, b/index.js).
         for url in artifact_urls(abs_path):
             if bundle := self.bundles_by_url.get(url):
                 return bundle.file, bundle.sourcemap_file
+
+        if (debug_id := debug_id_map.get(minified_filename)) and (
+            bundle := self.bundle_with_debug_id(debug_id)
+        ):
+            return bundle.file, bundle.sourcemap_file
 
         # Fallback to matching by filename
         for debug_bundle in self.debug_bundles:
