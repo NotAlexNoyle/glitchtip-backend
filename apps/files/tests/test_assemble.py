@@ -267,6 +267,19 @@ class ArtifactBundleAssembleTests(GlitchTipTestCaseMixin, TestCase):
                 ],
                 {"4": None},
             ),
+            (
+                "a header that is not a valid URL is ignored",
+                [
+                    (
+                        "~/d.js",
+                        "minified_source",
+                        {"sourcemap": "http://[d.js.map"},
+                        "5",
+                    ),
+                    ("~/d.js.map", "source_map", {}, "5.map"),
+                ],
+                {"5": None},
+            ),
         ]
         for name, artifacts, expected in cases:
             with self.subTest(name):

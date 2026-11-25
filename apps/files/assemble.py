@@ -308,8 +308,12 @@ def assemble_artifacts(
                 sourcemap_file = maps_by_debug_id.get(debug_id)
             # The header is client-supplied JSON, so it need not be a string.
             if sourcemap_file is None and isinstance(header, str) and header:
-                sourcemap_file = maps_by_url.get(
-                    urljoin(urls[file.id], header)
+                try:
+                    resolved = urljoin(urls[file.id], header)
+                except ValueError:  # e.g. an unclosed "[" in the host
+                    resolved = None
+                sourcemap_file = (
+                    resolved and maps_by_url.get(resolved)
                 ) or maps_by_name.get(header)
 
         bundle = DebugSymbolBundle(
