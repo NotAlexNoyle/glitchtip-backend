@@ -78,10 +78,12 @@ class IssueAPITestCase(GlitchTestCase):
         self.assertEqual(data.get("count"), str(issue.count))
         self.assertEqual(data.get("userReportCount"), 1)
         self.assertEqual(data.get("numComments"), 3)
-        expected_permalink = (
-            f"{settings.GLITCHTIP_URL.geturl()}/{issue.project.slug}/issues/{issue.id}"
-        )
+        expected_permalink = f"{settings.GLITCHTIP_URL.geturl()}/{self.organization.slug}/issues/{issue.id}"
+        self.assertNotEqual(self.organization.slug, self.project.slug)
         self.assertEqual(data.get("permalink"), expected_permalink)
+
+        res = await self.async_client.get(self.list_url)
+        self.assertEqual(res.json()[0]["permalink"], expected_permalink)
 
     async def test_retrieve_with_first_release(self):
         release = await baker.amake(
