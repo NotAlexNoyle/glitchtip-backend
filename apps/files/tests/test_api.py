@@ -8,7 +8,6 @@ from hashlib import sha1
 from pathlib import Path
 from urllib.parse import urlparse
 
-from django.core.cache import cache
 from django.core.files.base import File as DjangoFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
@@ -19,7 +18,7 @@ from apps.sourcecode.models import DebugSymbolBundle
 from glitchtip.test_utils.test_case import GlitchTipTestCaseMixin
 
 from ..api import CHUNK_UPLOAD_BLOB_SIZE, MAX_COMPRESSED_CHUNK_SIZE
-from ..assemble import AssembleTask, ChunkFileState, _get_cache_key
+from ..assemble import AssembleTask, ChunkFileState, get_assemble_status
 from ..models import File, FileBlob
 
 
@@ -230,8 +229,8 @@ class ReleaseAssembleAPITests(GlitchTipTestCaseMixin, TestCase):
         )
         self.assertEqual(res.status_code, 200)
 
-        state, detail = cache.get(
-            _get_cache_key(AssembleTask.ARTIFACTS, self.organization.pk, checksum)
+        state, detail = get_assemble_status(
+            AssembleTask.ARTIFACTS, self.organization.pk, checksum
         )
         self.assertEqual(state, ChunkFileState.ERROR)
         self.assertIn("Failed to extract bundle", detail)

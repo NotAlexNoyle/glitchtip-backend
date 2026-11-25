@@ -5,8 +5,7 @@ from django.shortcuts import aget_object_or_404
 from ninja import Router, Status
 from ninja.errors import HttpError
 
-from apps.files.models import FileBlob
-from apps.files.tasks import assemble_artifacts_task
+from apps.files.api import respond_to_artifact_assemble
 from apps.organizations_ext.models import Organization
 from glitchtip.api.decorators import optional_slash
 from glitchtip.api.permissions import (
@@ -75,21 +74,6 @@ async def artifact_bundle_assemble(
     """Associate files with assembly bundle and optionally release"""
     organization = await aget_object_or_404(qs.only("id"))
 
-    existing_chunks = [
-        checksum
-        async for checksum in FileBlob.objects.filter(
-            checksum__in=payload.chunks
-        ).values_list("checksum", flat=True)
-    ]
-    missing_chunks = list(set(payload.chunks) - set(existing_chunks))
-
-    if missing_chunks:
-        return {"state": "not_found", "missingChunks": missing_chunks}
-
-    await assemble_artifacts_task.aenqueue(
-        organization.id,
-        payload.version,
-        payload.checksum,
-        payload.chunks,
+    return await respond_to_artifact_assemble(
+        organization.id, payload.version, payload.checksum, payload.chunks
     )
-    return {"state": "created", "missingChunks": []}
