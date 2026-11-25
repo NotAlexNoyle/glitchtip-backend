@@ -22,6 +22,7 @@ import hashlib
 import inspect
 import io
 import json
+import posixpath
 import sys
 import threading
 import uuid
@@ -391,25 +392,33 @@ def upload_artifact_bundle(
     # Fail here, not in a golden, if the upload did not create what a real
     # one would: one bundle per minified file, with its sourcemap attached
     # when one was uploaded alongside it.
-    map_names = {a["name"] for a in artifacts if a["type"] == "source_map"}
+    maps = {a["name"]: a["content"] for a in artifacts if a["type"] == "source_map"}
     for artifact in artifacts:
         if artifact["type"] != "minified_source":
             continue
         bundles = DebugSymbolBundle.objects.filter(
-            organization=organization, file__name=artifact["name"]
-        ).select_related("sourcemap_file", "release")
+            organization=organization,
+            data__url=f"~/{artifact['name']}",
+            file__blob__checksum=hashlib.sha1(artifact["content"]).hexdigest(),
+        ).select_related("sourcemap_file__blob", "release")
         debug_id = artifact.get("headers", {}).get("debug-id")
         if debug_id:
             bundles = bundles.filter(debug_id=debug_id)
         if release:
             bundles = bundles.filter(release__version=release)
         bundle = bundles.get()
-        expected_map = artifact.get("headers", {}).get("sourcemap") or artifact.get(
+        header = artifact.get("headers", {}).get("sourcemap") or artifact.get(
             "headers", {}
         ).get("Sourcemap")
-        if expected_map in map_names:
+        expected_map = header and posixpath.join(
+            posixpath.dirname(artifact["name"]), header
+        )
+        if expected_map in maps:
             assert bundle.sourcemap_file is not None, artifact["name"]
-            assert bundle.sourcemap_file.name == expected_map, artifact["name"]
+            assert (
+                bundle.sourcemap_file.blob.checksum
+                == hashlib.sha1(maps[expected_map]).hexdigest()
+            ), artifact["name"]
         else:
             assert bundle.sourcemap_file is None, artifact["name"]
 
