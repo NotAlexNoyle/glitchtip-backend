@@ -455,6 +455,74 @@ class JavascriptSymbolicationGoldenTests(SymbolicationGoldenTestCase):
         self.assertMatchesGolden("js_large_bundle", self.process([payload]))
 
 
+class SameNameSourcesTests(SymbolicationGoldenTestCase):
+    def test_each_frame_resolves_against_the_source_at_its_own_url(self):
+        """One release holds a/index.js and b/index.js, as a multi-entry
+        build emits. A frame from each must use its own source and map, with
+        or without debug ids."""
+        app_code, app_map = read_js("app.min.js")
+        widget_code, widget_map = read_js("widget.min.js")
+        a_url = "https://example.com/a/index.js"
+        b_url = "https://example.com/b/index.js"
+        for debug_ids in (False, True):
+            with self.subTest(debug_ids=debug_ids):
+                release = f"multi@{debug_ids}"
+                ids = {"a": str(uuid.uuid4()), "b": str(uuid.uuid4())}
+                artifacts = []
+                for entry, code, sourcemap in (
+                    ("a", app_code, app_map),
+                    ("b", widget_code, widget_map),
+                ):
+                    debug_id = {"debug-id": ids[entry]} if debug_ids else {}
+                    artifacts += [
+                        {
+                            "name": f"{entry}/index.js",
+                            "content": code,
+                            "type": "minified_source",
+                            "headers": {"sourcemap": "index.js.map", **debug_id},
+                        },
+                        {
+                            "name": f"{entry}/index.js.map",
+                            "content": sourcemap,
+                            "type": "source_map",
+                            "headers": debug_id,
+                        },
+                    ]
+                upload_artifact_bundle(
+                    self.organization, self.project, artifacts, release=release
+                )
+                extra = {"release": release}
+                if debug_ids:
+                    extra["debug_meta"] = {
+                        "images": [
+                            sourcemap_image(a_url, ids["a"]),
+                            sourcemap_image(b_url, ids["b"]),
+                        ]
+                    }
+                payload = js_event(
+                    f"js-same-name-{debug_ids}",
+                    [
+                        {
+                            "type": "Error",
+                            "value": "boom",
+                            "stacktrace": {
+                                "frames": [
+                                    js_frame(a_url, 1, 260),
+                                    js_frame(b_url, 1, 67),
+                                ]
+                            },
+                        }
+                    ],
+                    **extra,
+                )
+                [event] = self.process([payload])
+                frames = event.data["exception"]["values"][0]["stacktrace"]["frames"]
+                self.assertEqual(
+                    [frame["filename"] for frame in frames],
+                    ["../src/math.js", "../src/widget.js"],
+                )
+
+
 class JavascriptBundleSelectionTests(SimpleTestCase):
     """Which uploaded bundle a frame is matched to, at the processor level.
 
@@ -497,6 +565,35 @@ class JavascriptBundleSelectionTests(SimpleTestCase):
     def test_debug_id_match_beats_an_earlier_file_name_match(self):
         app, _, bundles = self.bundles(decoy_first=True)
         self.assertEqual(self.find(bundles), (app.file, app.sourcemap_file))
+
+    def test_url_match_takes_the_newest_upload_with_a_map(self):
+        """Repeat uploads of one URL: the newest bundle with a sourcemap
+        wins, in either list order."""
+
+        def bundle(id, with_map=True):
+            return DebugSymbolBundle(
+                id=id,
+                file=File(id=id * 10, name="index.js"),
+                sourcemap_file=File(id=id * 10 + 1, name="index.js.map")
+                if with_map
+                else None,
+                data={"url": "~/a/index.js"},
+            )
+
+        frame = StackTraceFrame(
+            abs_path="https://example.com/a/index.js", lineno=1, colno=1
+        )
+        old, new, newest_without_map = bundle(1), bundle(2), bundle(3, False)
+        for bundles in (
+            [old, new, newest_without_map],
+            [newest_without_map, new, old],
+        ):
+            with self.subTest(order=[b.id for b in bundles]):
+                processor = JavascriptEventProcessor(None, None, bundles)
+                self.assertEqual(
+                    processor.find_source_files(frame, {}),
+                    (new.file, new.sourcemap_file),
+                )
 
 
 def native_event(

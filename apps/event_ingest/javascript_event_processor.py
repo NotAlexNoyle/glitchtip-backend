@@ -2,6 +2,7 @@ import asyncio
 import copy
 import logging
 import re
+from functools import cached_property
 from os.path import splitext
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -63,6 +64,16 @@ def generate_module(src):
     return CLEAN_MODULE_RE.sub("", filename) or UNKNOWN_MODULE
 
 
+def artifact_urls(abs_path: str) -> tuple[str, ...]:
+    """The URLs an upload may have named a frame's file by: in full, or with
+    ``~`` standing for any scheme and host."""
+    try:
+        path = urlsplit(abs_path).path
+    except ValueError:
+        return (abs_path,)
+    return (abs_path, f"~{path}") if path else (abs_path,)
+
+
 class JavascriptEventProcessor:
     """
     Based partially on sentry/lang/javascript/processor.py
@@ -83,6 +94,19 @@ class JavascriptEventProcessor:
         # for one event. A new processor is created per event, so this never
         # outlives the event and needs no eviction or staleness handling.
         self._sourcemap_caches: dict[tuple[int, int], SourceMapCache | None] = {}
+
+    @cached_property
+    def bundles_by_url(self) -> dict[str, DebugSymbolBundle]:
+        """Usable bundles by the URL they were uploaded under. On a repeat
+        upload of one URL, the newest bundle wins."""
+        by_url: dict[str, DebugSymbolBundle] = {}
+        for bundle in self.debug_bundles:
+            url = bundle.data.get("url")
+            if url and bundle.sourcemap_file_id:
+                current = by_url.get(url)
+                if current is None or bundle.id > current.id:
+                    by_url[url] = bundle
+        return by_url
 
     def get_stacktrace_exceptions(self) -> list["EventException"]:
         data = self.data
@@ -207,13 +231,17 @@ class JavascriptEventProcessor:
         if self.data.debug_meta and self.data.debug_meta.images:
             for image in self.data.debug_meta.images:
                 if image.type == "sourcemap" and image.code_file:
+                    # Keyed by full URL too: a multi-entry build has a
+                    # different index.js behind each directory.
+                    debug_id_map[image.code_file] = str(image.debug_id)
                     filename = image.code_file.split("/")[-1]
                     debug_id_map[filename] = str(image.debug_id)
         return debug_id_map
 
     def find_source_files(self, frame, debug_id_map):
-        minified_filename = frame.abs_path.split("/")[-1] if frame.abs_path else ""
-        debug_id = debug_id_map.get(minified_filename)
+        abs_path = frame.abs_path or ""
+        minified_filename = abs_path.split("/")[-1]
+        debug_id = debug_id_map.get(abs_path) or debug_id_map.get(minified_filename)
         # A debug id identifies the bundle exactly: it wins over any file name
         # match, wherever the bundles fall in the list. One uploaded without
         # its sourcemap cannot be used, though, so then fall back to names.
@@ -225,6 +253,12 @@ class JavascriptEventProcessor:
                     and str(debug_id) == str(debug_bundle.debug_id)
                 ):
                     return debug_bundle.file, debug_bundle.sourcemap_file
+
+        # Then the file uploaded under the frame's URL, as several files can
+        # share a name (a/index.js, b/index.js).
+        for url in artifact_urls(abs_path):
+            if bundle := self.bundles_by_url.get(url):
+                return bundle.file, bundle.sourcemap_file
 
         # Fallback to matching by filename
         for debug_bundle in self.debug_bundles:

@@ -322,6 +322,9 @@ def assemble_artifacts(
             release=release,
             sourcemap_file=sourcemap_file,
             file=file,
+            # The full URL tells same-named files apart when an event is
+            # matched to its source; file.name is only the basename.
+            data={"url": urls[file.id]},
         )
         if debug_id is None:
             bundles_without_debug_id.append(bundle)
@@ -368,7 +371,7 @@ def assemble_artifacts(
             complete_bundles,
             update_conflicts=True,
             unique_fields=["organization", "debug_id"],
-            update_fields=["file", "sourcemap_file", "release"],
+            update_fields=["file", "sourcemap_file", "release", "data"],
         )
 
     if incomplete_bundles:
